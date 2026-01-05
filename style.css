@@ -240,3 +240,10 @@
   .sg-modal-body { grid-template-columns: 1fr; }
   .sg-left { border-right: none; border-bottom: 1px solid rgba(255,255,255,0.08); }
 }
+
+
+/* v0.4.0 module editor improvements */
+#sg_modulesJson {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  line-height: 1.35;
+}
