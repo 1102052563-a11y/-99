@@ -1,4 +1,4 @@
-/* StoryGuide v0.3.x styling */
+/* StoryGuide v0.3.5 styling */
 
 /* topbar button */
 .sg-topbar-btn { min-width: 34px; padding: 6px 8px; }
@@ -212,6 +212,8 @@
   align-items:center;
   gap: 8px;
   margin-bottom: 8px;
+  cursor: pointer;
+  user-select: none;
 }
 .sg-inline-badge{
   width: 22px;
@@ -225,7 +227,12 @@
 }
 .sg-inline-title{ font-weight: 800; }
 .sg-inline-sub{ opacity: .72; font-size: .92rem; }
+.sg-inline-chevron{ margin-left: auto; opacity: .7; }
 .sg-inline-body{ font-size: 0.97rem; opacity: .96; }
+
+/* collapsed state */
+.sg-inline-box.collapsed .sg-inline-body{ display: none; }
+.sg-inline-box.collapsed .sg-inline-chevron{ transform: rotate(-90deg); }
 
 .sg-model-select{ min-width: 260px; }
 
@@ -233,8 +240,3 @@
   .sg-modal-body { grid-template-columns: 1fr; }
   .sg-left { border-right: none; border-bottom: 1px solid rgba(255,255,255,0.08); }
 }
-
-
-/* click to collapse */
-.sg-inline-head{ cursor: pointer; user-select: none; }
-.sg-inline-box.sg-collapsed .sg-inline-body{ display: none; }

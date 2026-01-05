@@ -2,13 +2,19 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.3.4
+ * v0.3.5
  *
- * 重点改动（参考“数据库独立API”方式，降低连不上/跨域问题）：
- * - custom provider 不再优先浏览器直连第三方；优先走 SillyTavern 后端代理：
- *   - POST /api/backends/chat-completions/status  获取状态/模型列表
- *   - POST /api/backends/chat-completions/generate 进行生成
- * - 若酒馆版本不支持上述接口（404），才回退到浏览器直连（可能 CORS）
+ * 修复“变量更新后覆盖导致分析框消失”：
+ * - 将每条消息的分析框内容缓存到 inlineCache（按 mesid/索引）
+ * - MutationObserver 监听聊天 DOM 变化（包括变量更新触发的重渲染）
+ * - 发现分析框丢失时自动补贴回去，并保持折叠状态
+ *
+ * 新增：
+ * - 分析框标题栏可点击折叠/展开（状态会写入缓存，重渲染也不丢）
+ *
+ * 独立 API（custom）稳定性：
+ * - 优先走酒馆后端代理 /api/backends/chat-completions/status & /generate
+ * - 若不支持（404/405）才回退浏览器直连（可能 CORS）
  */
 
 const MODULE_NAME = 'storyguide';
@@ -16,37 +22,31 @@ const MODULE_NAME = 'storyguide';
 const DEFAULT_SETTINGS = Object.freeze({
   enabled: true,
 
-  // 输入截取
   maxMessages: 40,
   maxCharsPerMessage: 1600,
   includeUser: true,
   includeAssistant: true,
 
-  // 生成控制
   spoilerLevel: 'mild', // none | mild | full
   tipCount: 4,
   temperature: 0.4,
 
-  // 自动刷新（面板报告）
   autoRefresh: false,
   autoRefreshOn: 'received', // received | sent | both
   debounceMs: 1200,
 
-  // 自动追加到正文末尾
   autoAppendBox: true,
   appendMode: 'compact', // compact | standard
   appendDebounceMs: 700,
 
-  // provider
   provider: 'st', // st | custom
 
-  // custom API（建议填“API基础URL”，如 https://api.openai.com/v1 ）
+  // custom: 建议填 API基础URL，例如 https://api.openai.com/v1
   customEndpoint: '',
   customApiKey: '',
   customModel: 'gpt-4o-mini',
   customModelsCache: [],
 
-  // custom advanced (hidden in UI for now)
   customTopP: 0.95,
   customMaxTokens: 8192,
 });
@@ -61,15 +61,18 @@ let lastJsonText = '';
 let refreshTimer = null;
 let appendTimer = null;
 
-let inlineCache = null;      // { html, key, createdAt, collapsed }
-let inlineEnsureTimer = null;
+// ============== 关键：DOM 追加缓存 & 观察者（抗重渲染） ==============
+/**
+ * inlineCache: Map<mesKey, { htmlInner: string, collapsed: boolean, createdAt: number }>
+ * mesKey 优先用 DOM 的 mesid（如果拿不到则用 chatIndex）
+ */
+const inlineCache = new Map();
 let chatDomObserver = null;
-
-
+let bodyDomObserver = null;
+let reapplyTimer = null;
 
 // -------------------- ST request headers compatibility --------------------
 // 不同酒馆版本中 getRequestHeaders 位置可能不同；老版本可能没有该函数。
-// 这里做兼容：优先用内置方法，否则尝试从 meta / 全局变量提取 CSRF Token。
 function getCsrfTokenCompat() {
   const meta = document.querySelector('meta[name="csrf-token"], meta[name="csrf_token"], meta[name="csrfToken"]');
   if (meta && meta.content) return meta.content;
@@ -81,7 +84,7 @@ function getStRequestHeadersCompat() {
   const ctx = SillyTavern.getContext?.() ?? {};
   let h = {};
   try {
-    if (typeof SillyTavern.getRequestHeaders === 'function') h = getStRequestHeadersCompat();
+    if (typeof SillyTavern.getRequestHeaders === 'function') h = SillyTavern.getRequestHeaders();
     else if (typeof ctx.getRequestHeaders === 'function') h = ctx.getRequestHeaders();
     else if (typeof globalThis.getRequestHeaders === 'function') h = globalThis.getRequestHeaders();
   } catch { h = {}; }
@@ -96,7 +99,6 @@ function getStRequestHeadersCompat() {
   }
   return h;
 }
-
 
 // -------------------- utils --------------------
 
@@ -173,7 +175,7 @@ function showPane(name) {
   $(`#sg_pane_${name}`).addClass('active');
 }
 
-// -------------------- prompt (database-like sections) --------------------
+// -------------------- prompt --------------------
 
 function spoilerPolicyText(level) {
   switch (level) {
@@ -266,9 +268,7 @@ function buildSnapshot() {
           (first ? `- 开场白：${stripHtml(first)}\n` : '');
       }
     }
-  } catch (e) {
-    console.warn('[StoryGuide] character read failed:', e);
-  }
+  } catch (e) { console.warn('[StoryGuide] character read failed:', e); }
 
   const canon = stripHtml(getChatMetaValue(META_KEYS.canon));
   const world = stripHtml(getChatMetaValue(META_KEYS.world));
@@ -324,7 +324,6 @@ async function callViaSillyTavern(messages, schema, temperature) {
   }
   throw new Error('未找到可用的生成函数（generateRaw/generateQuietPrompt）。');
 }
-
 async function fallbackAskJson(messages, temperature) {
   const ctx = SillyTavern.getContext();
   const retry = clone(messages);
@@ -334,29 +333,22 @@ async function fallbackAskJson(messages, temperature) {
   throw new Error('fallback 失败：缺少 generateRaw/generateQuietPrompt');
 }
 
-// -------------------- custom provider: prefer ST backend proxy --------------------
+// -------------------- custom provider (proxy-first) --------------------
 
 function normalizeBaseUrl(input) {
   let u = String(input || '').trim();
   if (!u) return '';
   u = u.replace(/\/+$/, '');
-
-  // if user pasted full completions url, trim it
   u = u.replace(/\/v1\/chat\/completions$/i, '');
   u = u.replace(/\/chat\/completions$/i, '');
   u = u.replace(/\/v1\/completions$/i, '');
   u = u.replace(/\/completions$/i, '');
-
   return u;
 }
-
 function deriveChatCompletionsUrl(base) {
-  // for direct browser fallback
   const u = normalizeBaseUrl(base);
   if (!u) return '';
   if (/\/v1$/.test(u)) return u + '/chat/completions';
-  if (/\/v1\/?$/.test(u)) return u.replace(/\/+$/, '') + '/chat/completions';
-  // if already contains /v1 somewhere, try append
   if (/\/v1\b/i.test(u)) return u.replace(/\/+$/, '') + '/chat/completions';
   return u + '/v1/chat/completions';
 }
@@ -371,15 +363,10 @@ async function callViaCustomBackendProxy(apiBaseUrl, apiKey, model, messages, te
     temperature: temperature ?? 0.7,
     top_p: topP ?? 0.95,
     stream: false,
+
+    // 下方字段是“宽松兼容”写法：新旧酒馆不认也无所谓
     chat_completion_source: 'custom',
-    group_names: [],
-    include_reasoning: false,
-    reasoning_effort: 'medium',
-    enable_web_search: false,
-    request_images: false,
-    custom_prompt_post_processing: 'strict',
     reverse_proxy: apiBaseUrl,
-    proxy_password: '',
     custom_url: apiBaseUrl,
     custom_include_headers: apiKey ? `Authorization: Bearer ${apiKey}` : '',
   };
@@ -421,11 +408,9 @@ async function callViaCustom(apiBaseUrl, apiKey, model, messages, temperature, m
   const base = normalizeBaseUrl(apiBaseUrl);
   if (!base) throw new Error('custom 模式需要填写 API基础URL');
 
-  // Prefer backend proxy; fallback if not supported
   try {
     return await callViaCustomBackendProxy(base, apiKey, model, messages, temperature, maxTokens, topP);
   } catch (e) {
-    // If 404/405 likely endpoint missing; fallback to browser direct
     const status = e?.status;
     if (status === 404 || status === 405) {
       console.warn('[StoryGuide] backend proxy unavailable; fallback to browser direct');
@@ -435,7 +420,7 @@ async function callViaCustom(apiBaseUrl, apiKey, model, messages, temperature, m
   }
 }
 
-// -------------------- report markdown --------------------
+// -------------------- report --------------------
 
 function toMarkdown(reportJson) {
   const w = reportJson?.world_summary ?? '';
@@ -516,7 +501,7 @@ async function runAnalysis() {
   }
 }
 
-// -------------------- inline append --------------------
+// -------------------- inline append content --------------------
 
 function buildInlineMarkdown(parsedJson) {
   const s = ensureSettings();
@@ -548,121 +533,149 @@ function buildInlineMarkdown(parsedJson) {
   return lines.join('\n');
 }
 
-function appendInlineBoxToLastAssistant(htmlInner, opts = {}) {
-  const collapsed = !!opts.collapsed;
+// -------------------- message locating & box creation --------------------
 
-  const nodes = Array.from(document.querySelectorAll('.mes'));
-  for (let i = nodes.length - 1; i >= 0; i--) {
-    const mes = nodes[i];
-    if (!mes) continue;
-    if (mes.classList.contains('mes_user')) continue;
+function getLastAssistantMessageRef() {
+  const ctx = SillyTavern.getContext();
+  const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+  for (let i = chat.length - 1; i >= 0; i--) {
+    const m = chat[i];
+    if (!m) continue;
+    if (m.is_user === true) continue;
+    // 避免把系统消息当作 AI 回复：如果有 is_system 标记则跳过
+    if (m.is_system === true) continue;
+    const mesid = (m.mesid ?? m.id ?? m.message_id ?? String(i));
+    return { chatIndex: i, mesKey: String(mesid) };
+  }
+  return null;
+}
 
-    const textEl = mes.querySelector('.mes_text');
-    if (!textEl) continue;
-    const existing = textEl.querySelector('.sg-inline-box');
-    if (existing) {
-      // 同步折叠状态（避免被其它流程改回去）
-      if (existing.dataset && !existing.dataset.sgKey) {
-        const k = mes.getAttribute('mesid') || mes.dataset?.mesid || mes.dataset?.messageId || mes.id || '';
-        if (k) existing.dataset.sgKey = k;
-      }
-      existing.classList.toggle('sg-collapsed', collapsed);
-      const sub = existing.querySelector('.sg-inline-sub');
-      if (sub) sub.textContent = collapsed ? '（已隐藏，点击展开）' : '（自动分析）';
-      return false;
+function findMesElementByKey(mesKey) {
+  if (!mesKey) return null;
+  const selectors = [
+    `.mes[mesid="${CSS.escape(String(mesKey))}"]`,
+    `.mes[data-mesid="${CSS.escape(String(mesKey))}"]`,
+    `.mes[data-mes-id="${CSS.escape(String(mesKey))}"]`,
+    `.mes[data-id="${CSS.escape(String(mesKey))}"]`,
+  ];
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (el) return el;
+  }
+  // fallback: last assistant message
+  const all = Array.from(document.querySelectorAll('.mes')).filter(x => x && !x.classList.contains('mes_user'));
+  return all.length ? all[all.length - 1] : null;
+}
+
+function setCollapsed(boxEl, collapsed) {
+  if (!boxEl) return;
+  boxEl.classList.toggle('collapsed', !!collapsed);
+}
+
+function attachToggleHandler(boxEl, mesKey) {
+  if (!boxEl) return;
+  const head = boxEl.querySelector('.sg-inline-head');
+  if (!head) return;
+
+  // 防止重复绑定
+  if (head.dataset.sgBound === '1') return;
+  head.dataset.sgBound = '1';
+
+  head.addEventListener('click', (e) => {
+    // 避免影响链接点击
+    if (e.target && (e.target.closest('a'))) return;
+
+    const cur = boxEl.classList.contains('collapsed');
+    const next = !cur;
+    setCollapsed(boxEl, next);
+
+    const cached = inlineCache.get(String(mesKey));
+    if (cached) {
+      cached.collapsed = next;
+      inlineCache.set(String(mesKey), cached);
     }
+  });
+}
 
-    const box = document.createElement('div');
-    box.className = 'sg-inline-box';
+function createInlineBoxElement(mesKey, htmlInner, collapsed) {
+  const box = document.createElement('div');
+  box.className = 'sg-inline-box';
+  box.dataset.sgMesKey = String(mesKey);
 
-    // 给方框打上“属于哪条消息”的标记，便于重渲染后补贴与折叠状态同步
-    const key = mes.getAttribute('mesid') || mes.dataset?.mesid || mes.dataset?.messageId || mes.id || '';
-    if (key) box.dataset.sgKey = key;
+  box.innerHTML = `
+    <div class="sg-inline-head" title="点击折叠/展开">
+      <span class="sg-inline-badge">📘</span>
+      <span class="sg-inline-title">剧情指导</span>
+      <span class="sg-inline-sub">（自动分析）</span>
+      <span class="sg-inline-chevron">▾</span>
+    </div>
+    <div class="sg-inline-body">${htmlInner}</div>
+  `.trim();
 
-    const subText = collapsed ? '（已隐藏，点击展开）' : '（自动分析）';
-    box.innerHTML = `
-      <div class="sg-inline-head" title="点击隐藏/展开">
-        <span class="sg-inline-badge">📘</span>
-        <span class="sg-inline-title">剧情指导</span>
-        <span class="sg-inline-sub">${subText}</span>
-      </div>
-      <div class="sg-inline-body">${htmlInner}</div>
-    `.trim();
+  setCollapsed(box, !!collapsed);
+  attachToggleHandler(box, mesKey);
+  return box;
+}
 
-    if (collapsed) box.classList.add('sg-collapsed');
+function ensureInlineBoxPresent(mesKey) {
+  const cached = inlineCache.get(String(mesKey));
+  if (!cached) return false;
 
-    textEl.appendChild(box);
+  const mesEl = findMesElementByKey(mesKey);
+  if (!mesEl) return false;
+
+  const textEl = mesEl.querySelector('.mes_text');
+  if (!textEl) return false;
+
+  // 如果已经有 box，补状态/补 handler
+  const existing = textEl.querySelector('.sg-inline-box');
+  if (existing) {
+    setCollapsed(existing, !!cached.collapsed);
+    attachToggleHandler(existing, mesKey);
     return true;
   }
-  return false;
+
+  const box = createInlineBoxElement(mesKey, cached.htmlInner, cached.collapsed);
+  textEl.appendChild(box);
+  return true;
 }
 
+// -------------------- reapply (anti-overwrite) --------------------
 
-function getChatContainerCompat() {
-  return document.querySelector('#chat') ||
-    document.querySelector('#chat_wrapper') ||
-    document.querySelector('#chat_messages') ||
-    document.querySelector('#chat_container') ||
-    document.querySelector('#messages') ||
-    document.querySelector('#chat') ||
-    document.body;
+function scheduleReapplyAll(reason = '') {
+  if (reapplyTimer) clearTimeout(reapplyTimer);
+  reapplyTimer = setTimeout(() => {
+    reapplyTimer = null;
+    reapplyAllInlineBoxes(reason);
+  }, 260);
 }
 
-function getLastAssistantKey() {
-  const nodes = Array.from(document.querySelectorAll('.mes'));
-  for (let i = nodes.length - 1; i >= 0; i--) {
-    const mes = nodes[i];
-    if (!mes) continue;
-    if (mes.classList.contains('mes_user')) continue;
-    return mes.getAttribute('mesid') || mes.dataset?.mesid || mes.dataset?.messageId || mes.id || String(i);
-  }
-  return '';
-}
-
-function ensureInlineBoxPersisted() {
+function reapplyAllInlineBoxes(reason = '') {
   const s = ensureSettings();
   if (!s.enabled || !s.autoAppendBox) return;
-  if (!inlineCache?.html) return;
 
-  const curKey = getLastAssistantKey();
-  if (inlineCache.key && curKey && inlineCache.key !== curKey) {
-    // 新消息已出现，避免把旧分析贴到新消息
+  // 逐条补贴
+  for (const [mesKey] of inlineCache.entries()) {
+    ensureInlineBoxPresent(mesKey);
+  }
+}
+
+// -------------------- inline append generate & cache --------------------
+
+async function runInlineAppendForLastMessage() {
+  const s = ensureSettings();
+  if (!s.enabled || !s.autoAppendBox) return;
+
+  const ref = getLastAssistantMessageRef();
+  if (!ref) return;
+
+  const { mesKey } = ref;
+
+  // 如果已经缓存过且 DOM 里也有，就不重复生成（但依然补贴一次）
+  if (inlineCache.has(String(mesKey))) {
+    ensureInlineBoxPresent(mesKey);
     return;
   }
-  if (!inlineCache.key && curKey) inlineCache.key = curKey;
-
-  // 如果被其它流程重渲染覆盖，重新追加
-  appendInlineBoxToLastAssistant(inlineCache.html, { collapsed: !!inlineCache.collapsed });
-}
-
-function scheduleEnsureInlineBox(delayMs = 250) {
-  if (inlineEnsureTimer) clearTimeout(inlineEnsureTimer);
-  inlineEnsureTimer = setTimeout(() => {
-    ensureInlineBoxPersisted();
-    inlineEnsureTimer = null;
-  }, delayMs);
-}
-
-function startChatDomObserver() {
-  if (chatDomObserver) return;
-  const target = getChatContainerCompat();
-  if (!target) return;
-
-  chatDomObserver = new MutationObserver(() => {
-    // 任何重渲染/变量更新导致的 DOM 变化，都触发一次“补贴”
-    scheduleEnsureInlineBox(220);
-  });
-
-  chatDomObserver.observe(target, {
-    childList: true,
-    subtree: true,
-  });
-}
-
-
-async function runInlineAppend() {
-  const s = ensureSettings();
-  if (!s.enabled || !s.autoAppendBox) return;
 
   try {
     const { snapshotText } = buildSnapshot();
@@ -687,20 +700,17 @@ async function runInlineAppend() {
     if (!parsed) return;
 
     const md = buildInlineMarkdown(parsed);
-    const innerHtml = renderMarkdownToHtml(md);
+    const htmlInner = renderMarkdownToHtml(md);
 
-    // 缓存本次分析结果，用于后续被“变量更新/重渲染”覆盖后自动补贴
-    inlineCache = { html: innerHtml, key: '', createdAt: Date.now(), collapsed: false };
+    inlineCache.set(String(mesKey), { htmlInner, collapsed: false, createdAt: Date.now() });
 
-    requestAnimationFrame(() => {
-      // 记录当前最后一条 AI 消息的 key，避免贴错
-      inlineCache.key = getLastAssistantKey() || inlineCache.key;
-      appendInlineBoxToLastAssistant(innerHtml, { collapsed: !!inlineCache?.collapsed });
-      // 强制补贴几次（避免后续流程覆盖）
-      scheduleEnsureInlineBox(800);
-      scheduleEnsureInlineBox(1800);
-      scheduleEnsureInlineBox(3500);
-    });
+    // 立即贴一次
+    requestAnimationFrame(() => { ensureInlineBoxPresent(mesKey); });
+
+    // 再补贴几次：对付“变量更新晚到”的二次覆盖
+    setTimeout(() => ensureInlineBoxPresent(mesKey), 800);
+    setTimeout(() => ensureInlineBoxPresent(mesKey), 1800);
+    setTimeout(() => ensureInlineBoxPresent(mesKey), 3500);
   } catch (e) {
     console.warn('[StoryGuide] inline append failed:', e);
   }
@@ -711,115 +721,12 @@ function scheduleInlineAppend() {
   const delay = clampInt(s.appendDebounceMs, 150, 5000, DEFAULT_SETTINGS.appendDebounceMs);
   if (appendTimer) clearTimeout(appendTimer);
   appendTimer = setTimeout(() => {
-    runInlineAppend().catch(() => void 0);
     appendTimer = null;
+    runInlineAppendForLastMessage().catch(() => void 0);
   }, delay);
 }
 
 // -------------------- models refresh (custom) --------------------
-
-async function refreshModels() {
-  const s = ensureSettings();
-  const raw = String($('#sg_customEndpoint').val() || s.customEndpoint || '').trim();
-  const apiBase = normalizeBaseUrl(raw);
-  if (!apiBase) { setStatus('请先填写 API基础URL 再刷新模型', 'warn'); return; }
-
-  setStatus('正在刷新模型列表…', 'warn');
-
-  // Prefer ST backend status endpoint
-  const statusUrl = '/api/backends/chat-completions/status';
-  const apiKey = String($('#sg_customApiKey').val() || s.customApiKey || '');
-
-  const body = {
-    reverse_proxy: apiBase,
-    proxy_password: '',
-    chat_completion_source: 'custom',
-    custom_url: apiBase,
-    custom_include_headers: apiKey ? `Authorization: Bearer ${apiKey}` : ''
-  };
-
-  try {
-    const headers = { ...getStRequestHeadersCompat(), 'Content-Type': 'application/json' };
-    const res = await fetch(statusUrl, { method: 'POST', headers, body: JSON.stringify(body) });
-
-    if (!res.ok) {
-      const txt = await res.text().catch(() => '');
-      const err = new Error(`状态检查失败: HTTP ${res.status} ${res.statusText}\n${txt}`);
-      err.status = res.status;
-      throw err;
-    }
-
-    const data = await res.json().catch(() => ({}));
-
-    let modelsList = [];
-    if (data && data.models && Array.isArray(data.models)) modelsList = data.models;
-    else if (data && data.data && Array.isArray(data.data)) modelsList = data.data;
-    else if (Array.isArray(data)) modelsList = data;
-
-    let ids = [];
-    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
-
-    ids = Array.from(new Set(ids)).sort((a,b) => String(a).localeCompare(String(b)));
-
-    if (!ids.length) {
-      setStatus('刷新成功，但未解析到模型列表（返回格式不兼容）', 'warn');
-      return;
-    }
-
-    s.customModelsCache = ids;
-    saveSettings();
-    fillModelSelect(ids, s.customModel);
-    setStatus(`已刷新模型：${ids.length} 个（走后端代理）`, 'ok');
-    return;
-  } catch (e) {
-    const status = e?.status;
-    if (status === 404 || status === 405) {
-      // fallback: direct browser fetch /models
-      console.warn('[StoryGuide] status endpoint unavailable; fallback to direct /models');
-    } else {
-      // other errors: still allow fallback attempt, but show warn after
-      console.warn('[StoryGuide] status check failed; fallback to direct /models', e);
-    }
-  }
-
-  // Fallback: direct browser request to /models
-  try {
-    const modelsUrl = (function deriveModelsUrl(base) {
-      const u = normalizeBaseUrl(base);
-      if (!u) return '';
-      if (/\/v1$/.test(u)) return u + '/models';
-      if (/\/v1\b/i.test(u)) return u.replace(/\/+$/, '') + '/models';
-      return u + '/v1/models';
-    })(apiBase);
-
-    const headers = { 'Content-Type': 'application/json' };
-    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
-    const res = await fetch(modelsUrl, { method: 'GET', headers });
-    if (!res.ok) {
-      const txt = await res.text().catch(() => '');
-      throw new Error(`直连 /models 失败: HTTP ${res.status} ${res.statusText}\n${txt}`);
-    }
-    const data = await res.json().catch(() => ({}));
-
-    let modelsList = [];
-    if (data && data.models && Array.isArray(data.models)) modelsList = data.models;
-    else if (data && data.data && Array.isArray(data.data)) modelsList = data.data;
-    else if (Array.isArray(data)) modelsList = data;
-
-    let ids = [];
-    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
-    ids = Array.from(new Set(ids)).sort((a,b) => String(a).localeCompare(String(b)));
-
-    if (!ids.length) { setStatus('直连刷新失败：未解析到模型列表', 'warn'); return; }
-
-    s.customModelsCache = ids;
-    saveSettings();
-    fillModelSelect(ids, s.customModel);
-    setStatus(`已刷新模型：${ids.length} 个（直连 fallback）`, 'ok');
-  } catch (e) {
-    setStatus(`刷新模型失败：${e?.message ?? e}`, 'err');
-  }
-}
 
 function fillModelSelect(modelIds, selected) {
   const $sel = $('#sg_modelSelect');
@@ -835,7 +742,105 @@ function fillModelSelect(modelIds, selected) {
   });
 }
 
-// -------------------- UI --------------------
+async function refreshModels() {
+  const s = ensureSettings();
+  const raw = String($('#sg_customEndpoint').val() || s.customEndpoint || '').trim();
+  const apiBase = normalizeBaseUrl(raw);
+  if (!apiBase) { setStatus('请先填写 API基础URL 再刷新模型', 'warn'); return; }
+
+  setStatus('正在刷新模型列表…', 'warn');
+
+  const apiKey = String($('#sg_customApiKey').val() || s.customApiKey || '');
+  const statusUrl = '/api/backends/chat-completions/status';
+
+  const body = {
+    reverse_proxy: apiBase,
+    chat_completion_source: 'custom',
+    custom_url: apiBase,
+    custom_include_headers: apiKey ? `Authorization: Bearer ${apiKey}` : ''
+  };
+
+  // prefer backend status
+  try {
+    const headers = { ...getStRequestHeadersCompat(), 'Content-Type': 'application/json' };
+    const res = await fetch(statusUrl, { method: 'POST', headers, body: JSON.stringify(body) });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      const err = new Error(`状态检查失败: HTTP ${res.status} ${res.statusText}\n${txt}`);
+      err.status = res.status;
+      throw err;
+    }
+
+    const data = await res.json().catch(() => ({}));
+
+    let modelsList = [];
+    if (Array.isArray(data?.models)) modelsList = data.models;
+    else if (Array.isArray(data?.data)) modelsList = data.data;
+    else if (Array.isArray(data)) modelsList = data;
+
+    let ids = [];
+    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
+
+    ids = Array.from(new Set(ids)).sort((a,b) => String(a).localeCompare(String(b)));
+
+    if (!ids.length) {
+      setStatus('刷新成功，但未解析到模型列表（返回格式不兼容）', 'warn');
+      return;
+    }
+
+    s.customModelsCache = ids;
+    saveSettings();
+    fillModelSelect(ids, s.customModel);
+    setStatus(`已刷新模型：${ids.length} 个（后端代理）`, 'ok');
+    return;
+  } catch (e) {
+    const status = e?.status;
+    if (!(status === 404 || status === 405)) console.warn('[StoryGuide] status check failed; fallback to direct /models', e);
+  }
+
+  // fallback direct
+  try {
+    const modelsUrl = (function (base) {
+      const u = normalizeBaseUrl(base);
+      if (!u) return '';
+      if (/\/v1$/.test(u)) return u + '/models';
+      if (/\/v1\b/i.test(u)) return u.replace(/\/+$/, '') + '/models';
+      return u + '/v1/models';
+    })(apiBase);
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+    const res = await fetch(modelsUrl, { method: 'GET', headers });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      throw new Error(`直连 /models 失败: HTTP ${res.status} ${res.statusText}\n${txt}`);
+    }
+    const data = await res.json().catch(() => ({}));
+
+    let modelsList = [];
+    if (Array.isArray(data?.models)) modelsList = data.models;
+    else if (Array.isArray(data?.data)) modelsList = data.data;
+    else if (Array.isArray(data)) modelsList = data;
+
+    let ids = [];
+    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
+
+    ids = Array.from(new Set(ids)).sort((a,b) => String(a).localeCompare(String(b)));
+
+    if (!ids.length) { setStatus('直连刷新失败：未解析到模型列表', 'warn'); return; }
+
+    s.customModelsCache = ids;
+    saveSettings();
+    fillModelSelect(ids, s.customModel);
+    setStatus(`已刷新模型：${ids.length} 个（直连 fallback）`, 'ok');
+  } catch (e) {
+    setStatus(`刷新模型失败：${e?.message ?? e}`, 'err');
+  }
+}
+
+// -------------------- UI (modal) --------------------
 
 function findTopbarContainer() {
   const extBtn =
@@ -960,6 +965,7 @@ function buildModalHtml() {
                 <option value="compact">简洁</option>
                 <option value="standard">标准</option>
               </select>
+              <span class="sg-hint">（点击框标题可折叠）</span>
             </div>
 
             <div id="sg_custom_block" class="sg-card sg-subcard" style="display:none;">
@@ -968,7 +974,7 @@ function buildModalHtml() {
               <div class="sg-field">
                 <label>API基础URL（例如 https://api.openai.com/v1 ）</label>
                 <input id="sg_customEndpoint" type="text" placeholder="https://xxx.com/v1">
-                <div class="sg-hint sg-warn">优先走酒馆后端代理接口（/api/backends/...），比浏览器直连更不容易跨域/连不上。</div>
+                <div class="sg-hint sg-warn">优先走酒馆后端代理接口（/api/backends/...），比浏览器直连更不容易被跨域/覆盖流程干掉。</div>
               </div>
 
               <div class="sg-grid2">
@@ -988,7 +994,6 @@ function buildModalHtml() {
                 <select id="sg_modelSelect" class="sg-model-select">
                   <option value="">（选择模型）</option>
                 </select>
-                <span class="sg-hint">（优先走后端 status；不支持则 fallback 直连 /models）</span>
               </div>
             </div>
 
@@ -1174,7 +1179,6 @@ function openModal() {
 }
 function closeModal() { $('#sg_modal_backdrop').hide(); }
 
-// minimal settings entry
 function injectMinimalSettingsPanel() {
   const $root = $('#extensions_settings');
   if (!$root.length) return;
@@ -1186,7 +1190,7 @@ function injectMinimalSettingsPanel() {
         <div class="sg-min-title">剧情指导 StoryGuide</div>
         <button class="menu_button sg-btn" id="sg_open_from_settings">打开面板</button>
       </div>
-      <div class="sg-min-hint">也可从顶栏 📘 打开。独立API优先走酒馆后端代理，减少连不上/跨域。</div>
+      <div class="sg-min-hint">自动分析框：会缓存 + 监听重渲染，尽量不被变量更新覆盖。</div>
     </div>
   `);
   $('#sg_open_from_settings').on('click', () => openModal());
@@ -1205,38 +1209,74 @@ function scheduleAutoRefresh() {
   }, delay);
 }
 
-// -------------------- events --------------------
+// -------------------- DOM observers (anti overwrite) --------------------
 
+function findChatContainer() {
+  const candidates = [
+    '#chat',
+    '#chat_history',
+    '#chatHistory',
+    '#chat_container',
+    '#chatContainer',
+    '#chat_wrapper',
+    '#chatwrapper',
+    '.chat',
+    '.chat_history',
+    '.chat-history',
+    '#sheldon_chat', // rare themes
+  ];
+  for (const sel of candidates) {
+    const el = document.querySelector(sel);
+    if (el) return el;
+  }
+  // fallback: parent of .mes elements
+  const mes = document.querySelector('.mes');
+  return mes ? mes.parentElement : null;
+}
 
-// -------------------- inline box toggle (click to hide/show) --------------------
-function setupInlineToggle() {
-  if (globalThis.__sg_inline_toggle_bound) return;
-  globalThis.__sg_inline_toggle_bound = true;
+function startObservers() {
+  // 1) 观察 chat container（优先）
+  const chatContainer = findChatContainer();
+  if (chatContainer) {
+    if (chatDomObserver) chatDomObserver.disconnect();
+    chatDomObserver = new MutationObserver(() => scheduleReapplyAll('chat'));
+    chatDomObserver.observe(chatContainer, { childList: true, subtree: true, characterData: true });
+  }
 
-  // 事件委托：即使 DOM 被重渲染/补贴，也依然生效
-  $(document).on('click', '.sg-inline-head', function () {
-    const $box = $(this).closest('.sg-inline-box');
-    if (!$box.length) return;
-
-    $box.toggleClass('sg-collapsed');
-    const collapsed = $box.hasClass('sg-collapsed');
-
-    const $sub = $box.find('.sg-inline-sub');
-    if ($sub.length) $sub.text(collapsed ? '（已隐藏，点击展开）' : '（自动分析）');
-
-    const key = $box[0]?.dataset?.sgKey || '';
-    if (inlineCache && key && inlineCache.key === key) {
-      inlineCache.collapsed = collapsed;
+  // 2) 再加一个 body 兜底（有些插件会替换 chatContainer 本体）
+  if (bodyDomObserver) bodyDomObserver.disconnect();
+  bodyDomObserver = new MutationObserver((muts) => {
+    // 过滤：只有看到 mes/mes_text 相关变化才补贴（减少开销）
+    for (const m of muts) {
+      const t = m.target;
+      if (t && t.nodeType === 1) {
+        const el = /** @type {Element} */ (t);
+        if (el.classList?.contains('mes') || el.classList?.contains('mes_text') || el.querySelector?.('.mes') || el.querySelector?.('.mes_text')) {
+          scheduleReapplyAll('body');
+          break;
+        }
+      }
     }
   });
+  bodyDomObserver.observe(document.body, { childList: true, subtree: true, characterData: false });
+
+  // 初次启动补贴一次
+  scheduleReapplyAll('start');
 }
+
+// -------------------- events --------------------
 
 function setupEventListeners() {
   const ctx = SillyTavern.getContext();
   const { eventSource, event_types } = ctx;
 
   eventSource.on(event_types.APP_READY, () => {
+    startObservers();
+
     eventSource.on(event_types.CHAT_CHANGED, () => {
+      // chat 切换：清理缓存（避免串台）
+      inlineCache.clear();
+      scheduleReapplyAll('chat_changed');
       if (document.getElementById('sg_modal_backdrop') && $('#sg_modal_backdrop').is(':visible')) {
         pullSettingsToUi();
         setStatus('已切换聊天：已同步本聊天字段', 'ok');
@@ -1245,13 +1285,11 @@ function setupEventListeners() {
 
     eventSource.on(event_types.MESSAGE_RECEIVED, () => {
       const s = ensureSettings();
-      // 新消息到达时先清空旧缓存，避免旧分析贴到新消息
-      inlineCache = null;
-      if (s.autoAppendBox) {
-        startChatDomObserver();
-        scheduleInlineAppend();
-      }
+      if (s.autoAppendBox) scheduleInlineAppend();
       if (s.autoRefresh && (s.autoRefreshOn === 'received' || s.autoRefreshOn === 'both')) scheduleAutoRefresh();
+
+      // 有些变量更新流程会紧跟在收到消息后：提前排队补贴
+      scheduleReapplyAll('msg_received');
     });
 
     eventSource.on(event_types.MESSAGE_SENT, () => {
@@ -1273,22 +1311,19 @@ function init() {
   eventSource.on(event_types.APP_READY, () => {
     createTopbarButton();
     injectMinimalSettingsPanel();
-    setupInlineToggle();
-  });
-
-  // 监听聊天DOM变化，用于在其它流程重渲染后“补贴”分析框
-  eventSource.on(event_types.APP_READY, () => {
-    startChatDomObserver();
   });
 
   globalThis.StoryGuide = {
     open: openModal,
     close: closeModal,
     runAnalysis,
-    runInlineAppend,
+    runInlineAppendForLastMessage,
+    reapplyAllInlineBoxes,
     buildSnapshot: () => buildSnapshot(),
     getLastReport: () => lastReport,
-    refreshModels
+    refreshModels,
+    _inlineCache: inlineCache
   };
 }
+
 init();
