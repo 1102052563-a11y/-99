@@ -2,7 +2,7 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.3.2
+ * v0.3.4
  *
  * 重点改动（参考“数据库独立API”方式，降低连不上/跨域问题）：
  * - custom provider 不再优先浏览器直连第三方；优先走 SillyTavern 后端代理：
@@ -60,6 +60,11 @@ let lastReport = null;
 let lastJsonText = '';
 let refreshTimer = null;
 let appendTimer = null;
+
+let inlineCache = null;      // { html, key, createdAt, collapsed }
+let inlineEnsureTimer = null;
+let chatDomObserver = null;
+
 
 
 // -------------------- ST request headers compatibility --------------------
@@ -543,7 +548,9 @@ function buildInlineMarkdown(parsedJson) {
   return lines.join('\n');
 }
 
-function appendInlineBoxToLastAssistant(htmlInner) {
+function appendInlineBoxToLastAssistant(htmlInner, opts = {}) {
+  const collapsed = !!opts.collapsed;
+
   const nodes = Array.from(document.querySelectorAll('.mes'));
   for (let i = nodes.length - 1; i >= 0; i--) {
     const mes = nodes[i];
@@ -552,24 +559,106 @@ function appendInlineBoxToLastAssistant(htmlInner) {
 
     const textEl = mes.querySelector('.mes_text');
     if (!textEl) continue;
-    if (textEl.querySelector('.sg-inline-box')) return false;
+    const existing = textEl.querySelector('.sg-inline-box');
+    if (existing) {
+      // 同步折叠状态（避免被其它流程改回去）
+      if (existing.dataset && !existing.dataset.sgKey) {
+        const k = mes.getAttribute('mesid') || mes.dataset?.mesid || mes.dataset?.messageId || mes.id || '';
+        if (k) existing.dataset.sgKey = k;
+      }
+      existing.classList.toggle('sg-collapsed', collapsed);
+      const sub = existing.querySelector('.sg-inline-sub');
+      if (sub) sub.textContent = collapsed ? '（已隐藏，点击展开）' : '（自动分析）';
+      return false;
+    }
 
     const box = document.createElement('div');
     box.className = 'sg-inline-box';
+
+    // 给方框打上“属于哪条消息”的标记，便于重渲染后补贴与折叠状态同步
+    const key = mes.getAttribute('mesid') || mes.dataset?.mesid || mes.dataset?.messageId || mes.id || '';
+    if (key) box.dataset.sgKey = key;
+
+    const subText = collapsed ? '（已隐藏，点击展开）' : '（自动分析）';
     box.innerHTML = `
-      <div class="sg-inline-head">
+      <div class="sg-inline-head" title="点击隐藏/展开">
         <span class="sg-inline-badge">📘</span>
         <span class="sg-inline-title">剧情指导</span>
-        <span class="sg-inline-sub">（自动分析）</span>
+        <span class="sg-inline-sub">${subText}</span>
       </div>
       <div class="sg-inline-body">${htmlInner}</div>
     `.trim();
+
+    if (collapsed) box.classList.add('sg-collapsed');
 
     textEl.appendChild(box);
     return true;
   }
   return false;
 }
+
+
+function getChatContainerCompat() {
+  return document.querySelector('#chat') ||
+    document.querySelector('#chat_wrapper') ||
+    document.querySelector('#chat_messages') ||
+    document.querySelector('#chat_container') ||
+    document.querySelector('#messages') ||
+    document.querySelector('#chat') ||
+    document.body;
+}
+
+function getLastAssistantKey() {
+  const nodes = Array.from(document.querySelectorAll('.mes'));
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const mes = nodes[i];
+    if (!mes) continue;
+    if (mes.classList.contains('mes_user')) continue;
+    return mes.getAttribute('mesid') || mes.dataset?.mesid || mes.dataset?.messageId || mes.id || String(i);
+  }
+  return '';
+}
+
+function ensureInlineBoxPersisted() {
+  const s = ensureSettings();
+  if (!s.enabled || !s.autoAppendBox) return;
+  if (!inlineCache?.html) return;
+
+  const curKey = getLastAssistantKey();
+  if (inlineCache.key && curKey && inlineCache.key !== curKey) {
+    // 新消息已出现，避免把旧分析贴到新消息
+    return;
+  }
+  if (!inlineCache.key && curKey) inlineCache.key = curKey;
+
+  // 如果被其它流程重渲染覆盖，重新追加
+  appendInlineBoxToLastAssistant(inlineCache.html, { collapsed: !!inlineCache.collapsed });
+}
+
+function scheduleEnsureInlineBox(delayMs = 250) {
+  if (inlineEnsureTimer) clearTimeout(inlineEnsureTimer);
+  inlineEnsureTimer = setTimeout(() => {
+    ensureInlineBoxPersisted();
+    inlineEnsureTimer = null;
+  }, delayMs);
+}
+
+function startChatDomObserver() {
+  if (chatDomObserver) return;
+  const target = getChatContainerCompat();
+  if (!target) return;
+
+  chatDomObserver = new MutationObserver(() => {
+    // 任何重渲染/变量更新导致的 DOM 变化，都触发一次“补贴”
+    scheduleEnsureInlineBox(220);
+  });
+
+  chatDomObserver.observe(target, {
+    childList: true,
+    subtree: true,
+  });
+}
+
 
 async function runInlineAppend() {
   const s = ensureSettings();
@@ -599,7 +688,19 @@ async function runInlineAppend() {
 
     const md = buildInlineMarkdown(parsed);
     const innerHtml = renderMarkdownToHtml(md);
-    requestAnimationFrame(() => { appendInlineBoxToLastAssistant(innerHtml); });
+
+    // 缓存本次分析结果，用于后续被“变量更新/重渲染”覆盖后自动补贴
+    inlineCache = { html: innerHtml, key: '', createdAt: Date.now(), collapsed: false };
+
+    requestAnimationFrame(() => {
+      // 记录当前最后一条 AI 消息的 key，避免贴错
+      inlineCache.key = getLastAssistantKey() || inlineCache.key;
+      appendInlineBoxToLastAssistant(innerHtml, { collapsed: !!inlineCache?.collapsed });
+      // 强制补贴几次（避免后续流程覆盖）
+      scheduleEnsureInlineBox(800);
+      scheduleEnsureInlineBox(1800);
+      scheduleEnsureInlineBox(3500);
+    });
   } catch (e) {
     console.warn('[StoryGuide] inline append failed:', e);
   }
@@ -1106,6 +1207,30 @@ function scheduleAutoRefresh() {
 
 // -------------------- events --------------------
 
+
+// -------------------- inline box toggle (click to hide/show) --------------------
+function setupInlineToggle() {
+  if (globalThis.__sg_inline_toggle_bound) return;
+  globalThis.__sg_inline_toggle_bound = true;
+
+  // 事件委托：即使 DOM 被重渲染/补贴，也依然生效
+  $(document).on('click', '.sg-inline-head', function () {
+    const $box = $(this).closest('.sg-inline-box');
+    if (!$box.length) return;
+
+    $box.toggleClass('sg-collapsed');
+    const collapsed = $box.hasClass('sg-collapsed');
+
+    const $sub = $box.find('.sg-inline-sub');
+    if ($sub.length) $sub.text(collapsed ? '（已隐藏，点击展开）' : '（自动分析）');
+
+    const key = $box[0]?.dataset?.sgKey || '';
+    if (inlineCache && key && inlineCache.key === key) {
+      inlineCache.collapsed = collapsed;
+    }
+  });
+}
+
 function setupEventListeners() {
   const ctx = SillyTavern.getContext();
   const { eventSource, event_types } = ctx;
@@ -1120,7 +1245,12 @@ function setupEventListeners() {
 
     eventSource.on(event_types.MESSAGE_RECEIVED, () => {
       const s = ensureSettings();
-      if (s.autoAppendBox) scheduleInlineAppend();
+      // 新消息到达时先清空旧缓存，避免旧分析贴到新消息
+      inlineCache = null;
+      if (s.autoAppendBox) {
+        startChatDomObserver();
+        scheduleInlineAppend();
+      }
       if (s.autoRefresh && (s.autoRefreshOn === 'received' || s.autoRefreshOn === 'both')) scheduleAutoRefresh();
     });
 
@@ -1143,6 +1273,12 @@ function init() {
   eventSource.on(event_types.APP_READY, () => {
     createTopbarButton();
     injectMinimalSettingsPanel();
+    setupInlineToggle();
+  });
+
+  // 监听聊天DOM变化，用于在其它流程重渲染后“补贴”分析框
+  eventSource.on(event_types.APP_READY, () => {
+    startChatDomObserver();
   });
 
   globalThis.StoryGuide = {
