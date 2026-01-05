@@ -2,7 +2,7 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.3.1
+ * v0.3.2
  *
  * 重点改动（参考“数据库独立API”方式，降低连不上/跨域问题）：
  * - custom provider 不再优先浏览器直连第三方；优先走 SillyTavern 后端代理：
@@ -60,6 +60,38 @@ let lastReport = null;
 let lastJsonText = '';
 let refreshTimer = null;
 let appendTimer = null;
+
+
+// -------------------- ST request headers compatibility --------------------
+// 不同酒馆版本中 getRequestHeaders 位置可能不同；老版本可能没有该函数。
+// 这里做兼容：优先用内置方法，否则尝试从 meta / 全局变量提取 CSRF Token。
+function getCsrfTokenCompat() {
+  const meta = document.querySelector('meta[name="csrf-token"], meta[name="csrf_token"], meta[name="csrfToken"]');
+  if (meta && meta.content) return meta.content;
+  const ctx = SillyTavern.getContext?.() ?? {};
+  return ctx.csrfToken || ctx.csrf_token || globalThis.csrf_token || globalThis.csrfToken || '';
+}
+
+function getStRequestHeadersCompat() {
+  const ctx = SillyTavern.getContext?.() ?? {};
+  let h = {};
+  try {
+    if (typeof SillyTavern.getRequestHeaders === 'function') h = getStRequestHeadersCompat();
+    else if (typeof ctx.getRequestHeaders === 'function') h = ctx.getRequestHeaders();
+    else if (typeof globalThis.getRequestHeaders === 'function') h = globalThis.getRequestHeaders();
+  } catch { h = {}; }
+
+  h = { ...(h || {}) };
+
+  const token = getCsrfTokenCompat();
+  if (token) {
+    if (!('X-CSRF-Token' in h) && !('X-CSRF-TOKEN' in h) && !('x-csrf-token' in h)) {
+      h['X-CSRF-Token'] = token;
+    }
+  }
+  return h;
+}
+
 
 // -------------------- utils --------------------
 
@@ -347,7 +379,7 @@ async function callViaCustomBackendProxy(apiBaseUrl, apiKey, model, messages, te
     custom_include_headers: apiKey ? `Authorization: Bearer ${apiKey}` : '',
   };
 
-  const headers = { ...SillyTavern.getRequestHeaders(), 'Content-Type': 'application/json' };
+  const headers = { ...getStRequestHeadersCompat(), 'Content-Type': 'application/json' };
   const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(requestBody) });
 
   if (!res.ok) {
@@ -606,7 +638,7 @@ async function refreshModels() {
   };
 
   try {
-    const headers = { ...SillyTavern.getRequestHeaders(), 'Content-Type': 'application/json' };
+    const headers = { ...getStRequestHeadersCompat(), 'Content-Type': 'application/json' };
     const res = await fetch(statusUrl, { method: 'POST', headers, body: JSON.stringify(body) });
 
     if (!res.ok) {
