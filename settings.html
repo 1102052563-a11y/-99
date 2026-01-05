@@ -1,0 +1,65 @@
+﻿<div class="cpc_settings">
+  <div class="inline-drawer">
+    <div class="inline-drawer-toggle inline-drawer-header">
+      <b>Canon Plot Cue（剧情指引）</b>
+      <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+    </div>
+    <div class="inline-drawer-content">
+      <label class="checkbox_label" for="cpc_enabled">
+        <input id="cpc_enabled" type="checkbox" class="checkbox">
+        启用剧情指引块
+      </label>
+
+      <div class="flex-container alignItemsCenter cpc_row">
+        <div class="cpc_label">原著/剧本名</div>
+        <input id="cpc_work_title" class="text_pole flex1" placeholder="例：你的原著名">
+      </div>
+
+      <div class="flex-container alignItemsCenter cpc_row">
+        <div class="cpc_label">原著主角</div>
+        <input id="cpc_canon_mc" class="text_pole flex1" placeholder="例：主角名字">
+      </div>
+
+      <div class="flex-container alignItemsCenter cpc_row">
+        <div class="cpc_label">关键NPC</div>
+        <input id="cpc_key_npcs" class="text_pole flex1" placeholder="逗号分隔">
+      </div>
+
+      <div class="cpc_row">
+        <div class="cpc_label2">原著时间线要点（可直接贴你的数据库概要）</div>
+        <textarea id="cpc_canon_notes" class="text_pole" rows="6"
+          placeholder="例：
+- 当前时间点前后发生的关键动作
+- 重要支线/伏笔"></textarea>
+      </div>
+
+      <hr class="cpc_hr">
+      <div class="cpc_label2">注入参数</div>
+
+      <div class="flex-container alignItemsCenter cpc_row">
+        <div class="cpc_label">注入位置</div>
+        <select id="cpc_position" class="text_pole widthUnset">
+          <option value="1">In-Chat（靠近末尾，推荐）</option>
+          <option value="0">After Story String</option>
+        </select>
+      </div>
+
+      <div class="flex-container alignItemsCenter cpc_row">
+        <div class="cpc_label">注入深度</div>
+        <input id="cpc_depth" type="number" min="0" max="99" class="text_pole widthUnset">
+        <div class="cpc_hint opacity50p">0=最后一条消息处插入；越大越靠前</div>
+      </div>
+
+      <label class="checkbox_label cpc_row" for="cpc_scan_wi" title="勾选则这段注入会参与世界书扫描（更费token）">
+        <input id="cpc_scan_wi" type="checkbox" class="checkbox">
+        允许世界书扫描本注入
+      </label>
+
+      <hr class="cpc_hr">
+      <div class="flex-container cpc_row gap1">
+        <button id="cpc_apply" class="menu_button">保存/应用</button>
+        <button id="cpc_disable" class="menu_button">禁用</button>
+      </div>
+    </div>
+  </div>
+</div>

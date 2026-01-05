@@ -1,0 +1,11 @@
+﻿{
+  "display_name": "Canon Plot Cue (剧情指引插件书)",
+  "loading_order": 250,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "ChatGPT (based on your DB)",
+  "version": "0.1.0",
+  "description": "在回复末尾追加原著剧情指引：原著此刻、原著将来、主角影响、行动提示。"
+}
