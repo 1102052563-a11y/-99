@@ -255,3 +255,7 @@
   border-top: 1px solid rgba(255,255,255,0.10);
   margin: 10px 0;
 }
+
+
+/* v0.5.2 worldbook info */
+#sg_worldbookInfo{opacity:0.9;}

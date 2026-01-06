@@ -84,7 +84,6 @@ const DEFAULT_SETTINGS = Object.freeze({
   worldbookMaxChars: 6000,
   worldbookWindowMessages: 18,
   worldbookJson: '',
-  worldbookFileName: '',
 
   // 模块自定义（JSON 字符串 + 解析备份）
   modulesJson: '',
@@ -100,7 +99,6 @@ const META_KEYS = Object.freeze({
 
 let lastReport = null;
 let lastJsonText = '';
-let lastWorldbookStats = null;
 let refreshTimer = null;
 let appendTimer = null;
 
@@ -363,62 +361,56 @@ function selectActiveWorldbookEntries(entries, recentText) {
   return picked;
 }
 
-function countTokensCompat(text) {
-  const t = String(text || '');
+function estimateTokens(text) {
+  const s = String(text || '');
+  // Try SillyTavern token counter if available
   try {
-    const ctx = SillyTavern.getContext?.() ?? {};
-    const tok = ctx.tokenizer || globalThis.tokenizer || SillyTavern.tokenizer;
-    if (tok && typeof tok.encode === 'function') {
-      const out = tok.encode(t);
-      const n = Array.isArray(out) ? out.length : (out?.length ?? 0);
-      if (Number.isFinite(n) && n > 0) return { count: n, method: 'tokenizer.encode' };
+    const ctx = SillyTavern.getContext?.();
+    if (ctx && typeof ctx.getTokenCount === 'function') {
+      const n = ctx.getTokenCount(s);
+      if (Number.isFinite(n)) return n;
     }
-    if (typeof ctx.countTokens === 'function') {
-      const n = ctx.countTokens(t);
-      if (Number.isFinite(n)) return { count: n, method: 'ctx.countTokens' };
-    }
-    if (typeof ctx.getTokenCount === 'function') {
-      const n = ctx.getTokenCount(t);
-      if (Number.isFinite(n)) return { count: n, method: 'ctx.getTokenCount' };
-    }
-    if (typeof globalThis.getTokenCount === 'function') {
-      const n = globalThis.getTokenCount(t);
-      if (Number.isFinite(n)) return { count: n, method: 'globalThis.getTokenCount' };
+    if (typeof SillyTavern.getTokenCount === 'function') {
+      const n = SillyTavern.getTokenCount(s);
+      if (Number.isFinite(n)) return n;
     }
   } catch { /* ignore */ }
 
-  // fallback：粗略估算（中英混排通常 1 token ≈ 3~5 字符）
-  return { count: Math.ceil(t.length / 4), method: 'estimate(chars/4)' };
+  // Fallback heuristic:
+  // - CJK chars ~ 1 token each
+  // - other chars ~ 1 token per 4 chars
+  const cjk = (s.match(/[\u4e00-\u9fff]/g) || []).length;
+  const rest = s.replace(/[\u4e00-\u9fff]/g, '').replace(/\s+/g, '');
+  const other = rest.length;
+  return cjk + Math.ceil(other / 4);
 }
 
-function computeWorldbookInjection(preview = false) {
+function computeWorldbookInjection() {
   const s = ensureSettings();
-  const enabled = preview ? true : !!s.worldbookEnabled;
-
   const raw = String(s.worldbookJson || '').trim();
-  const entries = raw ? parseWorldbookJson(raw) : [];
+  const enabled = !!s.worldbookEnabled;
 
-  const stats = {
-    enabled: !!s.worldbookEnabled,
+  const result = {
+    enabled,
+    importedEntries: 0,
+    selectedEntries: 0,
+    injectedEntries: 0,
+    injectedChars: 0,
+    injectedTokens: 0,
     mode: String(s.worldbookMode || 'active'),
-    fileName: String(s.worldbookFileName || ''),
-    totalEntries: entries.length,
-    usedEntries: 0,
-    usedChars: 0,
-    maxChars: clampInt(s.worldbookMaxChars, 500, 50000, 6000),
-    tokens: 0,
-    tokenMethod: '',
-    block: ''
+    text: ''
   };
 
-  if (!enabled) return stats;
-  if (!raw || !entries.length) return stats;
+  if (!enabled || !raw) return result;
+
+  const entries = parseWorldbookJson(raw);
+  result.importedEntries = entries.length;
+  if (!entries.length) return result;
 
   // recent window text for activation
   const ctx = SillyTavern.getContext();
   const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
   const win = clampInt(s.worldbookWindowMessages, 5, 80, 18);
-
   const pickedMsgs = [];
   for (let i = chat.length - 1; i >= 0 && pickedMsgs.length < win; i--) {
     const m = chat[i];
@@ -426,90 +418,47 @@ function computeWorldbookInjection(preview = false) {
     const t = stripHtml(m.mes ?? m.message ?? '');
     if (t) pickedMsgs.push(t);
   }
-  const recentText = pickedMsgs.reverse().join('
-');
+  const recentText = pickedMsgs.reverse().join('\n');
 
   let use = entries;
-  if (stats.mode === 'active') {
+  if (result.mode === 'active') {
     const act = selectActiveWorldbookEntries(entries, recentText);
     use = act.length ? act : [];
   }
-  if (!use.length) return stats;
+  result.selectedEntries = use.length;
 
+  if (!use.length) return result;
+
+  const maxChars = clampInt(s.worldbookMaxChars, 500, 50000, 6000);
   let acc = '';
   let used = 0;
+
   for (const e of use) {
-    const head = `- 【${e.title}】${(e.keys && e.keys.length) ? `（触发：${e.keys.slice(0, 6).join(' / ')}）` : ''}
-`;
-    const body = e.content.trim() + '
-';
-    const chunk = head + body + '
-';
-    if ((acc.length + chunk.length) > stats.maxChars) break;
+    const head = `- 【${e.title}】${(e.keys && e.keys.length) ? `（触发：${e.keys.slice(0,6).join(' / ')}）` : ''}\n`;
+    const body = e.content.trim() + '\n';
+    const chunk = head + body + '\n';
+    if ((acc.length + chunk.length) > maxChars) break;
     acc += chunk;
     used += 1;
   }
 
-  if (!acc) return stats;
+  result.injectedEntries = used;
+  result.injectedChars = acc.length;
+  result.injectedTokens = estimateTokens(acc);
+  result.text = acc;
 
-  const block = `
-【世界书/World Info（本次注入：${used}条 / 总计：${entries.length}条；模式：${stats.mode}）】
-${acc}
-`;
-
-  stats.usedEntries = used;
-  stats.block = block;
-  stats.usedChars = block.length;
-
-  const tc = countTokensCompat(block);
-  stats.tokens = tc.count;
-  stats.tokenMethod = tc.method;
-
-  return stats;
+  return result;
 }
+
+let lastWorldbookStats = null;
 
 function buildWorldbookBlock() {
-  const st = computeWorldbookInjection(false);
-  lastWorldbookStats = st;
-  return st.block || '';
+  const info = computeWorldbookInjection();
+  lastWorldbookStats = info;
 
-
-function updateWorldbookInfoUI() {
-  const el = $('#sg_worldbookInfo');
-  if (!el || !el.length) return;
-
-  const s = ensureSettings();
-  const raw = String(s.worldbookJson || '').trim();
-  if (!raw) {
-    el.text('（未导入世界书）');
-    return;
-  }
-
-  let total = 0;
-  try { total = parseWorldbookJson(raw).length; } catch { total = 0; }
-
-  const namePart = s.worldbookFileName ? `（${s.worldbookFileName}）` : '';
-
-  if (!s.worldbookEnabled) {
-    el.text(`已导入世界书：${total} 条${namePart}（未启用注入）`);
-    return;
-  }
-
-  // 预览“当前将注入多少”——与本次分析一致（同一套窗口/模式/截断规则）
-  const st = computeWorldbookInjection(true);
-
-  if (!st.usedEntries || !st.usedChars) {
-    if (String(s.worldbookMode || 'active') === 'active') {
-      el.text(`已导入世界书：${total} 条${namePart}｜本次注入：0 条（active 未触发 / 或被截断为空）`);
-    } else {
-      el.text(`已导入世界书：${total} 条${namePart}｜本次注入：0 条`);
-    }
-    return;
-  }
-
-  const approx = (st.tokenMethod || '').startsWith('estimate') ? '≈' : '';
-  el.text(`已导入世界书：${total} 条${namePart}｜本次注入：${st.usedEntries} 条｜字符：${st.usedChars}｜tokens：${approx}${st.tokens}`);
-}
+  if (!info.enabled) return '';
+  if (!info.text) return '';
+  return `\n【世界书/World Info（已导入：${info.importedEntries}条，本次注入：${info.injectedEntries}条，约${info.injectedTokens} tokens）】\n${info.text}\n`;
 }
 function getModules(mode /* panel|append */) {
   const s = ensureSettings();
@@ -1439,7 +1388,7 @@ function buildModalHtml() {
             <div class="sg-row sg-inline">
               <button class="menu_button sg-btn" id="sg_importWorldbook">导入世界书JSON</button>
               <button class="menu_button sg-btn" id="sg_clearWorldbook">清空世界书</button>
-              <button class="menu_button sg-btn" id="sg_saveWorldbook">保存世界书设置</button>
+              <button class="menu_button sg-btn" id="sg_saveWorldbookSettings">保存世界书设置</button>
             </div>
 
             <div class="sg-hint" id="sg_worldbookInfo">（未导入世界书）</div>
@@ -1621,10 +1570,9 @@ function ensureModal() {
 
       const s = ensureSettings();
       s.worldbookJson = txt;
-      s.worldbookFileName = String(file?.name || '');
       saveSettings();
 
-      updateWorldbookInfoUI();
+      updateWorldbookInfoLabel();
       setStatus('世界书已导入 ✅', entries.length ? 'ok' : 'warn');
     } catch (e) {
       setStatus(`导入世界书失败：${e?.message ?? e}`, 'err');
@@ -1634,35 +1582,33 @@ function ensureModal() {
   $('#sg_clearWorldbook').on('click', () => {
     const s = ensureSettings();
     s.worldbookJson = '';
-    s.worldbookFileName = '';
     saveSettings();
-    updateWorldbookInfoUI();
+    updateWorldbookInfoLabel();
     setStatus('已清空世界书', 'ok');
   });
 
-
-  $('#sg_saveWorldbook').on('click', () => {
+  $('#sg_saveWorldbookSettings').on('click', () => {
     try {
       pullUiToSettings();
       saveSettings();
-      updateWorldbookInfoUI();
+      updateWorldbookInfoLabel();
       setStatus('世界书设置已保存 ✅', 'ok');
     } catch (e) {
       setStatus(`保存世界书设置失败：${e?.message ?? e}`, 'err');
     }
   });
 
-  // worldbook：自动保存（避免关闭面板后重置）
-  const autoSaveWorldbook = () => {
-    try {
-      pullUiToSettings();
-      saveSettings();
-      updateWorldbookInfoUI();
-    } catch { /* ignore */ }
-  };
-  $('#sg_worldbookEnabled, #sg_worldbookMode').on('change', autoSaveWorldbook);
-  $('#sg_worldbookMaxChars, #sg_worldbookWindowMessages').on('change input', autoSaveWorldbook);
-
+  // 自动保存：世界书相关设置变更时立刻写入
+  $('#sg_worldbookEnabled, #sg_worldbookMode').on('change', () => {
+    pullUiToSettings();
+    saveSettings();
+    updateWorldbookInfoLabel();
+  });
+  $('#sg_worldbookMaxChars, #sg_worldbookWindowMessages').on('input', () => {
+    pullUiToSettings();
+    saveSettings();
+    updateWorldbookInfoLabel();
+  });
 
 // modules json actions
   $('#sg_validateModules').on('click', () => {
@@ -1742,11 +1688,46 @@ function pullSettingsToUi() {
   $('#sg_worldbookMode').val(String(s.worldbookMode || 'active'));
   $('#sg_worldbookMaxChars').val(s.worldbookMaxChars);
   $('#sg_worldbookWindowMessages').val(s.worldbookWindowMessages);
-  updateWorldbookInfoUI();
+
+  updateWorldbookInfoLabel();
+
+  try {
+    const count = parseWorldbookJson(String(s.worldbookJson || '')).length;
+    $('#sg_worldbookInfo').text(count ? `已导入世界书：${count} 条` : '（未导入世界书）');
+  } catch {
+    $('#sg_worldbookInfo').text('（未导入世界书）');
+  }
 
   $('#sg_custom_block').toggle(s.provider === 'custom');
   updateButtonsEnabled();
 }
+
+function updateWorldbookInfoLabel() {
+  const s = ensureSettings();
+  const $info = $('#sg_worldbookInfo');
+  if (!$info.length) return;
+
+  try {
+    if (!s.worldbookJson) {
+      $info.text('（未导入世界书）');
+      return;
+    }
+    const stats = computeWorldbookInjection();
+    const base = `已导入世界书：${stats.importedEntries} 条`;
+    if (!s.worldbookEnabled) {
+      $info.text(`${base}（未启用注入）`);
+      return;
+    }
+    if (stats.mode === 'active' && stats.selectedEntries === 0) {
+      $info.text(`${base}｜模式：active｜本次无条目命中（0 条）`);
+      return;
+    }
+    $info.text(`${base}｜模式：${stats.mode}｜本次注入：${stats.injectedEntries} 条｜字符：${stats.injectedChars}｜约 tokens：${stats.injectedTokens}`);
+  } catch {
+    $info.text('（世界书信息解析失败）');
+  }
+}
+
 
 function pullUiToSettings() {
   const s = ensureSettings();
@@ -1789,6 +1770,7 @@ function pullUiToSettings() {
 function openModal() {
   ensureModal();
   pullSettingsToUi();
+  updateWorldbookInfoLabel();
   setStatus('', '');
   $('#sg_modal_backdrop').show();
   showPane('md');
