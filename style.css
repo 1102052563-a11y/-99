@@ -596,3 +596,38 @@
 
 /* v0.6.4 custom max tokens field */
 .sg-field-full{width:100%;}
+
+
+
+/* v0.6.7 per-module card collapse */
+.sg-inline-body > ul > li .sg-mod-head{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.sg-inline-body > ul > li .sg-mod-head strong{
+  margin: 0 !important;
+  display: inline-block;
+}
+
+.sg-inline-body > ul > li .sg-mod-chevron{
+  margin-left: auto;
+  opacity: 0.75;
+  transition: transform 160ms ease, opacity 160ms ease;
+}
+
+.sg-inline-body > ul > li.sg-mod-collapsed .sg-mod-chevron{
+  transform: rotate(-90deg);
+  opacity: 0.9;
+}
+
+.sg-inline-body > ul > li .sg-mod-content{
+  margin-top: 6px;
+}
+
+.sg-inline-body > ul > li.sg-mod-collapsed .sg-mod-content{
+  display: none;
+}

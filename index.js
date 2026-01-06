@@ -2,7 +2,7 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.6.6
+ * v0.6.7
  *
  * 新增：输出模块自定义（更高自由度）
  * - 你可以自定义“输出模块列表”以及每个模块自己的提示词（prompt）
@@ -1038,6 +1038,85 @@ function attachToggleHandler(boxEl, mesKey) {
   });
 }
 
+
+function decorateModuleCards(boxEl, mesKey) {
+  const cached = inlineCache.get(String(mesKey));
+  if (!cached) return;
+  if (!cached.cardCollapsed) cached.cardCollapsed = {};
+
+  const body = boxEl.querySelector('.sg-inline-body');
+  if (!body) return;
+
+  const topLis = body.querySelectorAll(':scope > ul > li');
+  if (!topLis || !topLis.length) return;
+
+  topLis.forEach((li, idx) => {
+    // Already decorated
+    if (li.querySelector(':scope > .sg-mod-head')) {
+      // re-apply state
+      const key = li.dataset.sgCardKey || String(idx);
+      const isCollapsed = !!cached.cardCollapsed[key];
+      li.classList.toggle('sg-mod-collapsed', isCollapsed);
+      return;
+    }
+
+    const strong = li.querySelector(':scope > strong');
+    const titleText = (strong?.textContent || '').trim();
+    const key = titleText || String(idx);
+    li.dataset.sgCardKey = key;
+
+    // Build head
+    const head = document.createElement('div');
+    head.className = 'sg-mod-head';
+    head.title = '点击折叠/展开该模块';
+
+    const chevron = document.createElement('span');
+    chevron.className = 'sg-mod-chevron';
+    chevron.textContent = '▾';
+
+    if (strong) {
+      // Move strong into head (keep original node)
+      head.appendChild(strong);
+    } else {
+      const span = document.createElement('strong');
+      span.textContent = `模块 ${idx + 1}`;
+      head.appendChild(span);
+    }
+    head.appendChild(chevron);
+
+    // Build content wrapper and move remaining nodes
+    const content = document.createElement('div');
+    content.className = 'sg-mod-content';
+
+    const nodes = Array.from(li.childNodes);
+    nodes.forEach((node) => {
+      // skip strong (already moved)
+      if (strong && node === strong) return;
+      content.appendChild(node);
+    });
+
+    // Clear li and append
+    li.innerHTML = '';
+    li.appendChild(head);
+    li.appendChild(content);
+
+    const applyState = () => {
+      const isCollapsed = !!cached.cardCollapsed[key];
+      li.classList.toggle('sg-mod-collapsed', isCollapsed);
+    };
+
+    head.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const now = !li.classList.contains('sg-mod-collapsed');
+      cached.cardCollapsed[key] = now;
+      li.classList.toggle('sg-mod-collapsed', now);
+    });
+
+    applyState();
+  });
+}
+
 function createInlineBoxElement(mesKey, htmlInner, collapsed) {
   const box = document.createElement('div');
   box.className = 'sg-inline-box';
@@ -1075,11 +1154,13 @@ function ensureInlineBoxPresent(mesKey) {
     // 更新 body（有时候被覆盖成空壳）
     const body = existing.querySelector('.sg-inline-body');
     if (body && cached.htmlInner && body.innerHTML !== cached.htmlInner) body.innerHTML = cached.htmlInner;
+    decorateModuleCards(existing, mesKey);
     return true;
   }
 
   const box = createInlineBoxElement(mesKey, cached.htmlInner, cached.collapsed);
   textEl.appendChild(box);
+  decorateModuleCards(box, mesKey);
   return true;
 }
 
@@ -1157,7 +1238,7 @@ async function runInlineAppendForLastMessage(opts = {}) {
     const md = buildInlineMarkdownFromModules(parsed, modules, s.appendMode, !!s.inlineShowEmpty);
     const htmlInner = renderMarkdownToHtml(md);
 
-    inlineCache.set(String(mesKey), { htmlInner, collapsed: false, createdAt: Date.now() });
+    inlineCache.set(String(mesKey), { htmlInner, collapsed: false, cardCollapsed: {}, createdAt: Date.now() });
 
     requestAnimationFrame(() => { ensureInlineBoxPresent(mesKey); });
 
