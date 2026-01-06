@@ -592,3 +592,9 @@
 .sg-inline-body ol > li::before{
   content: none;
 }
+
+
+/* v0.6.4 custom max tokens field */
+#sg_customMaxTokens{
+  width: 100%;
+}
