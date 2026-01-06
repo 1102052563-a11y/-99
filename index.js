@@ -2,7 +2,7 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.5.2
+ * v0.5.3
  *
  * 新增：输出模块自定义（更高自由度）
  * - 你可以自定义“输出模块列表”以及每个模块自己的提示词（prompt）
@@ -401,11 +401,14 @@ function computeWorldbookInjection() {
     text: ''
   };
 
-  if (!enabled || !raw) return result;
+  if (!raw) return result;
 
   const entries = parseWorldbookJson(raw);
   result.importedEntries = entries.length;
   if (!entries.length) return result;
+
+  // 如果未启用注入：仅返回“导入数量”，不计算注入内容（UI 也能看到导入成功）
+  if (!enabled) return result;
 
   // recent window text for activation
   const ctx = SillyTavern.getContext();
