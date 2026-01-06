@@ -255,19 +255,3 @@
   border-top: 1px solid rgba(255,255,255,0.10);
   margin: 10px 0;
 }
-
-
-/* v0.5.2 inline reroll */
-.sg-inline-reroll{
-  margin-left: auto;
-  background: transparent;
-  border: 1px solid rgba(255,255,255,0.14);
-  border-radius: 8px;
-  padding: 2px 8px;
-  cursor: pointer;
-  color: inherit;
-  font-size: 12px;
-  line-height: 1.2;
-}
-.sg-inline-reroll:disabled{ opacity: 0.6; cursor: not-allowed; }
-.sg-label{ opacity:0.85; font-size: 12px; margin-right: 8px; }
