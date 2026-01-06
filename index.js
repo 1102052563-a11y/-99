@@ -2,7 +2,7 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.5.7
+ * v0.5.8
  *
  * 新增：输出模块自定义（更高自由度）
  * - 你可以自定义“输出模块列表”以及每个模块自己的提示词（prompt）
@@ -1319,11 +1319,62 @@ function findChatInputAnchor() {
   return ta;
 }
 
-function ensureChatActionButtons() {
-  if (document.getElementById('sg_chat_controls')) return;
+function positionChatActionButtons() {
+  const wrap = document.getElementById('sg_chat_controls');
+  if (!wrap) return;
 
-  const anchor = findChatInputAnchor();
-  if (!anchor) return;
+  const sendBtn =
+    document.querySelector('#send_but') ||
+    document.querySelector('#send_button') ||
+    document.querySelector('button#send') ||
+    document.querySelector('button[title*="Send"]') ||
+    document.querySelector('button[aria-label*="Send"]') ||
+    document.querySelector('.send_button') ||
+    document.querySelector('button[type="submit"]');
+
+  if (!sendBtn) return;
+
+  const rect = sendBtn.getBoundingClientRect();
+
+  // measure
+  const prevVis = wrap.style.visibility;
+  wrap.style.visibility = 'hidden';
+  wrap.style.left = '0px';
+  wrap.style.top = '0px';
+  const w = wrap.offsetWidth || 200;
+  const h = wrap.offsetHeight || 36;
+
+  // place to the left of send button, vertically centered
+  let left = rect.left - w - 10;
+  let top = rect.top + (rect.height - h) / 2;
+
+  // clamp to viewport
+  const pad = 8;
+  left = Math.max(pad, Math.min(left, window.innerWidth - w - pad));
+  top = Math.max(pad, Math.min(top, window.innerHeight - h - pad));
+
+  wrap.style.left = `${Math.round(left)}px`;
+  wrap.style.top = `${Math.round(top)}px`;
+  wrap.style.visibility = prevVis || 'visible';
+}
+
+let sgChatPosTimer = null;
+function schedulePositionChatButtons() {
+  if (sgChatPosTimer) return;
+  sgChatPosTimer = setTimeout(() => {
+    sgChatPosTimer = null;
+    try { positionChatActionButtons(); } catch {}
+  }, 60);
+}
+
+function ensureChatActionButtons() {
+  if (document.getElementById('sg_chat_controls')) {
+    schedulePositionChatButtons();
+    return;
+  }
+
+  const sendAnchor = findChatInputAnchor();
+  if (!sendAnchor) return;
 
   const wrap = document.createElement('div');
   wrap.id = 'sg_chat_controls';
@@ -1334,14 +1385,14 @@ function ensureChatActionButtons() {
   gen.id = 'sg_chat_generate';
   gen.className = 'menu_button sg-chat-btn';
   gen.title = '手动生成剧情指导分析框（不会自动生成）';
-  gen.textContent = '📘 生成';
+  gen.innerHTML = '📘 <span class="sg-chat-label">生成</span>';
 
   const reroll = document.createElement('button');
   reroll.type = 'button';
   reroll.id = 'sg_chat_reroll';
   reroll.className = 'menu_button sg-chat-btn';
   reroll.title = '重Roll：重新生成剧情指导分析框';
-  reroll.textContent = '🎲 重Roll';
+  reroll.innerHTML = '🎲 <span class="sg-chat-label">重Roll</span>';
 
   const setBusy = (busy) => {
     gen.disabled = busy;
@@ -1357,6 +1408,7 @@ function ensureChatActionButtons() {
       console.warn('[StoryGuide] generate failed', e);
     } finally {
       setBusy(false);
+      schedulePositionChatButtons();
     }
   });
 
@@ -1368,20 +1420,21 @@ function ensureChatActionButtons() {
       console.warn('[StoryGuide] reroll failed', e);
     } finally {
       setBusy(false);
+      schedulePositionChatButtons();
     }
   });
 
   wrap.appendChild(gen);
   wrap.appendChild(reroll);
 
-  // Insert near anchor
-  const parent = anchor.parentElement;
-  if (parent) {
-    // If anchor is inside a button group, insert before it
-    parent.insertBefore(wrap, anchor);
-  } else {
-    document.body.appendChild(wrap);
-  }
+  // Use fixed positioning to avoid overlapping with send button / different themes.
+  document.body.appendChild(wrap);
+
+  // Keep it positioned correctly
+  window.addEventListener('resize', schedulePositionChatButtons, { passive: true });
+  window.addEventListener('scroll', schedulePositionChatButtons, { passive: true });
+
+  schedulePositionChatButtons();
 }
 
 function buildModalHtml() {

@@ -395,3 +395,44 @@
   background: rgba(255,255,255,0.04);
   border-radius: 12px;
 }
+
+
+
+/* v0.5.8 chat buttons positioning & size */
+.sg-chat-controls{
+  position: fixed;
+  z-index: 9999;
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 14px;
+  background: rgba(0,0,0,0.45);
+  border: 1px solid rgba(255,255,255,0.12);
+  box-shadow: 0 10px 22px rgba(0,0,0,0.30);
+  backdrop-filter: blur(6px);
+}
+
+.sg-chat-controls .sg-chat-btn{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: 1;
+  border-radius: 12px;
+  white-space: nowrap;
+}
+
+.sg-chat-controls .sg-chat-label{
+  font-weight: 700;
+}
+
+.sg-chat-controls.is-busy{
+  opacity: 0.75;
+}
+
+@media (max-width: 560px){
+  .sg-chat-controls .sg-chat-label{ display:none; }
+  .sg-chat-controls .sg-chat-btn{ padding: 8px 10px; }
+}
