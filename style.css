@@ -282,3 +282,116 @@
 .sg-chat-controls.is-busy .sg-chat-btn{
   opacity: 0.65;
 }
+
+
+
+/* v0.5.7 inline box beautify */
+.sg-inline-box{
+  margin-top: 12px;
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 16px;
+  overflow: hidden;
+  background: rgba(0,0,0,0.18);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.22);
+}
+
+.sg-inline-head{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: rgba(255,255,255,0.06);
+  cursor: pointer;
+  user-select: none;
+}
+
+.sg-inline-badge{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.10);
+  border: 1px solid rgba(255,255,255,0.14);
+  font-size: 14px;
+}
+
+.sg-inline-title{
+  font-weight: 800;
+  font-size: 14px;
+  letter-spacing: 0.2px;
+}
+
+.sg-inline-sub{
+  opacity: 0.75;
+  font-size: 12px;
+  margin-left: 2px;
+}
+
+.sg-inline-chevron{
+  margin-left: auto;
+  opacity: 0.8;
+  transition: transform 160ms ease;
+}
+
+.sg-inline-box.is-collapsed .sg-inline-chevron{
+  transform: rotate(-90deg);
+}
+
+.sg-inline-body{
+  padding: 12px 12px 14px;
+  line-height: 1.55;
+  font-size: 13px;
+}
+
+.sg-inline-body p{
+  margin: 6px 0;
+}
+
+.sg-inline-body ul{
+  margin: 10px 0 0;
+  padding-left: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sg-inline-body li{
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.05);
+  position: relative;
+}
+
+.sg-inline-body li::before{
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 2px;
+  background: rgba(255,255,255,0.18);
+}
+
+.sg-inline-body li strong{
+  display: block;
+  margin: 0 0 6px;
+  font-size: 13px;
+  opacity: 0.95;
+}
+
+.sg-inline-body code, .sg-inline-body pre{
+  border-radius: 12px;
+}
+
+.sg-inline-body blockquote{
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-left: 3px solid rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.04);
+  border-radius: 12px;
+}

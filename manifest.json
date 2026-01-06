@@ -4,7 +4,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "your-name",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "homePage": "https://github.com/your-name/Extension-StoryGuide",
   "auto_update": true
 }

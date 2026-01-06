@@ -2,7 +2,7 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.5.6
+ * v0.5.7
  *
  * 新增：输出模块自定义（更高自由度）
  * - 你可以自定义“输出模块列表”以及每个模块自己的提示词（prompt）
@@ -1005,10 +1005,10 @@ function createInlineBoxElement(mesKey, htmlInner, collapsed) {
   box.dataset.sgMesKey = String(mesKey);
 
   box.innerHTML = `
-    <div class="sg-inline-head" title="点击折叠/展开">
+    <div class="sg-inline-head" title="点击折叠/展开（不会自动生成）">
       <span class="sg-inline-badge">📘</span>
       <span class="sg-inline-title">剧情指导</span>
-      <span class="sg-inline-sub">（自动分析）</span>
+      <span class="sg-inline-sub">（剧情分析）</span>
       <span class="sg-inline-chevron">▾</span>
     </div>
     <div class="sg-inline-body">${htmlInner}</div>
