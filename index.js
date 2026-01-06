@@ -2,7 +2,7 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.5.2
+ * v0.5.3
  *
  * 新增：输出模块自定义（更高自由度）
  * - 你可以自定义“输出模块列表”以及每个模块自己的提示词（prompt）
@@ -1818,10 +1818,32 @@ function closeModal() {
   $('#sg_modal_backdrop').hide();
 }
 
+let settingsPanelObserver = null;
+
+function findExtensionsSettingsRoot() {
+  const selectors = [
+    '#extensions_settings',
+    '#extensions-settings',
+    '#extensionsSettings',
+    '#extensions_settings_container',
+    '#extensionsSettingsContainer',
+    '.extensions_settings',
+    '.extensions-settings',
+  ];
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (el) return $(el);
+  }
+  // 有些版本会把扩展设置放在 settings 容器内
+  const fallback = document.querySelector('[id*="extensions"][id*="settings"]');
+  if (fallback) return $(fallback);
+  return $('#extensions_settings');
+}
+
 function injectMinimalSettingsPanel() {
-  const $root = $('#extensions_settings');
-  if (!$root.length) return;
-  if ($('#sg_settings_panel_min').length) return;
+  const $root = findExtensionsSettingsRoot();
+  if (!$root || !$root.length) return false;
+  if ($('#sg_settings_panel_min').length) return true;
 
   $root.append(`
     <div class="sg-panel-min" id="sg_settings_panel_min">
@@ -1833,7 +1855,23 @@ function injectMinimalSettingsPanel() {
     </div>
   `);
   $('#sg_open_from_settings').on('click', () => openModal());
+  return true;
 }
+
+// 有些酒馆版本在 APP_READY 时还没有渲染扩展设置 DOM，这里用 observer 兜底
+function ensureSettingsPanelInjected() {
+  if (injectMinimalSettingsPanel()) return;
+
+  if (settingsPanelObserver) return;
+  settingsPanelObserver = new MutationObserver(() => {
+    if (injectMinimalSettingsPanel()) {
+      try { settingsPanelObserver.disconnect(); } catch {}
+      settingsPanelObserver = null;
+    }
+  });
+  settingsPanelObserver.observe(document.body, { childList: true, subtree: true });
+}
+
 
 // auto refresh panel only when open
 function scheduleAutoRefresh() {
@@ -1941,7 +1979,7 @@ function init() {
 
   eventSource.on(event_types.APP_READY, () => {
     createTopbarButton();
-    injectMinimalSettingsPanel();
+    ensureSettingsPanelInjected();
   });
 
   globalThis.StoryGuide = {
