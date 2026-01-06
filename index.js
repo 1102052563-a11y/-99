@@ -2,7 +2,7 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.6.2
+ * v0.6.3
  *
  * 新增：输出模块自定义（更高自由度）
  * - 你可以自定义“输出模块列表”以及每个模块自己的提示词（prompt）
@@ -906,6 +906,12 @@ async function runAnalysis() {
 
 // -------------------- inline append (dynamic modules) --------------------
 
+function indentForListItem(md) {
+  const s = String(md || '');
+  if (!s) return '  （空）';
+  return s.split('\n').map(line => (line.length ? '  ' + line : '  ')).join('\n');
+}
+
 function buildInlineMarkdownFromModules(parsedJson, modules, mode, showEmpty) {
   // mode: compact|standard
   const lines = [];
@@ -919,21 +925,27 @@ function buildInlineMarkdownFromModules(parsedJson, modules, mode, showEmpty) {
     if (m.type === 'list') {
       const arr = Array.isArray(val) ? val : [];
       if (!arr.length) {
-        if (showEmpty) lines.push(`- **${title}**：（空）`);
+        if (showEmpty) lines.push(`- **${title}**\n  （空）`);
         continue;
       }
 
-      const limit = (mode === 'standard') ? Math.min(arr.length, 6) : Math.min(arr.length, 2);
+      const limit = (mode === 'standard') ? Math.min(arr.length, 8) : Math.min(arr.length, 3);
       const picked = arr.slice(0, limit);
-      lines.push(`- **${title}**：${picked.join(' / ')}`);
+      lines.push(`- **${title}**\n${indentForListItem(picked.map(x => `- ${x}`).join('\n'))}`);
     } else {
       const text = (val !== undefined && val !== null) ? String(val).trim() : '';
       if (!text) {
-        if (showEmpty) lines.push(`- **${title}**：（空）`);
+        if (showEmpty) lines.push(`- **${title}**\n  （空）`);
         continue;
       }
-      const short = (mode === 'standard') ? text : (text.length > 120 ? text.slice(0, 120) + '…' : text);
-      lines.push(`- **${title}**：${short}`);
+
+      if (mode === 'compact') {
+        const short = (text.length > 140 ? text.slice(0, 140) + '…' : text);
+        lines.push(`- **${title}**：${short}`);
+      } else {
+        // 标准模式：把内容缩进到 list item 内，避免内部列表/编号变成“同级卡片”
+        lines.push(`- **${title}**\n${indentForListItem(text)}`);
+      }
     }
   }
 

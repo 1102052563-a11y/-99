@@ -527,3 +527,68 @@
 
 /* v0.6.2 hide topbar icon button */
 #sg_topbar_btn{display:none !important;}
+
+
+
+/* v0.6.3 fix: keep nested lists inside same card */
+.sg-inline-body > ul{
+  margin: 10px 0 0;
+  padding-left: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sg-inline-body > ul > li{
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.05);
+  position: relative;
+}
+
+.sg-inline-body > ul > li::before{
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 2px;
+  background: rgba(255,255,255,0.18);
+}
+
+.sg-inline-body > ul > li strong{
+  display: block;
+  margin: 0 0 6px;
+  font-size: 13px;
+  opacity: 0.95;
+}
+
+/* nested lists: restore default bullets/spacing */
+.sg-inline-body ul ul{
+  list-style: disc;
+  display: block;
+  gap: 0;
+  padding-left: 22px;
+  margin: 8px 0;
+}
+
+.sg-inline-body ol{
+  padding-left: 22px;
+  margin: 8px 0;
+}
+
+.sg-inline-body ul ul > li,
+.sg-inline-body ol > li{
+  background: transparent;
+  border: none;
+  padding: 2px 0;
+  position: static;
+}
+
+.sg-inline-body ul ul > li::before,
+.sg-inline-body ol > li::before{
+  content: none;
+}
