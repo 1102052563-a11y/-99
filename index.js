@@ -2,7 +2,7 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.5.3
+ * v0.5.4
  *
  * 新增：输出模块自定义（更高自由度）
  * - 你可以自定义“输出模块列表”以及每个模块自己的提示词（prompt）
@@ -313,6 +313,23 @@ function parseWorldbookJson(rawText) {
   let data = null;
   try { data = JSON.parse(rawText); } catch { return []; }
 
+  // Some exports embed JSON as a string field (double-encoded)
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch { /* ignore */ }
+  }
+
+  function toArray(maybe) {
+    if (!maybe) return null;
+    if (Array.isArray(maybe)) return maybe;
+    if (typeof maybe === 'object') {
+      // common: entries as map {uid: entry}
+      const vals = Object.values(maybe);
+      if (vals.length && vals.every(v => typeof v === 'object')) return vals;
+    }
+    return null;
+  }
+
+  // try to locate entries container (array or map)
   const candidates = [
     data?.entries,
     data?.world_info?.entries,
@@ -320,29 +337,76 @@ function parseWorldbookJson(rawText) {
     data?.lorebook?.entries,
     data?.data?.entries,
     data?.items,
+    data?.world_info,
+    data?.worldInfo,
+    data?.lorebook,
     Array.isArray(data) ? data : null,
   ].filter(Boolean);
 
   let entries = null;
   for (const c of candidates) {
-    if (Array.isArray(c)) { entries = c; break; }
+    const arr = toArray(c);
+    if (arr && arr.length) { entries = arr; break; }
+    // sometimes nested: { entries: {..} }
+    if (c && typeof c === 'object') {
+      const inner = toArray(c.entries);
+      if (inner && inner.length) { entries = inner; break; }
+    }
   }
   if (!entries) return [];
+
+  function splitKeys(str) {
+    return String(str || '')
+      .split(/[\n,，;；\|]+/g)
+      .map(s => s.trim())
+      .filter(Boolean);
+  }
 
   const norm = [];
   for (const e of entries) {
     if (!e || typeof e !== 'object') continue;
 
-    const title = String(e.title ?? e.name ?? e.comment ?? e.uid ?? '').trim();
+    const title = String(e.title ?? e.name ?? e.comment ?? e.uid ?? e.id ?? '').trim();
 
-    const kRaw = e.keys ?? e.key ?? e.keywords ?? e.trigger ?? e.triggers ?? e.pattern ?? e.match ?? e.tags ?? [];
+    // keys can be stored in many variants in ST exports
+    const kRaw =
+      e.keys ??
+      e.key ??
+      e.keywords ??
+      e.trigger ??
+      e.triggers ??
+      e.pattern ??
+      e.match ??
+      e.tags ??
+      e.primary_key ??
+      e.primaryKey ??
+      e.keyprimary ??
+      e.keyPrimary ??
+      null;
+
+    const k2Raw =
+      e.keysecondary ??
+      e.keySecondary ??
+      e.secondary_keys ??
+      e.secondaryKeys ??
+      e.keys_secondary ??
+      e.keysSecondary ??
+      null;
+
     let keys = [];
     if (Array.isArray(kRaw)) keys = kRaw.map(x => String(x || '').trim()).filter(Boolean);
-    else if (typeof kRaw === 'string') keys = kRaw.split(/[,，;；\n]/).map(s => s.trim()).filter(Boolean);
+    else if (typeof kRaw === 'string') keys = splitKeys(kRaw);
 
-    const content = String(e.content ?? e.entry ?? e.text ?? e.description ?? e.desc ?? e.body ?? '').trim();
+    if (Array.isArray(k2Raw)) keys = keys.concat(k2Raw.map(x => String(x || '').trim()).filter(Boolean));
+    else if (typeof k2Raw === 'string') keys = keys.concat(splitKeys(k2Raw));
+
+    keys = Array.from(new Set(keys)).filter(Boolean);
+
+    const content = String(
+      e.content ?? e.entry ?? e.text ?? e.description ?? e.desc ?? e.body ?? e.value ?? e.prompt ?? ''
+    ).trim();
+
     if (!content) continue;
-
     norm.push({ title: title || (keys[0] ? `条目：${keys[0]}` : '条目'), keys, content });
   }
   return norm;
