@@ -84,8 +84,3 @@ v0.5.1 已改为：导入后存进 `settings.worldbookJson`，并在 buildSnapsh
 
 ## v0.7.3
 - 修复手机端面板顶部标题栏被挤出屏幕：移动端不再垂直居中、使用 100dvh，并让标题栏 sticky
-
-
-## v0.7.4
-- 新增“原著角色关系图谱”（Mermaid）模块：模型输出 Mermaid 代码即可渲染关系图（自动尝试加载 Mermaid CDN；失败则显示代码）
-- 支持复制图谱代码/显示代码
