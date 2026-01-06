@@ -2,7 +2,7 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.6.1
+ * v0.6.2
  *
  * 新增：输出模块自定义（更高自由度）
  * - 你可以自定义“输出模块列表”以及每个模块自己的提示词（prompt）
@@ -1295,6 +1295,12 @@ function createTopbarButton() {
   }
 }
 
+function removeTopbarButton() {
+  const btn = document.getElementById('sg_topbar_btn');
+  if (btn) btn.remove();
+}
+
+
 
 function findChatInputAnchor() {
   // Prefer send button as anchor
@@ -2079,6 +2085,7 @@ function startObservers() {
   });
   bodyDomObserver.observe(document.body, { childList: true, subtree: true, characterData: false });
 
+  removeTopbarButton();
   ensureChatActionButtons();
 
   scheduleReapplyAll('start');
@@ -2124,9 +2131,15 @@ function init() {
   const { eventSource, event_types } = ctx;
 
   eventSource.on(event_types.APP_READY, () => {
-    createTopbarButton();
+    // 移除顶部📘按钮（避免在“安装扩展”等页面占位）
+    removeTopbarButton();
     injectMinimalSettingsPanel();
     ensureChatActionButtons();
+
+    window.addEventListener('hashchange', () => {
+      try { removeTopbarButton(); } catch {}
+      try { ensureChatActionButtons(); } catch {}
+    }, { passive: true });
   });
 
   globalThis.StoryGuide = {
