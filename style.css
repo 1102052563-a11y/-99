@@ -125,6 +125,8 @@
 .sg-btn { padding: 8px 12px; border-radius: 12px; }
 .sg-btn-primary { padding: 8px 12px; border-radius: 12px; }
 
+
+.sg-divider{ height:1px; background: rgba(255,255,255,0.08); margin: 10px 0; border-radius: 999px; }
 .sg-hint { opacity: .72; font-size: .90rem; line-height: 1.35; }
 .sg-warn { color: var(--warning, #ffcc66); }
 

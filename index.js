@@ -80,6 +80,15 @@ const DEFAULT_SETTINGS = Object.freeze({
   // 额外可自定义提示词“骨架”
   customSystemPreamble: '',     // 附加在默认 system 之后
   customConstraints: '',        // 附加在默认 constraints 之后
+
+  // 预设/世界书
+  // worldBooks: 由导入的世界书组成的“库”（保存在扩展设置里，不会改动酒馆自身世界书）
+  worldBooks: {},               // { [name]: { name, importedAt, entries:[...] } }
+  useWorldBook: false,          // 是否注入世界书到分析输入
+  worldBookSelected: '',        // 选择的世界书名称
+  worldBookMode: 'active',      // active | all
+  worldBookMaxChars: 12000,     // 注入到分析输入的最大字符
+  worldBookScanMessages: 40,    // 用于“激活检测”的最近消息窗口
 });
 
 const META_KEYS = Object.freeze({
@@ -361,6 +370,161 @@ function buildPromptMessages(snapshotText, spoilerLevel, modules, mode /* panel|
   ];
 }
 
+
+// -------------------- worldbook (Lorebook) helpers --------------------
+
+function getWorldBooksMap() {
+  const s = ensureSettings();
+  if (!s.worldBooks || typeof s.worldBooks !== 'object') s.worldBooks = {};
+  return s.worldBooks;
+}
+
+function listWorldBookNames() {
+  return Object.keys(getWorldBooksMap()).sort((a, b) => a.localeCompare(b, 'zh-Hans-CN', { numeric: true, sensitivity: 'base' }));
+}
+
+function getSelectedWorldBook() {
+  const s = ensureSettings();
+  const name = String(s.worldBookSelected || '').trim();
+  if (!name) return null;
+  const map = getWorldBooksMap();
+  return map[name] || null;
+}
+
+function asArray(v) { return Array.isArray(v) ? v : []; }
+
+function normalizeWorldBookEntry(e, idx) {
+  const keys = asArray(e?.keys ?? e?.key ?? e?.keywords ?? e?.triggers).map(x => String(x ?? '').trim()).filter(Boolean);
+  const keys2 = asArray(e?.secondary_keys ?? e?.keysecondary ?? e?.keys_secondary ?? e?.secondary).map(x => String(x ?? '').trim()).filter(Boolean);
+  const comment = String(e?.comment ?? e?.title ?? e?.name ?? e?.annotation ?? '').trim() || `Entry ${idx + 1}`;
+  const content = String(e?.content ?? e?.text ?? e?.value ?? e?.entry ?? e?.prompt ?? '').trim();
+  const constant = Boolean(e?.constant ?? e?.alwaysActive ?? e?.always_active ?? e?.force ?? e?.forced ?? false);
+  const enabled = (e?.enabled === undefined) ? true : Boolean(e?.enabled);
+  const useRegex = Boolean(e?.use_regex ?? e?.regex ?? e?.useRegex ?? false);
+  const uid = e?.uid ?? e?.id ?? idx;
+  return { uid, comment, keys, keys2, content, constant, enabled, useRegex };
+}
+
+function extractEntriesFromWorldBook(rawObj) {
+  let entries = [];
+
+  if (Array.isArray(rawObj)) entries = rawObj;
+  else if (Array.isArray(rawObj?.entries)) entries = rawObj.entries;
+  else if (Array.isArray(rawObj?.world_info?.entries)) entries = rawObj.world_info.entries;
+  else if (Array.isArray(rawObj?.data?.entries)) entries = rawObj.data.entries;
+  else if (Array.isArray(rawObj?.character_book?.entries)) entries = rawObj.character_book.entries;
+  else if (rawObj?.character_book?.entries && typeof rawObj.character_book.entries === 'object') entries = Object.values(rawObj.character_book.entries);
+  else if (rawObj?.entries && typeof rawObj.entries === 'object') entries = Object.values(rawObj.entries);
+
+  return asArray(entries)
+    .map((e, i) => normalizeWorldBookEntry(e, i))
+    .filter(e => e.enabled && e.content);
+}
+
+function importWorldBookFromJsonText(jsonText, fallbackName) {
+  const raw = JSON.parse(String(jsonText || '{}'));
+  const suggested =
+    raw?.name ?? raw?.title ?? raw?.world ??
+    raw?.character_book?.name ?? raw?.character_book?.title ??
+    fallbackName ?? 'WorldBook';
+
+  const name = String(suggested || 'WorldBook').trim() || 'WorldBook';
+  const entries = extractEntriesFromWorldBook(raw);
+
+  return {
+    name,
+    importedAt: Date.now(),
+    entries,
+    entryCount: entries.length,
+  };
+}
+
+function buildRecentTextForWorldBook(chat, scanN, includeUser, includeAssistant) {
+  const picked = [];
+  for (let i = chat.length - 1; i >= 0 && picked.length < scanN; i--) {
+    const m = chat[i];
+    if (!m) continue;
+    const isUser = m.is_user === true;
+    if (isUser && !includeUser) continue;
+    if (!isUser && !includeAssistant) continue;
+    const t = stripHtml(m.mes ?? m.message ?? '');
+    if (!t) continue;
+    picked.push(t);
+  }
+  return picked.reverse().join('\n');
+}
+
+function entryMatchesText(entry, textLower) {
+  if (!entry) return false;
+  if (entry.constant) return true;
+
+  const allKeys = [...asArray(entry.keys), ...asArray(entry.keys2)].filter(Boolean);
+  if (!allKeys.length) return false;
+
+  for (const k of allKeys) {
+    const kk = String(k || '').trim();
+    if (!kk) continue;
+
+    if (entry.useRegex) {
+      try {
+        const re = new RegExp(kk, 'i');
+        if (re.test(textLower)) return true;
+      } catch { /* ignore bad regex */ }
+    }
+
+    if (textLower.includes(kk.toLowerCase())) return true;
+  }
+  return false;
+}
+
+function formatWorldBookEntries(entries, maxChars) {
+  let out = '';
+  for (const e of asArray(entries)) {
+    const keyPreview = asArray(e.keys).slice(0, 8).join('、');
+    const head = `【${e.comment || '条目'}】` + (keyPreview ? `（keys: ${keyPreview}${e.keys.length > 8 ? '…' : ''}）` : '');
+    out += head + '\n' + String(e.content || '').trim() + '\n\n';
+    if (out.length >= maxChars) {
+      out = out.slice(0, maxChars) + '\n…(截断)';
+      break;
+    }
+  }
+  return out.trim();
+}
+
+function buildWorldBookInjection(chat) {
+  const s = ensureSettings();
+  const enabled = !!s.useWorldBook;
+  if (!enabled) return { text: '', summary: { enabled: false } };
+
+  const book = getSelectedWorldBook();
+  if (!book) return { text: '', summary: { enabled: true, selected: false } };
+
+  const scanN = clampInt(s.worldBookScanMessages, 5, 200, s.maxMessages);
+  const maxChars = clampInt(s.worldBookMaxChars, 1000, 50000, 12000);
+  const mode = String(s.worldBookMode || 'active');
+
+  const recentText = buildRecentTextForWorldBook(chat, scanN, !!s.includeUser, !!s.includeAssistant);
+  const lower = recentText.toLowerCase();
+
+  const allEntries = asArray(book.entries);
+  const activeEntries = allEntries.filter(e => entryMatchesText(e, lower));
+  const includedEntries = mode === 'all' ? allEntries : activeEntries;
+
+  const text = formatWorldBookEntries(includedEntries, maxChars);
+  const summary = {
+    enabled: true,
+    selected: true,
+    name: book.name,
+    mode,
+    entryCount: allEntries.length,
+    activeCount: activeEntries.length,
+    includedCount: includedEntries.length,
+    maxChars,
+  };
+  return { text, summary };
+}
+
+
 // -------------------- snapshot --------------------
 
 function buildSnapshot() {
@@ -427,6 +591,9 @@ function buildSnapshot() {
     ``,
     world ? `【世界观/设定补充】\n${world}\n` : `【世界观/设定补充】（未提供）\n`,
     canon ? `【原著后续/大纲】\n${canon}\n` : `【原著后续/大纲】（未提供）\n`,
+    worldBookText
+      ? `【世界书（导入：${worldBookSummary?.name || ''}｜${worldBookSummary?.mode === 'all' ? '全量' : '激活'}｜${worldBookSummary?.includedCount ?? 0}/${worldBookSummary?.entryCount ?? 0}）】\n${worldBookText}\n`
+      : `【世界书】（未启用/未选择/无激活条目）\n`,
     `【聊天记录（最近${picked.length}条）】`,
     picked.length ? picked.join('\n\n') : '（空）'
   ].join('\n');
@@ -866,6 +1033,102 @@ function fillModelSelect(modelIds, selected) {
   });
 }
 
+// -------------------- preset import/export & worldbook UI helpers --------------------
+
+function downloadJson(filename, obj) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2500);
+}
+
+function buildPresetObject(includeApiKey) {
+  const s = ensureSettings();
+  const settings = clone(s);
+  if (!includeApiKey) settings.customApiKey = '';
+  return {
+    type: 'storyguide_preset',
+    version: 1,
+    createdAt: Date.now(),
+    settings,
+  };
+}
+
+function applyPresetObject(presetObj) {
+  const incoming = presetObj?.settings ?? presetObj;
+  if (!incoming || typeof incoming !== 'object') throw new Error('预设文件格式不正确：缺少 settings');
+
+  const s = ensureSettings();
+  // 只覆盖默认键，避免把奇怪字段写进来
+  for (const k of Object.keys(DEFAULT_SETTINGS)) {
+    if (Object.hasOwn(incoming, k)) s[k] = incoming[k];
+  }
+  // 兼容旧版：modulesJson 空则补默认
+  if (!s.modulesJson) s.modulesJson = JSON.stringify(DEFAULT_MODULES, null, 2);
+  // worldBooks 为空则补对象
+  if (!s.worldBooks || typeof s.worldBooks !== 'object') s.worldBooks = {};
+
+  saveSettings();
+}
+
+function fillWorldBookSelect(selected) {
+  const $sel = $('#sg_worldBookSelect');
+  if (!$sel.length) return;
+
+  const names = listWorldBookNames();
+  $sel.empty();
+  $sel.append(`<option value="">（未选择）</option>`);
+  names.forEach(n => {
+    const opt = document.createElement('option');
+    opt.value = n;
+    opt.textContent = n;
+    if (selected && n === selected) opt.selected = true;
+    $sel.append(opt);
+  });
+}
+
+function upsertWorldBook(book) {
+  const s = ensureSettings();
+  const map = getWorldBooksMap();
+
+  let name = String(book?.name || 'WorldBook').trim() || 'WorldBook';
+  if (map[name]) {
+    // 同名自动加后缀
+    let i = 2;
+    while (map[`${name} (${i})`]) i++;
+    name = `${name} (${i})`;
+  }
+  const stored = { ...book, name };
+  map[name] = stored;
+
+  s.worldBookSelected = name;
+  saveSettings();
+  return name;
+}
+
+function deleteWorldBookByName(name) {
+  const s = ensureSettings();
+  const map = getWorldBooksMap();
+  if (!name || !map[name]) return false;
+  delete map[name];
+  if (s.worldBookSelected === name) s.worldBookSelected = '';
+  saveSettings();
+  return true;
+}
+
+async function handleImportJsonFile(file, onOk) {
+  if (!file) return;
+  const text = await file.text();
+  onOk(text);
+}
+
+// -------------------- models refresh (custom) --------------------
+
 async function refreshModels() {
   const s = ensureSettings();
   const raw = String($('#sg_customEndpoint').val() || s.customEndpoint || '').trim();
@@ -1147,6 +1410,53 @@ function buildModalHtml() {
           </div>
 
           <div class="sg-card">
+            <div class="sg-card-title">预设与世界书</div>
+
+            <div class="sg-field">
+              <label>预设（导入/导出）</label>
+              <div class="sg-row sg-inline">
+                <label class="sg-check"><input type="checkbox" id="sg_exportWithKey">导出时包含 API Key</label>
+                <div class="sg-spacer"></div>
+                <button class="menu_button sg-btn" id="sg_exportPreset">导出预设</button>
+                <button class="menu_button sg-btn" id="sg_importPresetBtn">导入预设</button>
+              </div>
+              <input id="sg_importPresetFile" type="file" accept="application/json" style="display:none;">
+              <div class="sg-hint">预设会覆盖插件设置（输出模块/独立API/世界书设置等）。</div>
+            </div>
+
+            <div class="sg-divider"></div>
+
+            <div class="sg-row sg-inline">
+              <label class="sg-check"><input type="checkbox" id="sg_useWorldBook">在分析输入中注入世界书</label>
+              <select id="sg_worldBookMode">
+                <option value="active">仅注入“可能激活”的条目（推荐）</option>
+                <option value="all">注入全部条目（可能很长）</option>
+              </select>
+            </div>
+
+            <div class="sg-row sg-inline">
+              <label>选择世界书</label>
+              <select id="sg_worldBookSelect" class="sg-model-select"></select>
+              <button class="menu_button sg-btn" id="sg_importWorldBookBtn">导入世界书JSON</button>
+              <button class="menu_button sg-btn" id="sg_deleteWorldBookBtn">删除</button>
+            </div>
+
+            <div class="sg-grid2">
+              <div class="sg-field">
+                <label>世界书最大注入字符</label>
+                <input id="sg_worldBookMaxChars" type="number" min="1000" max="50000">
+              </div>
+              <div class="sg-field">
+                <label>激活检测窗口（最近消息条数）</label>
+                <input id="sg_worldBookScanMessages" type="number" min="5" max="200">
+              </div>
+            </div>
+
+            <input id="sg_importWorldBookFile" type="file" accept="application/json" style="display:none;">
+            <div class="sg-hint">使用方法：在酒馆“世界书/World Info”里导出 .json，然后在这里导入。插件只读取，不会修改酒馆世界书。</div>
+          </div>
+
+          <div class="sg-card">
             <div class="sg-card-title">本聊天专用（会随聊天切换）</div>
 
             <div class="sg-field">
@@ -1264,6 +1574,83 @@ function ensureModal() {
     if (id) $('#sg_customModel').val(id);
   });
 
+  // preset import/export
+  $('#sg_exportPreset').on('click', () => {
+    try {
+      pullUiToSettings(); saveSettings();
+      const includeKey = $('#sg_exportWithKey').is(':checked');
+      const preset = buildPresetObject(includeKey);
+      const d = new Date();
+      const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      downloadJson(`storyguide-preset-${stamp}.json`, preset);
+      setStatus('已导出预设 ✅', 'ok');
+    } catch (e) { setStatus(`导出预设失败：${e?.message ?? e}`, 'err'); }
+  });
+
+  $('#sg_importPresetBtn').on('click', () => {
+    const $f = $('#sg_importPresetFile');
+    $f.val('');
+    $f.trigger('click');
+  });
+
+  $('#sg_importPresetFile').on('change', async (e) => {
+    const file = e?.target?.files?.[0];
+    if (!file) return;
+    try {
+      const txt = await file.text();
+      const obj = JSON.parse(txt);
+      applyPresetObject(obj);
+      pullSettingsToUi();
+      setStatus('已导入预设 ✅（已保存）', 'ok');
+    } catch (err) {
+      setStatus(`导入预设失败：${err?.message ?? err}`, 'err');
+    }
+  });
+
+  // worldbook (Lorebook)
+  $('#sg_worldBookSelect').on('change', () => {
+    const name = String($('#sg_worldBookSelect').val() || '').trim();
+    const s = ensureSettings();
+    s.worldBookSelected = name;
+    saveSettings();
+    setStatus(name ? `已选择世界书：${name}` : '已取消选择世界书', 'ok');
+  });
+
+  $('#sg_importWorldBookBtn').on('click', () => {
+    const $f = $('#sg_importWorldBookFile');
+    $f.val('');
+    $f.trigger('click');
+  });
+
+  $('#sg_importWorldBookFile').on('change', async (e) => {
+    const file = e?.target?.files?.[0];
+    if (!file) return;
+    try {
+      const txt = await file.text();
+      const base = String(file.name || 'WorldBook').replace(/\.(json|txt)$/i, '').trim();
+      const book = importWorldBookFromJsonText(txt, base);
+      const storedName = upsertWorldBook(book);
+      fillWorldBookSelect(storedName);
+      pullSettingsToUi();
+      setStatus(`世界书已导入 ✅（${storedName}｜${book.entryCount}条）`, 'ok');
+    } catch (err) {
+      setStatus(`导入世界书失败：${err?.message ?? err}`, 'err');
+    }
+  });
+
+  $('#sg_deleteWorldBookBtn').on('click', () => {
+    try {
+      const name = String($('#sg_worldBookSelect').val() || ensureSettings().worldBookSelected || '').trim();
+      if (!name) { setStatus('请先选择要删除的世界书', 'warn'); return; }
+      const ok = deleteWorldBookByName(name);
+      fillWorldBookSelect('');
+      pullSettingsToUi();
+      setStatus(ok ? `已删除世界书：${name}` : `删除失败：${name}`, ok ? 'ok' : 'err');
+    } catch (e) {
+      setStatus(`删除世界书失败：${e?.message ?? e}`, 'err');
+    }
+  });
+
   // modules json actions
   $('#sg_validateModules').on('click', () => {
     const txt = String($('#sg_modulesJson').val() || '').trim();
@@ -1329,6 +1716,14 @@ function pullSettingsToUi() {
 
   fillModelSelect(Array.isArray(s.customModelsCache) ? s.customModelsCache : [], s.customModel);
 
+  // preset/worldbook
+  $('#sg_exportWithKey').prop('checked', false);
+  $('#sg_useWorldBook').prop('checked', !!s.useWorldBook);
+  $('#sg_worldBookMode').val(String(s.worldBookMode || 'active'));
+  $('#sg_worldBookMaxChars').val(s.worldBookMaxChars);
+  $('#sg_worldBookScanMessages').val(s.worldBookScanMessages);
+  fillWorldBookSelect(String(s.worldBookSelected || ''));
+
   $('#sg_worldText').val(getChatMetaValue(META_KEYS.world));
   $('#sg_canonText').val(getChatMetaValue(META_KEYS.canon));
 
@@ -1363,6 +1758,14 @@ function pullUiToSettings() {
   s.customEndpoint = String($('#sg_customEndpoint').val() || '').trim();
   s.customApiKey = String($('#sg_customApiKey').val() || '');
   s.customModel = String($('#sg_customModel').val() || '').trim();
+
+  // worldbook
+  s.useWorldBook = $('#sg_useWorldBook').is(':checked');
+  s.worldBookMode = String($('#sg_worldBookMode').val() || 'active');
+  s.worldBookSelected = String($('#sg_worldBookSelect').val() || s.worldBookSelected || '').trim();
+  s.worldBookMaxChars = clampInt($('#sg_worldBookMaxChars').val(), 1000, 50000, s.worldBookMaxChars);
+  s.worldBookScanMessages = clampInt($('#sg_worldBookScanMessages').val(), 5, 200, s.worldBookScanMessages);
+  if (!s.worldBooks || typeof s.worldBooks !== 'object') s.worldBooks = {};
 
   // modulesJson：先不强行校验（用户可先保存再校验），但会在分析前用默认兜底
   s.modulesJson = String($('#sg_modulesJson').val() || '').trim() || JSON.stringify(DEFAULT_MODULES, null, 2);
