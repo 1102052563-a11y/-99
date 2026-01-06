@@ -599,35 +599,135 @@
 
 
 
-/* v0.6.7 per-module card collapse */
-.sg-inline-body > ul > li .sg-mod-head{
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  cursor: pointer;
-  user-select: none;
+/* v0.6.7 zoom each module card */
+.sg-inline-body > ul > li{
+  cursor: zoom-in;
 }
 
-.sg-inline-body > ul > li .sg-mod-head strong{
-  margin: 0 !important;
-  display: inline-block;
-}
-
-.sg-inline-body > ul > li .sg-mod-chevron{
-  margin-left: auto;
-  opacity: 0.75;
-  transition: transform 160ms ease, opacity 160ms ease;
-}
-
-.sg-inline-body > ul > li.sg-mod-collapsed .sg-mod-chevron{
-  transform: rotate(-90deg);
-  opacity: 0.9;
-}
-
-.sg-inline-body > ul > li .sg-mod-content{
-  margin-top: 6px;
-}
-
-.sg-inline-body > ul > li.sg-mod-collapsed .sg-mod-content{
+.sg-zoom-overlay{
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  backdrop-filter: blur(3px);
+  z-index: 9998;
   display: none;
+}
+
+.sg-zoom-overlay.is-on{
+  display: block;
+}
+
+body.sg-zoom-lock{
+  overflow: hidden !important;
+}
+
+.sg-inline-body > ul > li.sg-zoomed{
+  cursor: zoom-out;
+  position: fixed !important;
+  left: 50% !important;
+  top: 50% !important;
+  transform: translate(-50%, -50%) !important;
+  width: min(980px, 92vw) !important;
+  max-height: 86vh !important;
+  overflow: auto !important;
+  z-index: 9999 !important;
+  background: rgba(25,25,25,0.95) !important;
+  border-color: rgba(255,255,255,0.18) !important;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.55) !important;
+}
+
+.sg-inline-body > ul > li.sg-zoomed::before{
+  top: 16px;
+  bottom: 16px;
+}
+
+
+/* v0.6.8 custom stream checkbox */
+#sg_customStream{transform: scale(1.05);} 
+
+
+
+/* v0.6.9 mobile responsive modal */
+@media (max-width: 720px){
+  .sg-modal{
+    width: 94vw !important;
+    max-width: 94vw !important;
+    left: 50% !important;
+    top: 6vh !important;
+    transform: translateX(-50%) !important;
+    max-height: 88vh !important;
+    height: auto !important;
+    overflow: hidden !important;
+  }
+
+  .sg-modal .sg-modal-body{
+    max-height: calc(88vh - 56px);
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 12px;
+  }
+
+  .sg-modal .sg-grid{
+    display: block !important;
+  }
+
+  .sg-modal .sg-col{
+    width: 100% !important;
+    margin: 0 0 12px 0 !important;
+  }
+
+  .sg-modal .sg-row{
+    flex-wrap: wrap;
+  }
+
+  .sg-modal .sg-field{
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .sg-modal .sg-actions,
+  .sg-modal .sg-actions-row{
+    justify-content: stretch;
+  }
+
+  .sg-modal .sg-actions .sg-btn,
+  .sg-modal .sg-actions-row .menu_button{
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .sg-modal .sg-tabs{
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .sg-modal .sg-tabs .sg-tab{
+    flex: 1 1 auto;
+    min-width: 88px;
+  }
+
+  /* reduce big card padding */
+  .sg-modal .sg-card{
+    padding: 12px;
+    border-radius: 16px;
+  }
+
+  /* keep the bottom copy buttons usable */
+  .sg-modal .sg-output-actions{
+    flex-wrap: wrap;
+  }
+  .sg-modal .sg-output-actions .sg-btn{
+    width: 100% !important;
+  }
+}
+
+/* very small phones */
+@media (max-width: 420px){
+  .sg-modal{
+    top: 4vh !important;
+    max-height: 90vh !important;
+  }
+  .sg-modal .sg-modal-body{
+    max-height: calc(90vh - 56px);
+  }
 }
