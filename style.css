@@ -259,3 +259,7 @@
 
 /* v0.5.2 worldbook info */
 #sg_worldbookInfo{opacity:0.9;}
+
+
+/* v0.5.5 inline modules controls */
+#sg_inlineModulesSource{min-width: 160px;}

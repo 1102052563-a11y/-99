@@ -2,7 +2,7 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.5.4
+ * v0.5.5
  *
  * 新增：输出模块自定义（更高自由度）
  * - 你可以自定义“输出模块列表”以及每个模块自己的提示词（prompt）
@@ -63,6 +63,10 @@ const DEFAULT_SETTINGS = Object.freeze({
   autoAppendBox: true,
   appendMode: 'compact', // compact | standard
   appendDebounceMs: 700,
+
+  // 追加框展示哪些模块
+  inlineModulesSource: 'inline', // inline | panel | all
+  inlineShowEmpty: false,        // 是否显示空字段占位
 
   // provider
   provider: 'st', // st | custom
@@ -536,7 +540,13 @@ function getModules(mode /* panel|append */) {
   const v = validateAndNormalizeModules(parsed);
   const base = v.ok ? v.modules : clone(DEFAULT_MODULES);
 
-  if (mode === 'append') return base.filter(m => m.inline);
+  if (mode === 'append') {
+    const src = String(s.inlineModulesSource || 'inline');
+    if (src === 'all') return base;
+    if (src === 'panel') return base.filter(m => m.panel);
+    return base.filter(m => m.inline);
+  }
+
   return base.filter(m => m.panel); // panel
 }
 
@@ -896,31 +906,32 @@ async function runAnalysis() {
 
 // -------------------- inline append (dynamic modules) --------------------
 
-function buildInlineMarkdownFromModules(parsedJson, modules, mode) {
+function buildInlineMarkdownFromModules(parsedJson, modules, mode, showEmpty) {
   // mode: compact|standard
   const lines = [];
   lines.push(`**剧情指导**`);
 
-  // compact: 尽量短，标准：多一些
   for (const m of modules) {
-    const val = parsedJson?.[m.key];
+    const hasKey = parsedJson && Object.hasOwn(parsedJson, m.key);
+    const val = hasKey ? parsedJson[m.key] : undefined;
     const title = m.title || m.key;
 
     if (m.type === 'list') {
       const arr = Array.isArray(val) ? val : [];
-      if (!arr.length) continue;
-
-      const limit = (mode === 'standard') ? Math.min(arr.length, 4) : Math.min(arr.length, 2);
-      const picked = arr.slice(0, limit);
-
-      if (m.key === 'tips') {
-        lines.push(`- **${title}**：${picked.join(' / ')}`);
-      } else {
-        lines.push(`- **${title}**：${picked.join(' / ')}`);
+      if (!arr.length) {
+        if (showEmpty) lines.push(`- **${title}**：（空）`);
+        continue;
       }
+
+      const limit = (mode === 'standard') ? Math.min(arr.length, 6) : Math.min(arr.length, 2);
+      const picked = arr.slice(0, limit);
+      lines.push(`- **${title}**：${picked.join(' / ')}`);
     } else {
-      const text = val ? String(val).trim() : '';
-      if (!text) continue;
+      const text = (val !== undefined && val !== null) ? String(val).trim() : '';
+      if (!text) {
+        if (showEmpty) lines.push(`- **${title}**：（空）`);
+        continue;
+      }
       const short = (mode === 'standard') ? text : (text.length > 120 ? text.slice(0, 120) + '…' : text);
       lines.push(`- **${title}**：${short}`);
     }
@@ -1096,7 +1107,7 @@ async function runInlineAppendForLastMessage() {
     const parsed = safeJsonParse(jsonText);
     if (!parsed) return;
 
-    const md = buildInlineMarkdownFromModules(parsed, modules, s.appendMode);
+    const md = buildInlineMarkdownFromModules(parsed, modules, s.appendMode, !!s.inlineShowEmpty);
     const htmlInner = renderMarkdownToHtml(md);
 
     inlineCache.set(String(mesKey), { htmlInner, collapsed: false, createdAt: Date.now() });
@@ -1358,6 +1369,14 @@ function buildModalHtml() {
                 <option value="compact">简洁</option>
                 <option value="standard">标准</option>
               </select>
+              <select id="sg_inlineModulesSource" title="选择追加框展示的模块来源">
+                <option value="inline">仅 inline=true 的模块</option>
+                <option value="panel">跟随面板（panel=true）</option>
+                <option value="all">显示全部模块</option>
+              </select>
+              <label class="sg-check" title="即使模型没输出该字段，也显示（空）占位">
+                <input type="checkbox" id="sg_inlineShowEmpty">显示空字段
+              </label>
               <span class="sg-hint">（点击框标题可折叠）</span>
             </div>
 
@@ -1712,7 +1731,7 @@ function ensureModal() {
     s.modulesJson = JSON.stringify(v.modules, null, 2);
     saveSettings();
     $('#sg_modulesJson').val(s.modulesJson);
-    setStatus('模块已应用并保存 ✅', 'ok');
+    setStatus('模块已应用并保存 ✅（注意：追加框展示的模块由“追加框展示模块”控制）', 'ok');
   });
 }
 
@@ -1735,6 +1754,9 @@ function pullSettingsToUi() {
 
   $('#sg_autoAppendBox').prop('checked', !!s.autoAppendBox);
   $('#sg_appendMode').val(s.appendMode);
+
+  $('#sg_inlineModulesSource').val(String(s.inlineModulesSource || 'inline'));
+  $('#sg_inlineShowEmpty').prop('checked', !!s.inlineShowEmpty);
 
   $('#sg_customEndpoint').val(s.customEndpoint);
   $('#sg_customApiKey').val(s.customApiKey);
@@ -1815,6 +1837,9 @@ function pullUiToSettings() {
 
   s.autoAppendBox = $('#sg_autoAppendBox').is(':checked');
   s.appendMode = String($('#sg_appendMode').val() || 'compact');
+
+  s.inlineModulesSource = String($('#sg_inlineModulesSource').val() || 'inline');
+  s.inlineShowEmpty = $('#sg_inlineShowEmpty').is(':checked');
 
   s.customEndpoint = String($('#sg_customEndpoint').val() || '').trim();
   s.customApiKey = String($('#sg_customApiKey').val() || '');
