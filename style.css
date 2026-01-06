@@ -499,13 +499,27 @@
   min-width: 140px !important;
 }
 
-/* settings list "打开面板" button should be compact like other extensions */
-.sg-min #sg_open_from_settings{
+
+
+
+/* v0.6.1 fix: extensions page open button compact */
+#sg_settings_panel_min .sg-min-row{
+  align-items: center;
+}
+
+#sg_open_from_settings.menu_button{
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
   width: auto !important;
-  min-width: 96px !important;
+  min-width: 92px !important;
+  max-width: 140px !important;
   padding: 6px 10px !important;
   line-height: 1.2 !important;
+  height: auto !important;
   white-space: nowrap !important;
   word-break: keep-all !important;
   writing-mode: horizontal-tb !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
 }
