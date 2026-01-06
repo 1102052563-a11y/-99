@@ -84,7 +84,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   worldbookMaxChars: 6000,
   worldbookWindowMessages: 18,
   worldbookJson: '',
-  worldbookInsertPos: 'after_canon', // after_canon | before_chat | top
+  worldbookPlacement: 'after_canon', // after_world | after_canon | before_chat
 
   // 模块自定义（JSON 字符串 + 解析备份）
   modulesJson: '',
@@ -102,10 +102,6 @@ let lastReport = null;
 let lastJsonText = '';
 let refreshTimer = null;
 let appendTimer = null;
-
-// 世界书注入统计（最近一次 buildSnapshot/buildWorldbookBlock 产生的实际注入量）
-let lastWorldbookStats = { imported: 0, injected: 0, chars: 0, tokens: 0, mode: 'active', pos: 'after_canon' };
-
 
 // ============== 关键：DOM 追加缓存 & 观察者（抗重渲染） ==============
 /**
@@ -186,19 +182,6 @@ function clampFloat(v, min, max, fallback) {
   return fallback;
 }
 
-function safeJsonParse
-
-function estimateTokens(text) {
-  const s = String(text || '');
-  if (!s) return 0;
-  // 粗略估算：CJK 更接近 1字≈0.6~0.9 token；英文更接近 1token≈4chars
-  const cjk = (s.match(/[\u4E00-\u9FFF]/g) || []).length;
-  const total = s.length;
-  const ratio = total ? (cjk / total) : 0;
-  if (ratio >= 0.25) return Math.max(1, Math.ceil(total * 0.7));
-  return Math.max(1, Math.ceil(total / 4));
-}
-
 function safeJsonParse(maybeJson) {
   if (!maybeJson) return null;
   let t = String(maybeJson).trim();
@@ -241,31 +224,6 @@ function updateButtonsEnabled() {
   $('#sg_injectTips').prop('disabled', !ok);
 }
 
-function updateWorldbookInfoLabel() {
-  const s = ensureSettings();
-  const raw = String(s.worldbookJson || '').trim();
-  let imported = 0;
-  try { imported = raw ? parseWorldbookJson(raw).length : 0; } catch { imported = 0; }
-
-  // lastWorldbookStats 可能来自上一次 buildSnapshot/buildWorldbookBlock；如果还没跑过，就用 0
-  const injected = Number(lastWorldbookStats?.injected || 0);
-  const chars = Number(lastWorldbookStats?.chars || 0);
-  const tokens = Number(lastWorldbookStats?.tokens || 0);
-
-  const enabled = !!s.worldbookEnabled;
-  const mode = String(s.worldbookMode || 'active');
-  const pos = String(s.worldbookInsertPos || 'after_canon');
-
-  const posText = pos === 'top' ? '最开头' : (pos === 'before_chat' ? '聊天前' : '大纲后');
-  const base = imported ? `已导入世界书：${imported} 条` : '（未导入世界书）';
-
-  const injectInfo = (enabled && imported)
-    ? `｜本次注入：${injected} 条 / ${chars} chars / ≈${tokens} tokens（${mode}｜${posText}）`
-    : (imported ? `｜未注入（未启用或未命中）` : '');
-
-  $('#sg_worldbookInfo').text(base + injectInfo);
-}
-
 function showPane(name) {
   $('#sg_modal .sg-tab').removeClass('active');
   $(`#sg_tab_${name}`).addClass('active');
@@ -297,7 +255,7 @@ function validateAndNormalizeModules(raw) {
 
     const required = m.required !== false; // default true
     const panel = m.panel !== false;       // default true
-    const inline = m.inline === true;      // default false unless explicitly true
+    const inline = (m.inline === undefined || m.inline === null) ? panel : (m.inline === true);      // default false unless explicitly true
 
     const maxItems = (type === 'list' && Number.isFinite(Number(m.maxItems))) ? clampInt(m.maxItems, 1, 50, 8) : undefined;
 
@@ -404,31 +362,43 @@ function selectActiveWorldbookEntries(entries, recentText) {
   return picked;
 }
 
+
+let lastWorldbookUsage = { totalEntries: 0, usedEntries: 0, chars: 0, tokens: 0, mode: 'active', placement: 'after_canon' };
+
+function getTokenCountCompat(text) {
+  const t = String(text || '');
+  const ctx = SillyTavern.getContext?.() ?? {};
+  try { if (typeof ctx.getTokenCount === 'function') return Number(ctx.getTokenCount(t)); } catch {}
+  try { if (typeof globalThis.getTokenCount === 'function') return Number(globalThis.getTokenCount(t)); } catch {}
+  const s = t;
+  const cjk = (s.match(/[\u4e00-\u9fff]/g) || []).length;
+  const latin = s.length - cjk;
+  const est = (cjk / 1.8) + (latin / 4.0);
+  return Math.max(1, Math.round(est));
+}
+
 function buildWorldbookBlock() {
   const s = ensureSettings();
-  const raw = String(s.worldbookJson || '').trim();
-
-  const importedEntries = raw ? parseWorldbookJson(raw) : [];
-  const importedCount = importedEntries.length;
-
-  // default stats (always update so UI不再“退出重置”错觉)
-  lastWorldbookStats = {
-    imported: importedCount,
-    injected: 0,
+  lastWorldbookUsage = {
+    totalEntries: 0,
+    usedEntries: 0,
     chars: 0,
     tokens: 0,
     mode: String(s.worldbookMode || 'active'),
-    pos: String(s.worldbookInsertPos || 'after_canon'),
+    placement: String(s.worldbookPlacement || 'after_canon')
   };
 
   if (!s.worldbookEnabled) return '';
+  const raw = String(s.worldbookJson || '').trim();
   if (!raw) return '';
-  if (!importedCount) return '';
+
+  const entries = parseWorldbookJson(raw);
+  lastWorldbookUsage.totalEntries = entries.length;
+  if (!entries.length) return '';
 
   const ctx = SillyTavern.getContext();
   const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
   const win = clampInt(s.worldbookWindowMessages, 5, 80, 18);
-
   const pickedMsgs = [];
   for (let i = chat.length - 1; i >= 0 && pickedMsgs.length < win; i--) {
     const m = chat[i];
@@ -438,9 +408,9 @@ function buildWorldbookBlock() {
   }
   const recentText = pickedMsgs.reverse().join('\n');
 
-  let use = importedEntries;
+  let use = entries;
   if (s.worldbookMode === 'active') {
-    const act = selectActiveWorldbookEntries(importedEntries, recentText);
+    const act = selectActiveWorldbookEntries(entries, recentText);
     use = act.length ? act : [];
   }
   if (!use.length) return '';
@@ -450,7 +420,7 @@ function buildWorldbookBlock() {
   let used = 0;
 
   for (const e of use) {
-    const head = `- 【${e.title}】${(e.keys && e.keys.length) ? `（触发：${e.keys.slice(0, 6).join(' / ')}）` : ''}\n`;
+    const head = `- 【${e.title}】${(e.keys && e.keys.length) ? `（触发：${e.keys.slice(0,6).join(' / ')}）` : ''}\n`;
     const body = e.content.trim() + '\n';
     const chunk = head + body + '\n';
     if ((acc.length + chunk.length) > maxChars) break;
@@ -460,11 +430,41 @@ function buildWorldbookBlock() {
 
   if (!acc) return '';
 
-  lastWorldbookStats.injected = used;
-  lastWorldbookStats.chars = acc.length;
-  lastWorldbookStats.tokens = estimateTokens(acc);
+  const block = `\n【世界书/World Info（已注入：${used}条，模式：${s.worldbookMode}）】\n${acc}\n`;
+  lastWorldbookUsage.usedEntries = used;
+  lastWorldbookUsage.chars = block.length;
+  lastWorldbookUsage.tokens = getTokenCountCompat(block);
+  return block;
+}
 
-  return `\n【世界书/World Info（注入：${used}条，≈${lastWorldbookStats.tokens} tokens）】\n${acc}\n`;
+function updateWorldbookInfoUI() {
+  const $info = $('#sg_worldbookInfo');
+  if (!$info.length) return;
+
+  const s = ensureSettings();
+  const raw = String(s.worldbookJson || '').trim();
+  if (!raw) { $info.text('（未导入世界书）'); return; }
+
+  const entries = parseWorldbookJson(raw);
+  const total = entries.length;
+
+  // 重新计算一次“当前配置下”的注入量（会刷新 lastWorldbookUsage）
+  const block = buildWorldbookBlock();
+  const used = lastWorldbookUsage.usedEntries || 0;
+  const chars = lastWorldbookUsage.chars || 0;
+  const tokens = lastWorldbookUsage.tokens || 0;
+  const placement = String(s.worldbookPlacement || 'after_canon');
+  const mode = String(s.worldbookMode || 'active');
+
+  if (!s.worldbookEnabled) {
+    $info.text(`已导入世界书：${total} 条（当前未启用注入）`);
+    return;
+  }
+  if (!block) {
+    $info.text(`已导入：${total} 条｜本次注入：0 条｜模式：${mode}｜位置：${placement}`);
+    return;
+  }
+  $info.text(`已导入：${total} 条｜本次注入：${used} 条｜字符：${chars}｜Token：${tokens}｜模式：${mode}｜位置：${placement}`);
 }
 function getModules(mode /* panel|append */) {
   const s = ensureSettings();
@@ -606,6 +606,8 @@ function buildSnapshot() {
   const canon = stripHtml(getChatMetaValue(META_KEYS.canon));
   const world = stripHtml(getChatMetaValue(META_KEYS.world));
 
+  const worldbookBlock = buildWorldbookBlock();
+
   const picked = [];
   for (let i = chat.length - 1; i >= 0 && picked.length < maxMessages; i--) {
     const m = chat[i];
@@ -631,37 +633,24 @@ function buildSnapshot() {
     characterSelected: ctx.characterId !== undefined && ctx.characterId !== null
   };
 
-  // 世界书注入块（会更新 lastWorldbookStats）
-  const worldbookBlock = buildWorldbookBlock();
-  const wbPos = String(ensureSettings().worldbookInsertPos || 'after_canon');
-
-  const parts = [];
-  parts.push(`【任务】你是“剧情指导”。根据下方“正在经历的世界”（聊天 + 设定）输出结构化报告。`);
-  parts.push('');
-
-  if (wbPos === 'top') parts.push(worldbookBlock);
-
-  parts.push(charBlock ? charBlock : `【角色卡】（未获取到/可能是群聊）`);
-  parts.push('');
-
-  parts.push(world ? `【世界观/设定补充】\n${world}\n` : `【世界观/设定补充】（未提供）\n`);
-  parts.push(canon ? `【原著后续/大纲】\n${canon}\n` : `【原著后续/大纲】（未提供）\n`);
-
-  if (wbPos === 'after_canon') parts.push(worldbookBlock);
-
-  // 聊天记录之前
-  if (wbPos === 'before_chat') parts.push(worldbookBlock);
-
-  parts.push(`【聊天记录（最近${picked.length}条）】`);
-  parts.push(picked.length ? picked.join('\n\n') : '（空）');
-
-  const snapshotText = parts.filter(Boolean).join('\n');
+  const snapshotText = [
+    `【任务】你是“剧情指导”。根据下方“正在经历的世界”（聊天 + 设定）输出结构化报告。`,
+    ``,
+    charBlock ? charBlock : `【角色卡】（未获取到/可能是群聊）`,
+    ``,
+    world ? `【世界观/设定补充】\n${world}\n` : `【世界观/设定补充】（未提供）\n`,
+    (s.worldbookPlacement === 'after_world' ? worldbookBlock : ''),
+    canon ? `【原著后续/大纲】\n${canon}\n` : `【原著后续/大纲】（未提供）\n`,
+    (s.worldbookPlacement === 'after_canon' ? worldbookBlock : ''),
+    `【聊天记录（最近${picked.length}条）】`,
+    (s.worldbookPlacement === 'before_chat' ? worldbookBlock : ''),
+    picked.length ? picked.join('\n\n') : '（空）'
+  ].join('\n');
 
   return { snapshotText, sourceSummary };
 }
 
-// -------------------- provider=st
- --------------------
+// -------------------- provider=st --------------------
 
 async function callViaSillyTavern(messages, schema, temperature) {
   const ctx = SillyTavern.getContext();
@@ -927,19 +916,9 @@ function attachToggleHandler(boxEl, mesKey) {
   if (head.dataset.sgBound === '1') return;
   head.dataset.sgBound = '1';
 
-  // reroll button (stop bubbling to fold)
-  const btn = boxEl.querySelector('.sg-inline-reroll');
-  if (btn && btn.dataset.sgBound !== '1') {
-    btn.dataset.sgBound = '1';
-    btn.addEventListener('click', async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      await rerollInlineForMessage(String(mesKey));
-    });
-  }
-
   head.addEventListener('click', (e) => {
-    if (e.target && (e.target.closest('a') || e.target.closest('.sg-inline-reroll'))) return;
+    if (e.target && (e.target.closest('a'))) return;
+    if (e.target && (e.target.closest('.sg-inline-reroll'))) return;
 
     const cur = boxEl.classList.contains('collapsed');
     const next = !cur;
@@ -951,6 +930,19 @@ function attachToggleHandler(boxEl, mesKey) {
       inlineCache.set(String(mesKey), cached);
     }
   });
+
+  const rerollBtn = boxEl.querySelector('.sg-inline-reroll');
+  if (rerollBtn && rerollBtn.dataset.sgBound !== '1') {
+    rerollBtn.dataset.sgBound = '1';
+    rerollBtn.addEventListener('click', async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      rerollBtn.disabled = true;
+      rerollBtn.textContent = '…';
+      try { await rerollInlineForMesKey(mesKey); }
+      finally { rerollBtn.disabled = false; rerollBtn.textContent = '↻'; }
+    });
+  }
 }
 
 function createInlineBoxElement(mesKey, htmlInner, collapsed) {
@@ -963,8 +955,8 @@ function createInlineBoxElement(mesKey, htmlInner, collapsed) {
       <span class="sg-inline-badge">📘</span>
       <span class="sg-inline-title">剧情指导</span>
       <span class="sg-inline-sub">（自动分析）</span>
-      <button class="sg-inline-reroll" title="重roll（重新生成）" type="button">↻</button>
       <span class="sg-inline-chevron">▾</span>
+      <button class="sg-inline-reroll" type="button" title="重Roll（重新生成本条分析）">↻</button>
     </div>
     <div class="sg-inline-body">${htmlInner}</div>
   `.trim();
@@ -1019,40 +1011,35 @@ function reapplyAllInlineBoxes(reason = '') {
 
 // -------------------- inline append generate & cache --------------------
 
-async function runInlineAppendForMessage(mesKey, force = false) {
+async function runInlineAppendForLastMessage() {
   const s = ensureSettings();
   if (!s.enabled || !s.autoAppendBox) return;
-  if (!mesKey) return;
 
-  const key = String(mesKey);
+  const ref = getLastAssistantMessageRef();
+  if (!ref) return;
 
-  // 如果已有缓存且不强制，就直接补贴
-  if (!force && inlineCache.has(key)) {
-    ensureInlineBoxPresent(key);
+  const { mesKey } = ref;
+
+  // 如果已经缓存过，先补贴一次就行（但仍会被 reapply 兜底）
+  if (inlineCache.has(String(mesKey))) {
+    ensureInlineBoxPresent(mesKey);
     return;
   }
-
-  // 先放一个“生成中”占位，避免用户点重roll没反馈
-  const loadingHtml = renderMarkdownToHtml(`**剧情指导**\n- 生成中…`);
-  inlineCache.set(key, { htmlInner: loadingHtml, collapsed: false, createdAt: Date.now() });
-  ensureInlineBoxPresent(key);
 
   try {
     const { snapshotText } = buildSnapshot();
 
-    // 关键修复：inline 的 schema/prompt 也使用“面板模块列表”，确保你预设新增字段一定会被要求输出
-    const allModules = getModules('panel');
-    const schema = buildSchemaFromModules(allModules);
+    const modules = getModules('append');
+    // append 里 schema 按 inline 模块生成；如果用户把 inline 全关了，就不生成
+    if (!modules.length) return;
 
-    // display：默认只展示 inline==true 或 required==true 的字段（避免太长）
-    let displayModules = allModules.filter(m => m.inline || m.required);
-    if (!displayModules.length) displayModules = allModules;
-
+    // 对 “compact/standard” 给一点暗示（不强制），避免用户模块 prompt 很长时没起作用
     const modeHint = (s.appendMode === 'standard')
       ? `\n【附加要求】inline 输出可比面板更短，但不要丢掉关键信息。\n`
       : `\n【附加要求】inline 输出尽量短：每个字段尽量 1~2 句/2 条以内。\n`;
 
-    const messages = buildPromptMessages(snapshotText + modeHint, s.spoilerLevel, allModules, 'append');
+    const schema = buildSchemaFromModules(modules);
+    const messages = buildPromptMessages(snapshotText + modeHint, s.spoilerLevel, modules, 'append');
 
     let jsonText = '';
     if (s.provider === 'custom') {
@@ -1067,42 +1054,100 @@ async function runInlineAppendForMessage(mesKey, force = false) {
     const parsed = safeJsonParse(jsonText);
     if (!parsed) return;
 
-    // 更新世界书注入信息（如果面板开着）
-    updateWorldbookInfoLabel?.();
-
-    const md = buildInlineMarkdownFromModules(parsed, displayModules, s.appendMode);
+    const md = buildInlineMarkdownFromModules(parsed, modules, s.appendMode);
     const htmlInner = renderMarkdownToHtml(md);
 
-    // 保留折叠态（如果已经有缓存）
-    const prev = inlineCache.get(key);
-    inlineCache.set(key, { htmlInner, collapsed: prev?.collapsed ?? false, createdAt: Date.now() });
+    inlineCache.set(String(mesKey), { htmlInner, collapsed: false, createdAt: Date.now() });
 
-    requestAnimationFrame(() => { ensureInlineBoxPresent(key); });
+    requestAnimationFrame(() => { ensureInlineBoxPresent(mesKey); });
 
     // 额外补贴：对付“变量更新晚到”的二次覆盖
-    setTimeout(() => ensureInlineBoxPresent(key), 800);
-    setTimeout(() => ensureInlineBoxPresent(key), 1800);
-    setTimeout(() => ensureInlineBoxPresent(key), 3500);
-    setTimeout(() => ensureInlineBoxPresent(key), 6500);
+    setTimeout(() => ensureInlineBoxPresent(mesKey), 800);
+    setTimeout(() => ensureInlineBoxPresent(mesKey), 1800);
+    setTimeout(() => ensureInlineBoxPresent(mesKey), 3500);
+    setTimeout(() => ensureInlineBoxPresent(mesKey), 6500);
   } catch (e) {
     console.warn('[StoryGuide] inline append failed:', e);
   }
 }
 
-async function runInlineAppendForLastMessage() {
-  const ref = getLastAssistantMessageRef();
-  if (!ref) return;
-  await runInlineAppendForMessage(ref.mesKey, false);
-}
 
-async function rerollInlineForMessage(mesKey) {
+async function rerollInlineForMesKey(mesKey) {
+  const s = ensureSettings();
+  if (!s.enabled || !s.autoAppendBox) return;
+
   const key = String(mesKey || '');
   if (!key) return;
-  await runInlineAppendForMessage(key, true);
+
+  inlineCache.delete(key);
+
+  const mesEl = findMesElementByKey(key);
+  const textEl = mesEl?.querySelector?.('.mes_text');
+  if (textEl) {
+    const existing = textEl.querySelector('.sg-inline-box');
+    if (existing) {
+      const body = existing.querySelector('.sg-inline-body');
+      if (body) body.innerHTML = renderMarkdownToHtml('生成中…');
+    }
+  }
+
+  try {
+    await runInlineAppendForMesKey(key);
+  } catch (e) {
+    console.warn('[StoryGuide] reroll failed:', e);
+  }
+}
+
+async function runInlineAppendForMesKey(mesKey) {
+  const s = ensureSettings();
+  if (!s.enabled || !s.autoAppendBox) return;
+
+  const key = String(mesKey || '');
+  if (!key) return;
+
+  if (inlineCache.has(key)) {
+    ensureInlineBoxPresent(key);
+    return;
+  }
+
+  const { snapshotText } = buildSnapshot();
+  const modules = getModules('append');
+  if (!modules.length) return;
+
+  const modeHint = (s.appendMode === 'standard')
+    ? `\n【附加要求】inline 输出可比面板更短，但不要丢掉关键信息。\n`
+    : `\n【附加要求】inline 输出尽量短：每个字段尽量 1~2 句/2 条以内。\n`;
+
+  const schema = buildSchemaFromModules(modules);
+  const messages = buildPromptMessages(snapshotText + modeHint, s.spoilerLevel, modules, 'append');
+
+  let jsonText = '';
+  if (s.provider === 'custom') {
+    jsonText = await callViaCustom(s.customEndpoint, s.customApiKey, s.customModel, messages, s.temperature, Math.min(s.customMaxTokens, 4096), s.customTopP);
+  } else {
+    jsonText = await callViaSillyTavern(messages, schema, s.temperature);
+    if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
+    const parsedTry = safeJsonParse(jsonText);
+    if (!parsedTry || Object.keys(parsedTry).length === 0) jsonText = await fallbackAskJson(messages, s.temperature);
+  }
+
+  const parsed = safeJsonParse(jsonText);
+  if (!parsed) return;
+
+  const md = buildInlineMarkdownFromModules(parsed, modules, s.appendMode);
+  const htmlInner = renderMarkdownToHtml(md);
+
+  inlineCache.set(key, { htmlInner, collapsed: false, createdAt: Date.now() });
+
+  requestAnimationFrame(() => { ensureInlineBoxPresent(key); });
+
+  setTimeout(() => ensureInlineBoxPresent(key), 800);
+  setTimeout(() => ensureInlineBoxPresent(key), 1800);
+  setTimeout(() => ensureInlineBoxPresent(key), 3500);
+  setTimeout(() => ensureInlineBoxPresent(key), 6500);
 }
 
 function scheduleInlineAppend() {
-() {
   const s = ensureSettings();
   const delay = clampInt(s.appendDebounceMs, 150, 5000, DEFAULT_SETTINGS.appendDebounceMs);
   if (appendTimer) clearTimeout(appendTimer);
@@ -1431,11 +1476,11 @@ function buildModalHtml() {
             </div>
 
             <div class="sg-row sg-inline">
-              <label>注入位置</label>
-              <select id="sg_worldbookInsertPos">
-                <option value="after_canon">在世界观/大纲之后（默认）</option>
-                <option value="before_chat">在聊天记录之前</option>
-                <option value="top">放在最开头（角色卡之前）</option>
+              <label class="sg-label">世界书插入位置</label>
+              <select id="sg_worldbookPlacement">
+                <option value="after_world">在「世界观补充」后</option>
+                <option value="after_canon">在「原著后续/大纲」后（默认）</option>
+                <option value="before_chat">在「聊天记录」前</option>
               </select>
             </div>
 
@@ -1636,7 +1681,7 @@ function ensureModal() {
       s.worldbookJson = txt;
       saveSettings();
 
-      updateWorldbookInfoLabel();
+            updateWorldbookInfoUI();
       setStatus('世界书已导入 ✅', entries.length ? 'ok' : 'warn');
     } catch (e) {
       setStatus(`导入世界书失败：${e?.message ?? e}`, 'err');
@@ -1647,22 +1692,14 @@ function ensureModal() {
     const s = ensureSettings();
     s.worldbookJson = '';
     saveSettings();
-    $('#sg_worldbookInfo').text('（未导入世界书）');
+        updateWorldbookInfoUI();
     setStatus('已清空世界书', 'ok');
   });
 
-  // worldbook auto-save (避免关闭面板后重置的错觉：这里改动会立即保存)
-  $('#sg_worldbookEnabled, #sg_worldbookMode, #sg_worldbookInsertPos').on('change', () => {
-    pullUiToSettings();
-    saveSettings();
-    // 不刷状态条，避免频繁闪烁；更新信息文本即可
-    updateWorldbookInfoLabel();
-  });
-  $('#sg_worldbookMaxChars, #sg_worldbookWindowMessages').on('input', () => {
-    pullUiToSettings();
-    saveSettings();
-    updateWorldbookInfoLabel();
-  });
+  // worldbook autosave（避免关闭面板后重置）
+  const autoSaveWorldbook = () => { try { pullUiToSettings(); saveSettings(); } catch {} };
+  $('#sg_worldbookEnabled, #sg_worldbookMode, #sg_worldbookPlacement, #sg_worldbookMaxChars, #sg_worldbookWindowMessages')
+    .on('change input', () => { autoSaveWorldbook(); updateWorldbookInfoUI(); });
 
 // modules json actions
   $('#sg_validateModules').on('click', () => {
@@ -1740,11 +1777,11 @@ function pullSettingsToUi() {
 
   $('#sg_worldbookEnabled').prop('checked', !!s.worldbookEnabled);
   $('#sg_worldbookMode').val(String(s.worldbookMode || 'active'));
-  $('#sg_worldbookInsertPos').val(String(s.worldbookInsertPos || 'after_canon'));
+  $('#sg_worldbookPlacement').val(String(s.worldbookPlacement || 'after_canon'));
   $('#sg_worldbookMaxChars').val(s.worldbookMaxChars);
   $('#sg_worldbookWindowMessages').val(s.worldbookWindowMessages);
 
-    updateWorldbookInfoLabel();
+    updateWorldbookInfoUI();
 
   $('#sg_custom_block').toggle(s.provider === 'custom');
   updateButtonsEnabled();
@@ -1784,6 +1821,7 @@ function pullUiToSettings() {
 
   s.worldbookEnabled = $('#sg_worldbookEnabled').is(':checked');
   s.worldbookMode = String($('#sg_worldbookMode').val() || 'active');
+  s.worldbookPlacement = String($('#sg_worldbookPlacement').val() || 'after_canon');
   s.worldbookMaxChars = clampInt($('#sg_worldbookMaxChars').val(), 500, 50000, s.worldbookMaxChars || 6000);
   s.worldbookWindowMessages = clampInt($('#sg_worldbookWindowMessages').val(), 5, 80, s.worldbookWindowMessages || 18);
 }

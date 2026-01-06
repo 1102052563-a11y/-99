@@ -257,17 +257,17 @@
 }
 
 
-/* v0.5.2 inline reroll button */
+/* v0.5.2 inline reroll */
 .sg-inline-reroll{
-  margin-left: 8px;
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 8px;
   padding: 2px 8px;
-  border-radius: 10px;
-  border: 1px solid rgba(255,255,255,0.12);
-  background: rgba(255,255,255,0.06);
-  color: inherit;
   cursor: pointer;
+  color: inherit;
   font-size: 12px;
+  line-height: 1.2;
 }
-.sg-inline-reroll:hover{
-  background: rgba(255,255,255,0.10);
-}
+.sg-inline-reroll:disabled{ opacity: 0.6; cursor: not-allowed; }
+.sg-label{ opacity:0.85; font-size: 12px; margin-right: 8px; }
