@@ -2,7 +2,7 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.7.3
+ * v0.7.4
  *
  * 新增：输出模块自定义（更高自由度）
  * - 你可以自定义“输出模块列表”以及每个模块自己的提示词（prompt）
@@ -38,6 +38,7 @@ const DEFAULT_MODULES = Object.freeze([
   { key: 'current_scene', title: '当前时间点 · 具体剧情', type: 'text', prompt: '描述当前发生了什么（地点/人物动机/冲突/悬念）', required: true, panel: true, inline: true },
   { key: 'next_events', title: '后续将会发生的事', type: 'list', prompt: '接下来最可能发生的事（条目）', maxItems: 6, required: true, panel: true, inline: true },
   { key: 'protagonist_impact', title: '主角行为造成的影响', type: 'text', prompt: '主角行为对剧情/关系/风险造成的改变', required: true, panel: true, inline: false },
+    { key: 'role_relationship_graph', title: '原著角色关系图谱', type: 'diagram_mermaid', prompt: '输出 Mermaid 角色关系图（flowchart LR 或 graph LR）。节点=角色名，边用“|关系|”标注，如：A[角色] --|关系| B[角色]。只输出 Mermaid 代码本体，不要解释。', required: false, panel: true, inline: false },
   { key: 'tips', title: '给主角的提示（基于原著后续/大纲）', type: 'list', prompt: '给出可执行提示（尽量具体）', maxItems: 4, required: true, panel: true, inline: true },
 ]);
 
@@ -203,6 +204,153 @@ function renderMarkdownToHtml(markdown) {
   const html = converter.makeHtml(markdown || '');
   return DOMPurify.sanitize(html);
 }
+
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// -------------------- Mermaid (role relationship graph) --------------------
+let __sgMermaidPromise = null;
+
+function ensureMermaidLoaded() {
+  if (window.mermaid && typeof window.mermaid.initialize === 'function') {
+    try { window.mermaid.initialize({ startOnLoad: false, theme: 'dark' }); } catch { /* ignore */ }
+    return Promise.resolve(window.mermaid);
+  }
+  if (__sgMermaidPromise) return __sgMermaidPromise;
+
+  __sgMermaidPromise = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js';
+    s.async = true;
+    s.onload = () => {
+      try {
+        window.mermaid?.initialize?.({ startOnLoad: false, theme: 'dark' });
+      } catch { /* ignore */ }
+      if (window.mermaid) resolve(window.mermaid);
+      else reject(new Error('Mermaid loaded but not available'));
+    };
+    s.onerror = () => reject(new Error('Failed to load Mermaid from CDN'));
+    document.head.appendChild(s);
+  });
+
+  return __sgMermaidPromise;
+}
+
+async function renderMermaidCodeToSvg(code) {
+  const mm = await ensureMermaidLoaded();
+
+  const id = `sg_mmd_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+  // mermaid v10+: mermaid.render(id, code) -> { svg, bindFunctions }
+  if (mm && typeof mm.render === 'function') {
+    const r = await mm.render(id, code);
+    if (typeof r === 'string') return r;
+    if (r && typeof r.svg === 'string') return r.svg;
+  }
+
+  // older API
+  if (mm && mm.mermaidAPI && typeof mm.mermaidAPI.render === 'function') {
+    return await new Promise((resolve) => {
+      try {
+        mm.mermaidAPI.render(id, code, (svg) => resolve(svg || ''));
+      } catch {
+        resolve('');
+      }
+    });
+  }
+
+  return '';
+}
+
+async function renderMermaidIn(containerEl) {
+  if (!containerEl) return;
+
+  const blocks = containerEl.querySelectorAll('.sg-mermaid-block:not([data-sg-rendered="1"])');
+  if (!blocks.length) return;
+
+  for (const block of blocks) {
+    block.dataset.sgRendered = '1';
+    const src = block.querySelector('.sg-mermaid-src');
+    const diagram = block.querySelector('.sg-mermaid-diagram');
+    if (!src || !diagram) continue;
+
+    const code = String(src.textContent || '').trim();
+    if (!code) {
+      diagram.textContent = '（空）';
+      continue;
+    }
+
+    // quick sanity
+    const looksMermaid = /^(flowchart|graph)\s+/i.test(code);
+    if (!looksMermaid) {
+      diagram.textContent = '未检测到 Mermaid 语法（建议以 flowchart LR 或 graph LR 开头）。已显示代码。';
+      block.classList.add('show-src');
+      continue;
+    }
+
+    diagram.textContent = '（正在渲染图谱…）';
+
+    try {
+      const svg = await renderMermaidCodeToSvg(code);
+      if (!svg) throw new Error('empty svg');
+      diagram.innerHTML = svg;
+      block.classList.add('render-ok');
+    } catch (e) {
+      console.warn('[StoryGuide] mermaid render failed:', e);
+      diagram.textContent = '图谱渲染失败（可检查网络/CDN 或 Mermaid 语法）。已显示代码。';
+      block.classList.add('show-src');
+    }
+  }
+}
+
+function installMermaidUiDelegation() {
+  if (window.__storyguide_mermaid_ui_installed) return;
+  window.__storyguide_mermaid_ui_installed = true;
+
+  document.addEventListener('click', async (e) => {
+    const aCopy = e.target?.closest?.('.sg-mermaid-copy');
+    if (aCopy) {
+      e.preventDefault();
+      const block = aCopy.closest('.sg-mermaid-block');
+      const src = block?.querySelector?.('.sg-mermaid-src');
+      const code = String(src?.textContent || '').trim();
+      if (!code) return;
+      try {
+        await navigator.clipboard.writeText(code);
+        aCopy.textContent = '已复制 ✓';
+        setTimeout(() => { aCopy.textContent = '复制图谱代码'; }, 1200);
+      } catch {
+        // fallback
+        const ta = document.createElement('textarea');
+        ta.value = code;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+        aCopy.textContent = '已复制 ✓';
+        setTimeout(() => { aCopy.textContent = '复制图谱代码'; }, 1200);
+      }
+      return;
+    }
+
+    const aToggle = e.target?.closest?.('.sg-mermaid-toggle');
+    if (aToggle) {
+      e.preventDefault();
+      const block = aToggle.closest('.sg-mermaid-block');
+      if (!block) return;
+      const on = block.classList.toggle('show-src');
+      aToggle.textContent = on ? '隐藏代码' : '显示代码';
+      return;
+    }
+  }, true);
+}
+
 
 function renderMarkdownInto($el, markdown) { $el.html(renderMarkdownToHtml(markdown)); }
 
@@ -569,408 +717,6 @@ function buildSchemaFromModules(modules) {
 
   for (const m of modules) {
     if (m.type === 'list') {
-      properties[m.key] = {
-        type: 'array',
-        items: { type: 'string' },
-        ...(m.maxItems ? { maxItems: m.maxItems } : {}),
-        minItems: 0
-      };
-    } else {
-      properties[m.key] = { type: 'string' };
-    }
-    if (m.required) required.push(m.key);
-  }
-
-  return {
-    name: 'StoryGuideDynamicReport',
-    description: '剧情指导动态输出（按模块配置生成）',
-    strict: true,
-    value: {
-      '$schema': 'http://json-schema.org/draft-04/schema#',
-      type: 'object',
-      additionalProperties: false,
-      properties,
-      required
-    }
-  };
-}
-
-function buildOutputFieldsText(modules) {
-  // 每个模块一行：key: title — prompt
-  const lines = [];
-  for (const m of modules) {
-    const p = m.prompt ? ` — ${m.prompt}` : '';
-    const t = m.title ? `（${m.title}）` : '';
-    if (m.type === 'list') {
-      lines.push(`- ${m.key}${t}: string[]${m.maxItems ? ` (<=${m.maxItems})` : ''}${p}`);
-    } else {
-      lines.push(`- ${m.key}${t}: string${p}`);
-    }
-  }
-  return lines.join('\n');
-}
-
-function buildPromptMessages(snapshotText, spoilerLevel, modules, mode /* panel|append */) {
-  const s = ensureSettings();
-  const compactHint = mode === 'append'
-    ? `【输出偏好】更精简：少废话、少铺垫、直给关键信息。`
-    : `【输出偏好】适度详细：以“可执行引导”为主，不要流水账。`;
-
-  const extraSystem = String(s.customSystemPreamble || '').trim();
-  const extraConstraints = String(s.customConstraints || '').trim();
-
-  const system = [
-    `---BEGIN PROMPT---`,
-    `[System]`,
-    `你是执行型“剧情指导/编剧顾问”。从“正在经历的世界”（聊天+设定）提炼结构，并给出后续引导。`,
-    spoilerPolicyText(spoilerLevel),
-    compactHint,
-    extraSystem ? `\n【自定义 System 补充】\n${extraSystem}` : ``,
-    ``,
-    `[Constraints]`,
-    `1) 不要凭空杜撰世界观/人物/地点；不确定写“未知/待确认”。`,
-    `2) 不要复述流水账；只提炼关键矛盾、动机、风险与走向。`,
-    `3) 输出必须是 JSON 对象本体（无 Markdown、无代码块、无多余解释）。`,
-    `4) 只输出下面列出的字段，不要额外字段。`,
-    extraConstraints ? `\n【自定义 Constraints 补充】\n${extraConstraints}` : ``,
-    ``,
-    `[Output Fields]`,
-    buildOutputFieldsText(modules),
-    `---END PROMPT---`
-  ].filter(Boolean).join('\n');
-
-  return [
-    { role: 'system', content: system },
-    { role: 'user', content: snapshotText }
-  ];
-}
-
-// -------------------- snapshot --------------------
-
-function buildSnapshot() {
-  const ctx = SillyTavern.getContext();
-  const s = ensureSettings();
-
-  const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-  const maxMessages = clampInt(s.maxMessages, 5, 200, DEFAULT_SETTINGS.maxMessages);
-  const maxChars = clampInt(s.maxCharsPerMessage, 200, 8000, DEFAULT_SETTINGS.maxCharsPerMessage);
-
-  let charBlock = '';
-  try {
-    if (ctx.characterId !== undefined && ctx.characterId !== null && Array.isArray(ctx.characters)) {
-      const c = ctx.characters[ctx.characterId];
-      if (c) {
-        const name = c.name ?? '';
-        const desc = c.description ?? c.desc ?? '';
-        const personality = c.personality ?? '';
-        const scenario = c.scenario ?? '';
-        const first = c.first_mes ?? c.first_message ?? '';
-        charBlock =
-          `【角色卡】\n` +
-          `- 名称：${stripHtml(name)}\n` +
-          `- 描述：${stripHtml(desc)}\n` +
-          `- 性格：${stripHtml(personality)}\n` +
-          `- 场景/设定：${stripHtml(scenario)}\n` +
-          (first ? `- 开场白：${stripHtml(first)}\n` : '');
-      }
-    }
-  } catch (e) { console.warn('[StoryGuide] character read failed:', e); }
-
-  const canon = stripHtml(getChatMetaValue(META_KEYS.canon));
-  const world = stripHtml(getChatMetaValue(META_KEYS.world));
-
-  const picked = [];
-  for (let i = chat.length - 1; i >= 0 && picked.length < maxMessages; i--) {
-    const m = chat[i];
-    if (!m) continue;
-
-    const isUser = m.is_user === true;
-    if (isUser && !s.includeUser) continue;
-    if (!isUser && !s.includeAssistant) continue;
-
-    const name = stripHtml(m.name || (isUser ? 'User' : 'Assistant'));
-    let text = stripHtml(m.mes ?? m.message ?? '');
-    if (!text) continue;
-    if (text.length > maxChars) text = text.slice(0, maxChars) + '…(截断)';
-    picked.push(`【${name}】${text}`);
-  }
-  picked.reverse();
-
-  const sourceSummary = {
-    totalMessages: chat.length,
-    usedMessages: picked.length,
-    hasCanon: Boolean(canon),
-    hasWorld: Boolean(world),
-    characterSelected: ctx.characterId !== undefined && ctx.characterId !== null
-  };
-
-  const snapshotText = [
-    `【任务】你是“剧情指导”。根据下方“正在经历的世界”（聊天 + 设定）输出结构化报告。`,
-    ``,
-    charBlock ? charBlock : `【角色卡】（未获取到/可能是群聊）`,
-    ``,
-    world ? `【世界观/设定补充】\n${world}\n` : `【世界观/设定补充】（未提供）\n`,
-    canon ? `【原著后续/大纲】\n${canon}\n` : `【原著后续/大纲】（未提供）\n`,
-    buildWorldbookBlock(),
-    `【聊天记录（最近${picked.length}条）】`,
-    picked.length ? picked.join('\n\n') : '（空）'
-  ].join('\n');
-
-  return { snapshotText, sourceSummary };
-}
-
-// -------------------- provider=st --------------------
-
-async function callViaSillyTavern(messages, schema, temperature) {
-  const ctx = SillyTavern.getContext();
-  if (typeof ctx.generateRaw === 'function') return await ctx.generateRaw({ prompt: messages, jsonSchema: schema, temperature });
-  if (typeof ctx.generateQuietPrompt === 'function') return await ctx.generateQuietPrompt({ messages, jsonSchema: schema, temperature });
-  if (globalThis.TavernHelper && typeof globalThis.TavernHelper.generateRaw === 'function') {
-    const txt = await globalThis.TavernHelper.generateRaw({ ordered_prompts: messages, should_stream: false });
-    return String(txt || '');
-  }
-  throw new Error('未找到可用的生成函数（generateRaw/generateQuietPrompt）。');
-}
-
-async function fallbackAskJson(messages, temperature) {
-  const ctx = SillyTavern.getContext();
-  const retry = clone(messages);
-  retry.unshift({ role: 'system', content: `再次强调：只输出 JSON 对象本体，不要任何额外文字。` });
-  if (typeof ctx.generateRaw === 'function') return await ctx.generateRaw({ prompt: retry, temperature });
-  if (typeof ctx.generateQuietPrompt === 'function') return await ctx.generateQuietPrompt({ messages: retry, temperature });
-  throw new Error('fallback 失败：缺少 generateRaw/generateQuietPrompt');
-}
-
-async function fallbackAskJsonCustom(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP, stream) {
-  const retry = clone(messages);
-  retry.unshift({ role: 'system', content: `再次强调：只输出 JSON 对象本体，不要任何额外文字，不要代码块。` });
-  return await callViaCustom(apiBaseUrl, apiKey, model, retry, temperature, maxTokens, topP, stream);
-}
-
-function hasAnyModuleKey(obj, modules) {
-  if (!obj || typeof obj !== 'object') return false;
-  for (const m of modules || []) {
-    const k = m?.key;
-    if (k && Object.prototype.hasOwnProperty.call(obj, k)) return true;
-  }
-  return false;
-}
-
-
-
-// -------------------- custom provider
-
-// -------------------- custom provider (proxy-first) --------------------
-
-function normalizeBaseUrl(input) {
-  let u = String(input || '').trim();
-  if (!u) return '';
-  u = u.replace(/\/+$/, '');
-  u = u.replace(/\/v1\/chat\/completions$/i, '');
-  u = u.replace(/\/chat\/completions$/i, '');
-  u = u.replace(/\/v1\/completions$/i, '');
-  u = u.replace(/\/completions$/i, '');
-  return u;
-}
-function deriveChatCompletionsUrl(base) {
-  const u = normalizeBaseUrl(base);
-  if (!u) return '';
-  if (/\/v1$/.test(u)) return u + '/chat/completions';
-  if (/\/v1\b/i.test(u)) return u.replace(/\/+$/, '') + '/chat/completions';
-  return u + '/v1/chat/completions';
-}
-
-
-async function readStreamedChatCompletionToText(res) {
-  const reader = res.body?.getReader?.();
-  if (!reader) {
-    // no stream body; fallback to normal
-    const txt = await res.text().catch(() => '');
-    return txt;
-  }
-
-  const decoder = new TextDecoder('utf-8');
-  let buffer = '';
-  let out = '';
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-
-    // process line by line
-    let idx;
-    while ((idx = buffer.indexOf('\n')) !== -1) {
-      const line = buffer.slice(0, idx).trimEnd();
-      buffer = buffer.slice(idx + 1);
-
-      const t = line.trim();
-      if (!t) continue;
-
-      // SSE: data: ...
-      if (t.startsWith('data:')) {
-        const payload = t.slice(5).trim();
-        if (!payload) continue;
-        if (payload === '[DONE]') return out;
-
-        try {
-          const j = JSON.parse(payload);
-          const c0 = j?.choices?.[0];
-          const delta = c0?.delta?.content;
-          if (typeof delta === 'string') {
-            out += delta;
-            continue;
-          }
-          const msg = c0?.message?.content;
-          if (typeof msg === 'string') {
-            // some servers stream full message chunks as message.content
-            out += msg;
-            continue;
-          }
-          const txt = c0?.text;
-          if (typeof txt === 'string') {
-            out += txt;
-            continue;
-          }
-          const c = j?.content;
-          if (typeof c === 'string') {
-            out += c;
-            continue;
-          }
-        } catch {
-          // ignore
-        }
-      } else {
-        // NDJSON line
-        try {
-          const j = JSON.parse(t);
-          const c0 = j?.choices?.[0];
-          const delta = c0?.delta?.content;
-          if (typeof delta === 'string') out += delta;
-          else if (typeof c0?.message?.content === 'string') out += c0.message.content;
-        } catch {
-          // ignore
-        }
-      }
-    }
-  }
-
-  // flush remaining (rare)
-  const rest = buffer.trim();
-  if (rest) {
-    // try parse if json line
-    try {
-      const j = JSON.parse(rest);
-      const c0 = j?.choices?.[0];
-      const delta = c0?.delta?.content;
-      if (typeof delta === 'string') out += delta;
-      else if (typeof c0?.message?.content === 'string') out += c0.message.content;
-    } catch { /* ignore */ }
-  }
-
-  return out;
-}
-
-async function callViaCustomBackendProxy(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP, stream) {
-  const url = '/api/backends/chat-completions/generate';
-
-  const requestBody = {
-    messages,
-    model: String(model || '').replace(/^models\//, '') || 'gpt-4o-mini',
-    max_tokens: maxTokens ?? 8192,
-    temperature: temperature ?? 0.7,
-    top_p: topP ?? 0.95,
-    stream: !!stream,
-    chat_completion_source: 'custom',
-    reverse_proxy: apiBaseUrl,
-    custom_url: apiBaseUrl,
-    custom_include_headers: apiKey ? `Authorization: Bearer ${apiKey}` : '',
-  };
-
-  const headers = { ...getStRequestHeadersCompat(), 'Content-Type': 'application/json' };
-  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(requestBody) });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    const err = new Error(`后端代理请求失败: HTTP ${res.status} ${res.statusText}\n${text}`);
-    err.status = res.status;
-    throw err;
-  }
-
-
-  const ct = String(res.headers.get('content-type') || '');
-  if (stream && (ct.includes('text/event-stream') || ct.includes('ndjson') || ct.includes('stream'))) {
-    const streamed = await readStreamedChatCompletionToText(res);
-    if (streamed) return String(streamed);
-    // fall through
-  }
-
-  const data = await res.json().catch(() => ({}));
-  if (data?.choices?.[0]?.message?.content) return String(data.choices[0].message.content);
-  if (typeof data?.content === 'string') return data.content;
-  return JSON.stringify(data ?? '');
-}
-
-async function callViaCustomBrowserDirect(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP, stream) {
-  const endpoint = deriveChatCompletionsUrl(apiBaseUrl);
-  if (!endpoint) throw new Error('custom 模式：API基础URL 为空');
-
-  const body = {
-    model,
-    messages,
-    max_tokens: maxTokens ?? 8192,
-    temperature: temperature ?? 0.7,
-    top_p: topP ?? 0.95,
-    stream: !!stream,
-  };
-  const headers = { 'Content-Type': 'application/json' };
-  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
-
-  const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`直连请求失败: HTTP ${res.status} ${res.statusText}\n${text}`);
-  }
-
-  const ct = String(res.headers.get('content-type') || '');
-  if (stream && (ct.includes('text/event-stream') || ct.includes('ndjson') || ct.includes('stream'))) {
-    const streamed = await readStreamedChatCompletionToText(res);
-    return String(streamed || '');
-  }
-
-  const json = await res.json();
-  return String(json?.choices?.[0]?.message?.content ?? '');
-}
-
-async function callViaCustom(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP, stream) {
-  const base = normalizeBaseUrl(apiBaseUrl);
-  if (!base) throw new Error('custom 模式需要填写 API基础URL');
-
-  try {
-    return await callViaCustomBackendProxy(base, apiKey, model, messages, temperature, maxTokens, topP, stream);
-  } catch (e) {
-    const status = e?.status;
-    if (status === 404 || status === 405) {
-      console.warn('[StoryGuide] backend proxy unavailable; fallback to browser direct');
-      return await callViaCustomBrowserDirect(base, apiKey, model, messages, temperature, maxTokens, topP, stream);
-    }
-    throw e;
-  }
-}
-
-// -------------------- render report from modules --------------------
-
-function renderReportMarkdownFromModules(parsedJson, modules) {
-  const lines = [];
-  lines.push(`# 剧情指导报告`);
-  lines.push('');
-
-  for (const m of modules) {
-    const val = parsedJson?.[m.key];
-    lines.push(`## ${m.title || m.key}`);
-
-    if (m.type === 'list') {
       const arr = Array.isArray(val) ? val : [];
       if (!arr.length) {
         lines.push('（空）');
@@ -981,6 +727,17 @@ function renderReportMarkdownFromModules(parsedJson, modules) {
         } else {
           arr.forEach(t => lines.push(`- ${t}`));
         }
+      }
+    } else if (m.type === 'diagram_mermaid') {
+      const code = val ? String(val) : '';
+      if (!code.trim()) {
+        lines.push('（空）');
+      } else {
+        lines.push(`<div class="sg-mermaid-block">` +
+          `<div class="sg-mermaid-toolbar"><a href="#" class="sg-mermaid-copy">复制图谱代码</a><a href="#" class="sg-mermaid-toggle">显示代码</a></div>` +
+          `<div class="sg-mermaid-diagram"></div>` +
+          `<pre class="sg-pre sg-mermaid-src">${escapeHtml(code)}</pre>` +
+        `</div>`);
       }
     } else {
       lines.push(val ? String(val) : '（空）');
@@ -1037,6 +794,7 @@ async function runAnalysis() {
     const md = renderReportMarkdownFromModules(parsed, modules);
     lastReport = { json: parsed, markdown: md, createdAt: Date.now(), sourceSummary };
     renderMarkdownInto($('#sg_md'), md);
+    try { installMermaidUiDelegation(); await renderMermaidIn(document.getElementById('sg_md')); } catch { /* ignore */ }
 
     // 同步面板报告到聊天末尾
     try { syncPanelOutputToChat(md, false); } catch { /* ignore */ }
@@ -1101,8 +859,28 @@ ${indentForListItem(picked.join(' / '))}`);
         const joined = normalized.join('\n\n');
         lines.push(`- **${title}**\n${indentForListItem(joined)}`);
       }
+    } else if (m.type === 'diagram_mermaid') {
+      const code = (val !== undefined && val !== null) ? String(val).trim() : '';
+      if (!code) {
+        if (showEmpty) lines.push(`- **${title}**
+${indentForListItem('（空）')}`);
+        continue;
+      }
+
+      if (mode === 'compact') {
+        lines.push(`- **${title}**
+${indentForListItem('（图谱已生成：请在面板/展开后查看）')}`);
+      } else {
+        const html = `<div class="sg-mermaid-block">` +
+          `<div class="sg-mermaid-toolbar"><a href="#" class="sg-mermaid-copy">复制图谱代码</a><a href="#" class="sg-mermaid-toggle">显示代码</a></div>` +
+          `<div class="sg-mermaid-diagram"></div>` +
+          `<pre class="sg-pre sg-mermaid-src">${escapeHtml(code)}</pre>` +
+        `</div>`;
+        lines.push(`- **${title}**
+${indentForListItem(html)}`);
+      }
     } else {
-      const text = (val !== undefined && val !== null) ? String(val).trim() : '';
+    const text = (val !== undefined && val !== null) ? String(val).trim() : '';
       if (!text) {
         if (showEmpty) lines.push(`- **${title}**\n${indentForListItem('（空）')}`);
         continue;
@@ -1260,11 +1038,13 @@ function ensurePanelBoxPresent(mesKey) {
     attachPanelToggleHandler(existing, mesKey);
     const body = existing.querySelector('.sg-panel-body');
     if (body && cached.htmlInner && body.innerHTML !== cached.htmlInner) body.innerHTML = cached.htmlInner;
+    try { installMermaidUiDelegation(); renderMermaidIn(body); } catch { /* ignore */ }
     return true;
   }
 
   const box = createPanelBoxElement(mesKey, cached.htmlInner, cached.collapsed);
   textEl.appendChild(box);
+  try { installMermaidUiDelegation(); renderMermaidIn(box.querySelector('.sg-inline-body')); } catch { /* ignore */ }
   return true;
 }
 
@@ -1315,11 +1095,13 @@ function ensureInlineBoxPresent(mesKey) {
     // 更新 body（有时候被覆盖成空壳）
     const body = existing.querySelector('.sg-inline-body');
     if (body && cached.htmlInner && body.innerHTML !== cached.htmlInner) body.innerHTML = cached.htmlInner;
+    try { installMermaidUiDelegation(); renderMermaidIn(body); } catch { /* ignore */ }
     return true;
   }
 
   const box = createInlineBoxElement(mesKey, cached.htmlInner, cached.collapsed);
   textEl.appendChild(box);
+  try { installMermaidUiDelegation(); renderMermaidIn(box.querySelector('.sg-panel-body')); } catch { /* ignore */ }
   return true;
 }
 
@@ -2491,6 +2273,7 @@ function init() {
     injectMinimalSettingsPanel();
     ensureChatActionButtons();
     installCardZoomDelegation();
+    installMermaidUiDelegation();
   });
 
   globalThis.StoryGuide = {
