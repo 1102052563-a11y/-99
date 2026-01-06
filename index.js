@@ -1,247 +1,233 @@
-import { extension_settings, getContext, renderExtensionTemplate } from "../../../extensions.js";
-import { generateText } from "../../../script.js"; // 使用 ST 内部生成函数，或自定义 fetch
+'use strict';
 
-const EXTENSION_NAME = "canon-lock";
-const CONFIG_FILE = "config.json";
+/**
+ * 剧情指导 StoryGuide (SillyTavern UI Extension)
+ * v0.5.2
+ *
+ * BUG FIXES:
+ * - Fixed MutationObserver infinite loop (DOM thrashing).
+ * - Improved JSON parsing robustness against preamble text.
+ * - Added safer context checks for `ctx.chat`.
+ */
 
-// 默认设置
-const defaultSettings = {
-    searchApiKey: "", // Serper.dev Key
-    searchProvider: "serper", // serper or google
-    analysisModel: "gpt-4o-mini", // 模型名
-    apiUrl: "https://api.openai.com/v1", // 独立API地址
-    apiKey: "", // 独立API Key
-    prompts: [] // 加载 config.json
-};
+const MODULE_NAME = 'storyguide';
 
-let settings = defaultSettings;
-let promptConfig = [];
+/**
+ * 模块配置格式（JSON 数组）示例：
+ * [
+ * {"key":"world_summary","title":"世界简介","type":"text","prompt":"1~3句概括世界与局势","required":true,"panel":true,"inline":true},
+ * {"key":"key_plot_points","title":"重要剧情点","type":"list","prompt":"3~8条关键剧情点（短句）","maxItems":8,"required":true,"panel":true,"inline":false}
+ * ]
+ */
 
-// 加载配置
-async function loadSettings() {
-    settings = Object.assign({}, defaultSettings, extension_settings[EXTENSION_NAME]);
-    
-    // 读取本地的 config.json (Prompts)
-    try {
-        const response = await fetch(`/scripts/extensions/${EXTENSION_NAME}/${CONFIG_FILE}`);
-        promptConfig = await response.json();
-    } catch (e) {
-        console.error("无法加载 Canon Lock 的 Prompt 配置", e);
-    }
-}
+const DEFAULT_MODULES = Object.freeze([
+  { key: 'world_summary', title: '世界简介', type: 'text', prompt: '1~3句概括世界与局势', required: true, panel: true, inline: true },
+  { key: 'key_plot_points', title: '重要剧情点', type: 'list', prompt: '3~8条关键剧情点（短句）', maxItems: 8, required: true, panel: true, inline: false },
+  { key: 'current_scene', title: '当前时间点 · 具体剧情', type: 'text', prompt: '描述当前发生了什么（地点/人物动机/冲突/悬念）', required: true, panel: true, inline: true },
+  { key: 'next_events', title: '后续将会发生的事', type: 'list', prompt: '接下来最可能发生的事（条目）', maxItems: 6, required: true, panel: true, inline: true },
+  { key: 'protagonist_impact', title: '主角行为造成的影响', type: 'text', prompt: '主角行为对剧情/关系/风险造成的改变', required: true, panel: true, inline: false },
+  { key: 'tips', title: '给主角的提示（基于原著后续/大纲）', type: 'list', prompt: '给出可执行提示（尽量具体）', maxItems: 4, required: true, panel: true, inline: true },
+]);
 
-// ------------------------------------------
-// 核心功能函数
-// ------------------------------------------
+const DEFAULT_SETTINGS = Object.freeze({
+  enabled: true,
 
-// 1. 获取独立 API 的生成结果
-async function callIndependentLLM(prompt) {
-    // 这里演示使用 fetch 直接调用 OpenAI 格式接口
-    // 如果想复用 ST 的主连接，可以使用 generateQuietly
-    
-    if (!settings.apiKey) {
-        toastr.error("请先在插件设置中配置独立 API Key");
-        return null;
-    }
+  // 输入截取
+  maxMessages: 40,
+  maxCharsPerMessage: 1600,
+  includeUser: true,
+  includeAssistant: true,
 
-    const body = {
-        model: settings.analysisModel,
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.3
-    };
+  // 生成控制
+  spoilerLevel: 'mild', // none | mild | full
+  temperature: 0.4,
 
-    try {
-        const response = await fetch(`${settings.apiUrl}/chat/completions`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${settings.apiKey}`
-            },
-            body: JSON.stringify(body)
-        });
-        const data = await response.json();
-        return data.choices[0].message.content;
-    } catch (e) {
-        toastr.error("API 调用失败: " + e.message);
-        return null;
-    }
-}
+  // 自动刷新（面板报告）
+  autoRefresh: false,
+  autoRefreshOn: 'received', // received | sent | both
+  debounceMs: 1200,
 
-// 2. 执行 Google 搜索 (这里以 Serper.dev 为例，因为它返回纯净 JSON)
-async function performGoogleSearch(query) {
-    if (!settings.searchApiKey) {
-        toastr.error("请配置搜索 API Key (Serper.dev)");
-        return "";
-    }
+  // 自动追加到正文末尾
+  autoAppendBox: true,
+  appendMode: 'compact', // compact | standard
+  appendDebounceMs: 700,
 
-    // 强制附加排除词
-    const safeQuery = `${query} -轮回乐园 -无限流 -穿越 -同人 -综漫 -主神空间 -系统 -聊天群 -副本 -飞卢`;
-    
-    console.log("[Canon Lock] Searching:", safeQuery);
+  // provider
+  provider: 'st', // st | custom
 
-    try {
-        const response = await fetch("https://google.serper.dev/search", {
-            method: "POST",
-            headers: {
-                "X-API-KEY": settings.searchApiKey,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({ q: safeQuery, gl: "cn", hl: "zh-cn" })
-        });
-        
-        const data = await response.json();
-        
-        // 整理搜索结果文本
-        let resultText = "【搜索结果 - 原著优先】\n";
-        if (data.organic) {
-            data.organic.slice(0, 5).forEach((item, index) => {
-                resultText += `${index + 1}. 标题: ${item.title}\n   摘要: ${item.snippet}\n\n`;
-            });
-        }
-        return resultText;
-    } catch (e) {
-        console.error(e);
-        return "搜索失败，请检查网络或Key。";
-    }
-}
+  // custom API
+  customEndpoint: '',
+  customApiKey: '',
+  customModel: 'gpt-4o-mini',
+  customModelsCache: [],
+  customTopP: 0.95,
+  customMaxTokens: 8192,
 
-// 3. 主流程：分析 -> 搜索 -> 生成
-async function runCanonAnalysis() {
-    const context =  SillyTavern.getContext();
-    const chatHistory = context.chat.slice(-10).map(m => `${m.name}: ${m.message}`).join("\n");
-    
-    $("#canon-lock-results").html('<div class="canon-loading">正在锁定原著时间线...<br>1. 分析当前IP与节点</div>');
+  // 预设导入/导出
+  presetIncludeApiKey: false,
 
-    // Step 1: 提取搜索词
-    const queryPrompt = `
-    阅读以下对话，提取当前所在的作品IP名称（如《海贼王》）以及当前剧情所处的大致时间点/章节。
-    只输出搜索关键词，不要其他废话。
-    格式：作品名 + 关键事件/章节
-    
-    对话内容：
-    ${chatHistory}
-    `;
-    
-    const searchQuery = await callIndependentLLM(queryPrompt);
-    if (!searchQuery) return;
+  // 世界书
+  worldbookEnabled: false,
+  worldbookMode: 'active', // active | all
+  worldbookMaxChars: 6000,
+  worldbookWindowMessages: 18,
+  worldbookJson: '',
 
-    $("#canon-lock-results").html(`<div class="canon-loading">正在锁定原著时间线...<br>2. 正在搜索: ${searchQuery}</div>`);
-
-    // Step 2: 联网搜索
-    const searchResults = await performGoogleSearch(searchQuery);
-
-    // Step 3: 循环执行 Config 中的任务
-    let finalHtml = "";
-    
-    // 为了节省 Token，我们可以把所有任务打包成一次请求，或者分批请求。
-    // 鉴于你的需求比较复杂，我们针对每个 "panel: true" 的项生成内容。
-    
-    // 这里我们先生成最重要的 global_prompt 也就是上下文规则
-    // 但在插件UI模式下，我们直接展示结果
-    
-    const uiItems = promptConfig.filter(item => item.panel === true);
-    
-    $("#canon-lock-results").html(`<div class="canon-loading">正在锁定原著时间线...<br>3. 正在对照原著生成分析报告...</div>`);
-
-    for (const item of uiItems) {
-        // 构建最终 Prompt
-        const finalPrompt = `
-        ${item.prompt}
-        
-        【必须参考的真实原著资料】
-        ${searchResults}
-        
-        【当前对话上下文】
-        ${chatHistory}
-        
-        请严格按照 JSON 或 列表格式输出结果。
-        `;
-
-        const content = await callIndependentLLM(finalPrompt);
-        
-        // 渲染 HTML
-        finalHtml += `
-            <div class="canon-card">
-                <div class="canon-card-title">${item.title}</div>
-                <div class="canon-card-content">${formatResult(content, item.type)}</div>
-            </div>
-        `;
-        
-        // 实时更新 UI (每生成一个显示一个)
-        $("#canon-lock-results").html(finalHtml);
-    }
-}
-
-// 简单的格式化工具
-function formatResult(text, type) {
-    if (!text) return "无内容";
-    // 简单的 Markdown 转 HTML 处理
-    return text.replace(/\n/g, "<br>").replace(/\*\*(.*?)\*\*/g, "<b>$1</b>");
-}
-
-
-// ------------------------------------------
-// UI 构建
-// ------------------------------------------
-
-function createUi() {
-    // 添加一个按钮到左侧或顶部扩展栏
-    const btn = document.createElement("div");
-    btn.className = "list-group-item flex-container flex-gap-10";
-    btn.innerHTML = `<div class="fa-solid fa-book-journal-whills"></div><div>原著锁 (Canon Lock)</div>`;
-    btn.onclick = () => {
-        $("#canon-lock-panel").toggleClass("hidden");
-    };
-    
-    // 这里简单地挂载到扩展菜单里，实际建议参考 ST 的 createDrawer 或类似 API
-    // 为了演示方便，我们直接操作 DOM
-    // 实际最好使用 extension_settings 的 UI 注入点
-}
-
-// 创建浮动面板或注入到右侧栏
-function createPanel() {
-    const panel = document.createElement("div");
-    panel.id = "canon-lock-panel";
-    panel.className = "hidden";
-    panel.innerHTML = `
-        <div class="canon-header">
-            <h3>🛡️ 原著纯净模式</h3>
-            <button id="canon-run-btn" class="menu_button">开始分析</button>
-            <button id="canon-close-btn" class="menu_button">X</button>
-        </div>
-        <div id="canon-lock-results" class="canon-body">
-            <div class="placeholder-text">点击“开始分析”以检索原著正史数据...</div>
-        </div>
-    `;
-    document.body.appendChild(panel);
-
-    document.getElementById("canon-run-btn").addEventListener("click", runCanonAnalysis);
-    document.getElementById("canon-close-btn").addEventListener("click", () => {
-        panel.classList.add("hidden");
-    });
-}
-
-// ------------------------------------------
-// 初始化
-// ------------------------------------------
-jQuery(async () => {
-    await loadSettings();
-    createPanel();
-    
-    // 添加设置菜单的 UI (这里省略详细的 Setting HTML 构建代码，通常使用 extension_settings.html)
-    // 你需要在 ST 的 Extensions -> Canon Lock 中填入 API Key
-    
-    // 注入启动按钮到 ST 界面 (例如顶部栏)
-    const topBar = document.querySelector("#extensions_menu");
-    if(topBar) {
-        // 这里的逻辑需要根据 ST 具体的 DOM 结构调整
-    }
-    
-    // 临时方案：在 Slash Commands 添加命令 /canon
-    SillyTavern.registerSlashCommand("canon", (args, value) => {
-        $("#canon-lock-panel").toggleClass("hidden");
-        if (!$("#canon-lock-panel").hasClass("hidden")) {
-            runCanonAnalysis();
-        }
-    }, [], "打开原著分析面板", true, true);
+  // 模块自定义
+  modulesJson: '',
+  customSystemPreamble: '',
+  customConstraints: '',
 });
+
+const META_KEYS = Object.freeze({
+  canon: 'storyguide_canon_outline',
+  world: 'storyguide_world_setup',
+});
+
+let lastReport = null;
+let lastJsonText = '';
+let refreshTimer = null;
+let appendTimer = null;
+
+// ============== 关键：DOM 追加缓存 & 观察者（抗重渲染） ==============
+const inlineCache = new Map();
+let chatDomObserver = null;
+let bodyDomObserver = null;
+let reapplyTimer = null;
+
+// -------------------- ST request headers compatibility --------------------
+function getCsrfTokenCompat() {
+  const meta = document.querySelector('meta[name="csrf-token"], meta[name="csrf_token"], meta[name="csrfToken"]');
+  if (meta && meta.content) return meta.content;
+  const ctx = SillyTavern.getContext?.() ?? {};
+  return ctx.csrfToken || ctx.csrf_token || globalThis.csrf_token || globalThis.csrfToken || '';
+}
+
+function getStRequestHeadersCompat() {
+  const ctx = SillyTavern.getContext?.() ?? {};
+  let h = {};
+  try {
+    if (typeof SillyTavern.getRequestHeaders === 'function') h = SillyTavern.getRequestHeaders();
+    else if (typeof ctx.getRequestHeaders === 'function') h = ctx.getRequestHeaders();
+    else if (typeof globalThis.getRequestHeaders === 'function') h = globalThis.getRequestHeaders();
+  } catch { h = {}; }
+
+  h = { ...(h || {}) };
+
+  const token = getCsrfTokenCompat();
+  if (token) {
+    if (!('X-CSRF-Token' in h) && !('X-CSRF-TOKEN' in h) && !('x-csrf-token' in h)) {
+      h['X-CSRF-Token'] = token;
+    }
+  }
+  return h;
+}
+
+// -------------------- utils --------------------
+
+function clone(obj) { try { return structuredClone(obj); } catch { return JSON.parse(JSON.stringify(obj)); } }
+
+function ensureSettings() {
+  const ctx = SillyTavern.getContext();
+  if (!ctx.extensionSettings) ctx.extensionSettings = {}; // Safety
+  const { extensionSettings, saveSettingsDebounced } = ctx;
+
+  if (!extensionSettings[MODULE_NAME]) {
+    extensionSettings[MODULE_NAME] = clone(DEFAULT_SETTINGS);
+    extensionSettings[MODULE_NAME].modulesJson = JSON.stringify(DEFAULT_MODULES, null, 2);
+    if(saveSettingsDebounced) saveSettingsDebounced();
+  } else {
+    for (const k of Object.keys(DEFAULT_SETTINGS)) {
+      if (!Object.hasOwn(extensionSettings[MODULE_NAME], k)) extensionSettings[MODULE_NAME][k] = DEFAULT_SETTINGS[k];
+    }
+    if (!extensionSettings[MODULE_NAME].modulesJson) {
+      extensionSettings[MODULE_NAME].modulesJson = JSON.stringify(DEFAULT_MODULES, null, 2);
+    }
+  }
+  return extensionSettings[MODULE_NAME];
+}
+
+function saveSettings() {
+    const ctx = SillyTavern.getContext();
+    if(ctx.saveSettingsDebounced) ctx.saveSettingsDebounced();
+}
+
+function stripHtml(input) {
+  if (!input) return '';
+  return String(input).replace(/<[^>]*>/g, '').replace(/\s+\n/g, '\n').trim();
+}
+
+function clampInt(v, min, max, fallback) {
+  const n = Number.parseInt(v, 10);
+  if (Number.isFinite(n)) return Math.min(max, Math.max(min, n));
+  return fallback;
+}
+function clampFloat(v, min, max, fallback) {
+  const n = Number.parseFloat(v);
+  if (Number.isFinite(n)) return Math.min(max, Math.max(min, n));
+  return fallback;
+}
+
+/**
+ * Enhanced JSON Parser (Bug Fix 2)
+ * Searches for the outermost {} to ignore preamble/postamble text.
+ */
+function safeJsonParse(maybeJson) {
+  if (!maybeJson) return null;
+  let t = String(maybeJson).trim();
+
+  // Attempt to find the first '{' and last '}'
+  const first = t.indexOf('{');
+  const last = t.lastIndexOf('}');
+
+  if (first !== -1 && last !== -1 && last > first) {
+    t = t.substring(first, last + 1);
+  }
+
+  // Common cleanup
+  t = t.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+
+  try { return JSON.parse(t); } catch { return null; }
+}
+
+function renderMarkdownToHtml(markdown) {
+  const { showdown, DOMPurify } = SillyTavern.libs;
+  const converter = new showdown.Converter({ simplifiedAutoLink: true, strikethrough: true, tables: true });
+  const html = converter.makeHtml(markdown || '');
+  return DOMPurify.sanitize(html);
+}
+
+function renderMarkdownInto($el, markdown) { $el.html(renderMarkdownToHtml(markdown)); }
+
+function getChatMetaValue(key) {
+  const ctx = SillyTavern.getContext();
+  return ctx.chatMetadata?.[key] ?? '';
+}
+async function setChatMetaValue(key, value) {
+  const ctx = SillyTavern.getContext();
+  if(!ctx.chatMetadata) ctx.chatMetadata = {};
+  ctx.chatMetadata[key] = value;
+  if(ctx.saveMetadata) await ctx.saveMetadata();
+}
+
+function setStatus(text, kind = '') {
+  const $s = $('#sg_status');
+  $s.removeClass('ok err warn').addClass(kind || '');
+  $s.text(text || '');
+}
+
+function updateButtonsEnabled() {
+  const ok = Boolean(lastReport?.markdown);
+  $('#sg_copyMd').prop('disabled', !ok);
+  $('#sg_copyJson').prop('disabled', !Boolean(lastJsonText));
+  $('#sg_injectTips').prop('disabled', !ok);
+}
+
+function showPane(name) {
+  $('#sg_modal .sg-tab').removeClass('active');
+  $(`#sg_tab_${name}`).addClass('active');
+  $('#sg_modal .sg-pane').removeClass('active');
+  $(`#sg_pane_${name}`).addClass('active');
+}
+
+// (The remainder of index.js is omitted in this environment due to tool message size limits.)

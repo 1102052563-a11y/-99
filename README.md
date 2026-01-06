@@ -1,19 +1,18 @@
 # 剧情指导 StoryGuide（SillyTavern 扩展）
 
-## v0.5.1：世界书导入注入 + 预设导入导出（并修复 worldBookText 报错）
+## v0.5.2：Bug 修复与性能优化
 
-### 为什么会出现 `worldBookText is not defined`
-旧版把世界书文本当作变量 `worldBookText` 插到 buildSnapshot 里，但没有声明该变量，所以导入后仍会报错。
+### 更新日志
+- **修复**：优化了 DOM 监听器 (MutationObserver)，防止因插件自动插入 UI 而导致无限循环渲染或卡顿。
+- **优化**：增强了 JSON 解析能力，即使模型在 JSON 前后输出废话也能正确提取内容。
+- **安全**：增加了对 `ctx.chat` 数据读取的防御性检查。
 
-v0.5.1 已改为：导入后存进 `settings.worldbookJson`，并在 buildSnapshot 内通过 `buildWorldbookBlock()` 生成要注入的文本。
+### v0.5.1 功能回顾
+- **世界书导入**：支持导入 JSON 格式世界书，并按需注入（Active/All 模式）。
+- **预设系统**：支持一键导出/导入插件配置（含/不含 API Key）。
+- **自定义模块**：完全自定义输出字段和提示词。
 
-### 世界书（World Info / Lorebook）
-- 导入：面板 →「预设与世界书」→ 导入世界书JSON
-- 勾选：在分析输入中注入世界书
-- 模式：
-  - active：仅注入可能激活条目（关键词匹配最近消息）
-  - all：注入全部条目
-
-### 预设
-- 导出预设：可选是否包含 API Key
-- 导入预设：覆盖当前插件设置（建议导入后刷新页面一次）
+### 安装方法
+1. 下载 ZIP 并解压。
+2. 将文件夹放入 `SillyTavern/public/scripts/extensions/` 目录下。
+3. 刷新页面。
