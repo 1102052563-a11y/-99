@@ -265,5 +265,20 @@
 #sg_inlineModulesSource{min-width: 160px;}
 
 
-/* v0.5.6 reroll */
-#sg_reroll{opacity:0.95;}
+/* v0.5.6 chat action buttons */
+.sg-chat-controls{
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  margin-right: 8px;
+}
+.sg-chat-controls .sg-chat-btn{
+  padding: 4px 8px;
+  font-size: 12px;
+  line-height: 1.2;
+  border-radius: 8px;
+  opacity: 0.95;
+}
+.sg-chat-controls.is-busy .sg-chat-btn{
+  opacity: 0.65;
+}

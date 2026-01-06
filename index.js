@@ -1056,7 +1056,7 @@ function scheduleReapplyAll(reason = '') {
 
 function reapplyAllInlineBoxes(reason = '') {
   const s = ensureSettings();
-  if (!s.enabled || !s.autoAppendBox) return;
+  if (!s.enabled) return;
   for (const [mesKey] of inlineCache.entries()) {
     ensureInlineBoxPresent(mesKey);
   }
@@ -1066,16 +1066,23 @@ function reapplyAllInlineBoxes(reason = '') {
 
 async function runInlineAppendForLastMessage(opts = {}) {
   const s = ensureSettings();
-  if (!s.enabled || !s.autoAppendBox) return;
+  const force = !!opts.force;
+  const allow = !!opts.allowWhenDisabled;
+  if (!s.enabled) return;
+  // 手动按钮允许在关闭“自动追加”时也生成
+  if (!s.autoAppendBox && !allow) return;
 
   const ref = getLastAssistantMessageRef();
   if (!ref) return;
 
   const { mesKey } = ref;
 
-  // 如果已经缓存过：默认只补贴一次就行（但仍会被 reapply 兜底）。force=true 则强制重算。
-  const force = !!opts?.force;
-  if (!force && inlineCache.has(String(mesKey))) {
+  if (force) {
+    inlineCache.delete(String(mesKey));
+  }
+
+  // 如果已经缓存过：非强制则只补贴一次；强制则重新请求
+  if (inlineCache.has(String(mesKey)) && !force) {
     ensureInlineBoxPresent(mesKey);
     return;
   }
@@ -1111,9 +1118,7 @@ async function runInlineAppendForLastMessage(opts = {}) {
     const md = buildInlineMarkdownFromModules(parsed, modules, s.appendMode, !!s.inlineShowEmpty);
     const htmlInner = renderMarkdownToHtml(md);
 
-    const prev = inlineCache.get(String(mesKey));
-    const keepCollapsed = prev ? !!prev.collapsed : false;
-    inlineCache.set(String(mesKey), { htmlInner, collapsed: keepCollapsed, createdAt: Date.now() });
+    inlineCache.set(String(mesKey), { htmlInner, collapsed: false, createdAt: Date.now() });
 
     requestAnimationFrame(() => { ensureInlineBoxPresent(mesKey); });
 
@@ -1290,6 +1295,95 @@ function createTopbarButton() {
   }
 }
 
+
+function findChatInputAnchor() {
+  // Prefer send button as anchor
+  const sendBtn =
+    document.querySelector('#send_but') ||
+    document.querySelector('#send_button') ||
+    document.querySelector('button#send') ||
+    document.querySelector('button[title*="Send"]') ||
+    document.querySelector('button[aria-label*="Send"]') ||
+    document.querySelector('button.menu_button#send_but') ||
+    document.querySelector('.send_button') ||
+    document.querySelector('button[type="submit"]');
+
+  if (sendBtn) return sendBtn;
+
+  // Fallback: textarea container
+  const ta =
+    document.querySelector('#send_textarea') ||
+    document.querySelector('textarea[name="message"]') ||
+    document.querySelector('textarea');
+
+  return ta;
+}
+
+function ensureChatActionButtons() {
+  if (document.getElementById('sg_chat_controls')) return;
+
+  const anchor = findChatInputAnchor();
+  if (!anchor) return;
+
+  const wrap = document.createElement('div');
+  wrap.id = 'sg_chat_controls';
+  wrap.className = 'sg-chat-controls';
+
+  const gen = document.createElement('button');
+  gen.type = 'button';
+  gen.id = 'sg_chat_generate';
+  gen.className = 'menu_button sg-chat-btn';
+  gen.title = '手动生成剧情指导分析框（不会自动生成）';
+  gen.textContent = '📘 生成';
+
+  const reroll = document.createElement('button');
+  reroll.type = 'button';
+  reroll.id = 'sg_chat_reroll';
+  reroll.className = 'menu_button sg-chat-btn';
+  reroll.title = '重Roll：重新生成剧情指导分析框';
+  reroll.textContent = '🎲 重Roll';
+
+  const setBusy = (busy) => {
+    gen.disabled = busy;
+    reroll.disabled = busy;
+    wrap.classList.toggle('is-busy', !!busy);
+  };
+
+  gen.addEventListener('click', async () => {
+    try {
+      setBusy(true);
+      await runInlineAppendForLastMessage({ allowWhenDisabled: true, force: false });
+    } catch (e) {
+      console.warn('[StoryGuide] generate failed', e);
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  reroll.addEventListener('click', async () => {
+    try {
+      setBusy(true);
+      await runInlineAppendForLastMessage({ allowWhenDisabled: true, force: true });
+    } catch (e) {
+      console.warn('[StoryGuide] reroll failed', e);
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  wrap.appendChild(gen);
+  wrap.appendChild(reroll);
+
+  // Insert near anchor
+  const parent = anchor.parentElement;
+  if (parent) {
+    // If anchor is inside a button group, insert before it
+    parent.insertBefore(wrap, anchor);
+  } else {
+    document.body.appendChild(wrap);
+  }
+}
+
 function buildModalHtml() {
   return `
   <div id="sg_modal_backdrop" class="sg-backdrop" style="display:none;">
@@ -1367,7 +1461,7 @@ function buildModalHtml() {
             </div>
 
             <div class="sg-row sg-inline">
-              <label class="sg-check"><input type="checkbox" id="sg_autoAppendBox">自动追加分析框到回复末尾</label>
+              <label class="sg-check"><input type="checkbox" id="sg_autoAppendBox">启用分析框（手动生成/重Roll）</label>
               <select id="sg_appendMode">
                 <option value="compact">简洁</option>
                 <option value="standard">标准</option>
@@ -1415,7 +1509,6 @@ function buildModalHtml() {
             <div class="sg-actions-row">
               <button class="menu_button sg-btn-primary" id="sg_saveSettings">保存设置</button>
               <button class="menu_button sg-btn-primary" id="sg_analyze">分析当前剧情</button>
-              <button class="menu_button sg-btn" id="sg_reroll">重roll</button>
             </div>
           </div>
 
@@ -1554,35 +1647,6 @@ function ensureModal() {
     saveSettings();
     await runAnalysis();
   });
-
-  $('#sg_reroll').on('click', async () => {
-    pullUiToSettings();
-    saveSettings();
-
-    setStatus('重roll中…', 'warn');
-    $('#sg_reroll').prop('disabled', true);
-    $('#sg_analyze').prop('disabled', true);
-
-    try {
-      // 1) 刷新面板报告
-      await runAnalysis();
-
-      // 2) 如启用自动追加：强制重算并覆盖最后一条助手消息的追加框
-      const s = ensureSettings();
-      if (s.autoAppendBox) {
-        await runInlineAppendForLastMessage({ force: true });
-      }
-
-      setStatus('重roll完成 ✅', 'ok');
-    } catch (e) {
-      console.error('[StoryGuide] reroll failed:', e);
-      setStatus(`重roll失败：${e?.message ?? e}`, 'err');
-    } finally {
-      $('#sg_reroll').prop('disabled', false);
-      $('#sg_analyze').prop('disabled', false);
-    }
-  });
-
 
   $('#sg_saveWorld').on('click', async () => {
     try { await setChatMetaValue(META_KEYS.world, String($('#sg_worldText').val() || '')); setStatus('已保存：世界观/设定补充（本聊天）', 'ok'); }
@@ -1979,6 +2043,8 @@ function startObservers() {
   });
   bodyDomObserver.observe(document.body, { childList: true, subtree: true, characterData: false });
 
+  ensureChatActionButtons();
+
   scheduleReapplyAll('start');
 }
 
@@ -1994,6 +2060,7 @@ function setupEventListeners() {
     eventSource.on(event_types.CHAT_CHANGED, () => {
       inlineCache.clear();
       scheduleReapplyAll('chat_changed');
+      ensureChatActionButtons();
       if (document.getElementById('sg_modal_backdrop') && $('#sg_modal_backdrop').is(':visible')) {
         pullSettingsToUi();
         setStatus('已切换聊天：已同步本聊天字段', 'ok');
@@ -2001,15 +2068,12 @@ function setupEventListeners() {
     });
 
     eventSource.on(event_types.MESSAGE_RECEIVED, () => {
-      const s = ensureSettings();
-      if (s.autoAppendBox) scheduleInlineAppend();
-      if (s.autoRefresh && (s.autoRefreshOn === 'received' || s.autoRefreshOn === 'both')) scheduleAutoRefresh();
+      // 禁止自动生成：不在收到消息时自动分析/追加
       scheduleReapplyAll('msg_received');
     });
 
     eventSource.on(event_types.MESSAGE_SENT, () => {
-      const s = ensureSettings();
-      if (s.autoRefresh && (s.autoRefreshOn === 'sent' || s.autoRefreshOn === 'both')) scheduleAutoRefresh();
+      // 禁止自动生成：不在发送消息时自动刷新面板
     });
   });
 }
@@ -2026,6 +2090,7 @@ function init() {
   eventSource.on(event_types.APP_READY, () => {
     createTopbarButton();
     injectMinimalSettingsPanel();
+    ensureChatActionButtons();
   });
 
   globalThis.StoryGuide = {
