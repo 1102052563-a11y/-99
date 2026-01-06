@@ -436,3 +436,35 @@
   .sg-chat-controls .sg-chat-label{ display:none; }
   .sg-chat-controls .sg-chat-btn{ padding: 8px 10px; }
 }
+
+
+
+/* v0.5.9 layout: prevent vertical button text */
+.sg-modal .sg-row.sg-inline{
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.sg-modal .sg-btn,
+.sg-modal .menu_button.sg-btn{
+  min-width: 110px;
+  padding: 8px 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+  word-break: keep-all;
+}
+
+.sg-modal .sg-btn#sg_refreshModels{
+  min-width: 128px;
+}
+
+.sg-modal .sg-actions{
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.sg-modal .sg-actions .sg-btn{
+  min-width: 110px;
+}

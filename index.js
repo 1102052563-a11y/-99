@@ -2,7 +2,7 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.5.8
+ * v0.5.9
  *
  * 新增：输出模块自定义（更高自由度）
  * - 你可以自定义“输出模块列表”以及每个模块自己的提示词（prompt）
@@ -1630,25 +1630,8 @@ function buildModalHtml() {
             <div class="sg-hint" id="sg_worldbookInfo">（未导入世界书）</div>
           </div>
 
-<div class="sg-card">
-            <div class="sg-card-title">本聊天专用（会随聊天切换）</div>
 
-            <div class="sg-field">
-              <label>世界观/设定补充</label>
-              <textarea id="sg_worldText" rows="4" placeholder="势力/规则/地理/时间线…"></textarea>
-              <div class="sg-actions-row">
-                <button class="menu_button sg-btn" id="sg_saveWorld">保存到本聊天</button>
-              </div>
-            </div>
 
-            <div class="sg-field">
-              <label>原著后续/大纲（用于提示）</label>
-              <textarea id="sg_canonText" rows="6" placeholder="章节大纲/关键事件列表/伏笔说明…"></textarea>
-              <div class="sg-actions-row">
-                <button class="menu_button sg-btn" id="sg_saveCanon">保存到本聊天</button>
-              </div>
-            </div>
-          </div>
 
           <div class="sg-status" id="sg_status"></div>
         </div>
