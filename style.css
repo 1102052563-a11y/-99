@@ -1,4 +1,4 @@
-/* StoryGuide v0.5.2 styling */
+/* StoryGuide v0.3.5 styling */
 
 /* topbar button */
 .sg-topbar-btn { min-width: 34px; padding: 6px 8px; }
@@ -7,7 +7,7 @@
   position: fixed;
   right: 14px;
   top: 64px;
-  z-index: 20002; /* Bumping Z-index for safety */
+  z-index: 99999;
   border-radius: 10px;
 }
 
@@ -27,7 +27,7 @@
 .sg-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 20005; /* Bumping Z-index */
+  z-index: 100000;
   background: rgba(0,0,0,.55);
   display: flex;
   align-items: center;
@@ -108,7 +108,7 @@
   width: 100%;
   box-sizing: border-box;
   border-radius: 12px;
-  border:  1px solid rgba(255,255,255,0.12);
+  border: 1px solid rgba(255,255,255,0.12);
   background: rgba(0,0,0,0.22);
   color: inherit;
   padding: 10px 10px;
@@ -241,13 +241,29 @@
   .sg-left { border-right: none; border-bottom: 1px solid rgba(255,255,255,0.08); }
 }
 
+
+/* v0.4.0 module editor improvements */
 #sg_modulesJson {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   line-height: 1.35;
 }
 
+
+/* v0.5.1 presets & worldbook */
 .sg-hr{
   border: none;
   border-top: 1px solid rgba(255,255,255,0.10);
   margin: 10px 0;
 }
+
+
+/* v0.5.2 worldbook info */
+#sg_worldbookInfo{opacity:0.9;}
+
+
+/* v0.5.5 inline modules controls */
+#sg_inlineModulesSource{min-width: 160px;}
+
+
+/* v0.5.6 reroll */
+#sg_reroll{opacity:0.95;}
