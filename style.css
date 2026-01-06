@@ -647,60 +647,87 @@ body.sg-zoom-lock{
 
 
 
-/* v0.6.9 mobile layout for settings modal */
+/* v0.6.9 mobile responsive modal */
 @media (max-width: 720px){
-  .sg-backdrop{
-    padding: 8px;
-    align-items: flex-start;
-  }
-
   .sg-modal{
-    width: 100%;
-    height: 96vh;
-    border-radius: 14px;
+    width: 94vw !important;
+    max-width: 94vw !important;
+    left: 50% !important;
+    top: 6vh !important;
+    transform: translateX(-50%) !important;
+    max-height: 88vh !important;
+    height: auto !important;
+    overflow: hidden !important;
   }
 
-  .sg-modal-body{
-    grid-template-columns: 1fr;
-  }
-
-  .sg-left{
-    border-right: none;
-    border-bottom: 1px solid rgba(255,255,255,0.08);
-    padding: 12px;
+  .sg-modal .sg-modal-body{
+    max-height: calc(88vh - 56px);
     overflow: auto;
-    min-height: 0;
-    max-height: 44vh;
-  }
-
-  .sg-right{
+    -webkit-overflow-scrolling: touch;
     padding: 12px;
-    overflow: auto;
-    min-height: 0;
   }
 
-  .sg-grid2{
-    grid-template-columns: 1fr;
+  .sg-modal .sg-grid{
+    display: block !important;
   }
 
-  .sg-model-select{
-    min-width: 0;
-    width: 100%;
+  .sg-modal .sg-col{
+    width: 100% !important;
+    margin: 0 0 12px 0 !important;
   }
 
-  .sg-row{
-    gap: 10px;
+  .sg-modal .sg-row{
+    flex-wrap: wrap;
   }
 
-  /* Make big action buttons wrap nicely */
+  .sg-modal .sg-field{
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .sg-modal .sg-actions,
   .sg-modal .sg-actions-row{
     justify-content: stretch;
   }
+
+  .sg-modal .sg-actions .sg-btn,
   .sg-modal .sg-actions-row .menu_button{
-    flex: 1 1 140px;
+    width: 100% !important;
+    min-width: 0 !important;
   }
 
-  .sg-tabs{
+  .sg-modal .sg-tabs{
+    flex-wrap: wrap;
     gap: 6px;
+  }
+
+  .sg-modal .sg-tabs .sg-tab{
+    flex: 1 1 auto;
+    min-width: 88px;
+  }
+
+  /* reduce big card padding */
+  .sg-modal .sg-card{
+    padding: 12px;
+    border-radius: 16px;
+  }
+
+  /* keep the bottom copy buttons usable */
+  .sg-modal .sg-output-actions{
+    flex-wrap: wrap;
+  }
+  .sg-modal .sg-output-actions .sg-btn{
+    width: 100% !important;
+  }
+}
+
+/* very small phones */
+@media (max-width: 420px){
+  .sg-modal{
+    top: 4vh !important;
+    max-height: 90vh !important;
+  }
+  .sg-modal .sg-modal-body{
+    max-height: calc(90vh - 56px);
   }
 }
