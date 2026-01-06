@@ -1,10 +1,8 @@
 {
-  "display_name": "剧情指导 StoryGuide",
-  "loading_order": 35,
-  "js": "index.js",
-  "css": "style.css",
-  "author": "your-name",
-  "version": "0.5.5",
-  "homePage": "https://github.com/your-name/Extension-StoryGuide",
-  "auto_update": true
+    "name": "Canon Lock (原著锁)",
+    "version": "1.0.0",
+    "author": "YourName",
+    "description": "强制基于原著正史进行剧情分析，自动剔除无限流/同人二创设定。",
+    "js": "index.js",
+    "css": "style.css"
 }
