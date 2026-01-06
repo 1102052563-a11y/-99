@@ -2,7 +2,7 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.6.4
+ * v0.6.5
  *
  * 新增：输出模块自定义（更高自由度）
  * - 你可以自定义“输出模块列表”以及每个模块自己的提示词（prompt）
@@ -791,11 +791,18 @@ async function callViaCustomBackendProxy(apiBaseUrl, apiKey, model, messages, te
   return JSON.stringify(data ?? '');
 }
 
-async function callViaCustomBrowserDirect(apiBaseUrl, apiKey, model, messages, temperature) {
+async function callViaCustomBrowserDirect(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP) {
   const endpoint = deriveChatCompletionsUrl(apiBaseUrl);
   if (!endpoint) throw new Error('custom 模式：API基础URL 为空');
 
-  const body = { model, messages, temperature, stream: false };
+  const body = {
+    model,
+    messages,
+    max_tokens: maxTokens ?? 8192,
+    temperature: temperature ?? 0.7,
+    top_p: topP ?? 0.95,
+    stream: false,
+  };
   const headers = { 'Content-Type': 'application/json' };
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
@@ -818,7 +825,7 @@ async function callViaCustom(apiBaseUrl, apiKey, model, messages, temperature, m
     const status = e?.status;
     if (status === 404 || status === 405) {
       console.warn('[StoryGuide] backend proxy unavailable; fallback to browser direct');
-      return await callViaCustomBrowserDirect(base, apiKey, model, messages, temperature);
+      return await callViaCustomBrowserDirect(base, apiKey, model, messages, temperature, maxTokens, topP);
     }
     throw e;
   }
@@ -1116,7 +1123,7 @@ async function runInlineAppendForLastMessage(opts = {}) {
 
     let jsonText = '';
     if (s.provider === 'custom') {
-      jsonText = await callViaCustom(s.customEndpoint, s.customApiKey, s.customModel, messages, s.temperature, Math.min(s.customMaxTokens, 4096), s.customTopP);
+      jsonText = await callViaCustom(s.customEndpoint, s.customApiKey, s.customModel, messages, s.temperature, s.customMaxTokens, s.customTopP);
     } else {
       jsonText = await callViaSillyTavern(messages, schema, s.temperature);
       if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
