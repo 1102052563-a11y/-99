@@ -1,11 +1,11 @@
 # 剧情指导 StoryGuide（SillyTavern 扩展）
 
-## v0.5.1：世界书导入注入 + 预设导入导出（并修复 worldBookText 报错）
+## v0.5.2：世界书导入注入 + 预设导入导出（并修复 worldBookText 报错）
 
 ### 为什么会出现 `worldBookText is not defined`
 旧版把世界书文本当作变量 `worldBookText` 插到 buildSnapshot 里，但没有声明该变量，所以导入后仍会报错。
 
-v0.5.1 已改为：导入后存进 `settings.worldbookJson`，并在 buildSnapshot 内通过 `buildWorldbookBlock()` 生成要注入的文本。
+v0.5.2 已改为：导入后存进 `settings.worldbookJson`，并在 buildSnapshot 内通过 `buildWorldbookBlock()` 生成要注入的文本。
 
 ### 世界书（World Info / Lorebook）
 - 导入：面板 →「预设与世界书」→ 导入世界书JSON

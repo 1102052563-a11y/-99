@@ -2,7 +2,7 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.5.1
+ * v0.5.2
  *
  * 新增：输出模块自定义（更高自由度）
  * - 你可以自定义“输出模块列表”以及每个模块自己的提示词（prompt）
@@ -62,6 +62,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   // 自动追加到正文末尾
   autoAppendBox: true,
   appendMode: 'compact', // compact | standard
+  appendFieldsSource: 'inline', // inline | panel
   appendDebounceMs: 700,
 
   // provider
@@ -81,6 +82,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   // 世界书（World Info/Lorebook）导入与注入
   worldbookEnabled: false,
   worldbookMode: 'active', // active | all
+  worldbookInsertPos: 'afterCanon', // afterWorld | afterCanon | beforeChat
   worldbookMaxChars: 6000,
   worldbookWindowMessages: 18,
   worldbookJson: '',
@@ -98,6 +100,7 @@ const META_KEYS = Object.freeze({
 });
 
 let lastReport = null;
+let lastWorldbookStats = null;
 let lastJsonText = '';
 let refreshTimer = null;
 let appendTimer = null;
@@ -215,6 +218,34 @@ function setStatus(text, kind = '') {
   $s.removeClass('ok err warn').addClass(kind || '');
   $s.text(text || '');
 }
+
+
+function renderWorldbookInfoText() {
+  const s = ensureSettings();
+  let count = 0;
+  try { count = parseWorldbookJson(String(s.worldbookJson || '')).length; } catch { count = 0; }
+
+  if (!count) return '（未导入世界书）';
+
+  let txt = `已导入世界书：${count} 条`;
+  if (!s.worldbookEnabled) return txt + '（未启用注入）';
+
+  const st = lastWorldbookStats;
+  if (st) {
+    txt += ` | 上次注入：${st.injectedEntries}/${st.matchedEntries} 条`;
+    txt += ` | 字符：${st.injectedChars}/${st.maxChars}`;
+    txt += ` | tokens≈${st.injectedTokens}`;
+  }
+  txt += ` | 位置：${String(s.worldbookInsertPos || 'afterCanon')}`;
+  return txt;
+}
+
+function refreshWorldbookInfoLabel() {
+  const $el = $('#sg_worldbookInfo');
+  if (!$el.length) return;
+  try { $el.text(renderWorldbookInfoText()); } catch { /* ignore */ }
+}
+
 
 function updateButtonsEnabled() {
   const ok = Boolean(lastReport?.markdown);
@@ -361,15 +392,65 @@ function selectActiveWorldbookEntries(entries, recentText) {
   return picked;
 }
 
+
+function countTokensCompat(text) {
+  const t = String(text || '');
+  if (!t) return 0;
+
+  // 尝试使用酒馆/模型侧的 tokenizer（不同版本可能不同）
+  const ctx = SillyTavern.getContext?.() ?? {};
+  const candidates = [
+    ctx.tokenizer,
+    ctx.tokenizers?.main,
+    globalThis.tokenizer,
+    globalThis.tokenizers?.main,
+    SillyTavern?.tokenizer,
+    SillyTavern?.tokenizers?.main,
+  ].filter(Boolean);
+
+  for (const tok of candidates) {
+    try {
+      if (typeof tok.countTokens === 'function') return Number(tok.countTokens(t)) || 0;
+      if (typeof tok.encode === 'function') {
+        const enc = tok.encode(t);
+        if (Array.isArray(enc)) return enc.length;
+      }
+    } catch { /* ignore */ }
+  }
+
+  // 兜底估算：中文大致 ~1字≈1token，英文 ~4字符≈1token
+  const cjk = (t.match(/[\u4e00-\u9fff]/g) || []).length;
+  const nonCjk = t.length - cjk;
+  return Math.ceil(cjk * 1.0 + nonCjk / 4.0);
+}
+
+
 function buildWorldbookBlock() {
   const s = ensureSettings();
+
+  // 默认先记录“未注入”状态，方便 UI 显示
+  lastWorldbookStats = {
+    enabled: !!s.worldbookEnabled,
+    mode: String(s.worldbookMode || 'active'),
+    insertPos: String(s.worldbookInsertPos || 'afterCanon'),
+    totalEntries: 0,
+    matchedEntries: 0,
+    injectedEntries: 0,
+    injectedChars: 0,
+    injectedTokens: 0,
+    maxChars: clampInt(s.worldbookMaxChars, 500, 50000, 6000),
+    windowMessages: clampInt(s.worldbookWindowMessages, 5, 80, 18),
+  };
+
   if (!s.worldbookEnabled) return '';
   const raw = String(s.worldbookJson || '').trim();
   if (!raw) return '';
 
   const entries = parseWorldbookJson(raw);
+  lastWorldbookStats.totalEntries = entries.length;
   if (!entries.length) return '';
 
+  // recent window text for activation
   const ctx = SillyTavern.getContext();
   const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
   const win = clampInt(s.worldbookWindowMessages, 5, 80, 18);
@@ -380,30 +461,43 @@ function buildWorldbookBlock() {
     const t = stripHtml(m.mes ?? m.message ?? '');
     if (t) pickedMsgs.push(t);
   }
-  const recentText = pickedMsgs.reverse().join('\n');
+  const recentText = pickedMsgs.reverse().join('
+');
 
   let use = entries;
   if (s.worldbookMode === 'active') {
     const act = selectActiveWorldbookEntries(entries, recentText);
     use = act.length ? act : [];
   }
+
+  lastWorldbookStats.matchedEntries = use.length;
   if (!use.length) return '';
 
   const maxChars = clampInt(s.worldbookMaxChars, 500, 50000, 6000);
   let acc = '';
-  let used = 0;
+  let injected = 0;
 
   for (const e of use) {
-    const head = `- 【${e.title}】${(e.keys && e.keys.length) ? `（触发：${e.keys.slice(0,6).join(' / ')}）` : ''}\n`;
-    const body = e.content.trim() + '\n';
-    const chunk = head + body + '\n';
+    const head = `- 【${e.title}】${(e.keys && e.keys.length) ? `（触发：${e.keys.slice(0,6).join(' / ')}）` : ''}
+`;
+    const body = e.content.trim() + '
+';
+    const chunk = head + body + '
+';
     if ((acc.length + chunk.length) > maxChars) break;
     acc += chunk;
-    used += 1;
+    injected += 1;
   }
 
+  lastWorldbookStats.injectedEntries = injected;
+  lastWorldbookStats.injectedChars = acc.length;
+  lastWorldbookStats.injectedTokens = countTokensCompat(acc);
+
   if (!acc) return '';
-  return `\n【世界书/World Info（已导入：${used}条，模式：${s.worldbookMode}）】\n${acc}\n`;
+  return `
+【世界书/World Info（注入：${injected}条；字符：${acc.length}；tokens≈${lastWorldbookStats.injectedTokens}；模式：${s.worldbookMode}）】
+${acc}
+`;
 }
 function getModules(mode /* panel|append */) {
   const s = ensureSettings();
@@ -414,7 +508,10 @@ function getModules(mode /* panel|append */) {
   const v = validateAndNormalizeModules(parsed);
   const base = v.ok ? v.modules : clone(DEFAULT_MODULES);
 
-  if (mode === 'append') return base.filter(m => m.inline);
+  if (mode === 'append') {
+    const src = String(s.appendFieldsSource || 'inline');
+    return (src === 'panel') ? base.filter(m => m.panel) : base.filter(m => m.inline);
+  }
   return base.filter(m => m.panel); // panel
 }
 
@@ -567,8 +664,16 @@ function buildSnapshot() {
     usedMessages: picked.length,
     hasCanon: Boolean(canon),
     hasWorld: Boolean(world),
-    characterSelected: ctx.characterId !== undefined && ctx.characterId !== null
+    characterSelected: ctx.characterId !== undefined && ctx.characterId !== null,
+    hasWorldbook: !!(s.worldbookEnabled && String(s.worldbookJson || '').trim()),
+    worldbookMode: String(s.worldbookMode || 'active'),
+    worldbookInsertPos: String(s.worldbookInsertPos || 'afterCanon'),
+    worldbookInjectedEntries: lastWorldbookStats?.injectedEntries ?? 0,
+    worldbookInjectedChars: lastWorldbookStats?.injectedChars ?? 0,
+    worldbookInjectedTokens: lastWorldbookStats?.injectedTokens ?? 0
   };
+
+  const worldbookBlock = buildWorldbookBlock();
 
   const snapshotText = [
     `【任务】你是“剧情指导”。根据下方“正在经历的世界”（聊天 + 设定）输出结构化报告。`,
@@ -576,8 +681,10 @@ function buildSnapshot() {
     charBlock ? charBlock : `【角色卡】（未获取到/可能是群聊）`,
     ``,
     world ? `【世界观/设定补充】\n${world}\n` : `【世界观/设定补充】（未提供）\n`,
+    (s.worldbookInsertPos === 'afterWorld' ? worldbookBlock : ''),
     canon ? `【原著后续/大纲】\n${canon}\n` : `【原著后续/大纲】（未提供）\n`,
-    buildWorldbookBlock(),
+    (s.worldbookInsertPos === 'afterCanon' ? worldbookBlock : ''),
+    (s.worldbookInsertPos === 'beforeChat' ? worldbookBlock : ''),
     `【聊天记录（最近${picked.length}条）】`,
     picked.length ? picked.join('\n\n') : '（空）'
   ].join('\n');
@@ -764,6 +871,7 @@ async function runAnalysis() {
     updateButtonsEnabled();
     showPane('md');
     setStatus('完成 ✅', 'ok');
+    refreshWorldbookInfoLabel();
   } catch (e) {
     console.error('[StoryGuide] analysis failed:', e);
     setStatus(`分析失败：${e?.message ?? e}`, 'err');
@@ -851,8 +959,20 @@ function attachToggleHandler(boxEl, mesKey) {
   if (head.dataset.sgBound === '1') return;
   head.dataset.sgBound = '1';
 
+  const rerollBtn = boxEl.querySelector('.sg-inline-reroll');
+  if (rerollBtn && rerollBtn.dataset.sgBound !== '1') {
+    rerollBtn.dataset.sgBound = '1';
+    rerollBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      rerollInlineBox(String(mesKey));
+    });
+  }
+
+
   head.addEventListener('click', (e) => {
     if (e.target && (e.target.closest('a'))) return;
+    if (e.target && (e.target.closest('.sg-inline-reroll'))) return;
 
     const cur = boxEl.classList.contains('collapsed');
     const next = !cur;
@@ -876,6 +996,7 @@ function createInlineBoxElement(mesKey, htmlInner, collapsed) {
       <span class="sg-inline-badge">📘</span>
       <span class="sg-inline-title">剧情指导</span>
       <span class="sg-inline-sub">（自动分析）</span>
+      <button class="sg-inline-reroll" title="重roll">↻</button>
       <span class="sg-inline-chevron">▾</span>
     </div>
     <div class="sg-inline-body">${htmlInner}</div>
@@ -931,65 +1052,76 @@ function reapplyAllInlineBoxes(reason = '') {
 
 // -------------------- inline append generate & cache --------------------
 
-async function runInlineAppendForLastMessage() {
+async function runInlineAppendForMessage(mesKey, force = false) {
   const s = ensureSettings();
   if (!s.enabled || !s.autoAppendBox) return;
+  const key = String(mesKey || '').trim();
+  if (!key) return;
 
-  const ref = getLastAssistantMessageRef();
-  if (!ref) return;
+  const prev = inlineCache.get(key);
+  const preservedCollapsed = prev ? !!prev.collapsed : false;
 
-  const { mesKey } = ref;
-
-  // 如果已经缓存过，先补贴一次就行（但仍会被 reapply 兜底）
-  if (inlineCache.has(String(mesKey))) {
-    ensureInlineBoxPresent(mesKey);
+  if (!force && prev && prev.htmlInner) {
+    // 已有缓存：确保 DOM 存在
+    ensureInlineBoxExistsForMessage(key, prev.htmlInner, preservedCollapsed);
     return;
   }
 
+  // 先放一个占位（避免“点了没反应”）
+  ensureInlineBoxExistsForMessage(key, `<div class="sg-inline-loading">⏳ 分析中…</div>`, preservedCollapsed);
+
+  const modules = getModules('append');
+  if (!modules.length) return;
+
+  const modeHint = (s.appendMode === 'standard')
+    ? `
+【附加要求】inline 输出可比面板更短，但不要丢掉关键信息。
+`
+    : `
+【附加要求】inline 输出尽量短：每个字段尽量 1~2 句/2 条以内。
+`;
+
+  const schema = buildSchemaFromModules(modules);
+  const message = buildPromptMessages({ mode: 'append', modules, modeHint });
+
   try {
-    const { snapshotText } = buildSnapshot();
+    const raw = await callProvider(message, schema, s.temperature);
+    const parsed = safeParseJsonLike(raw);
+    const normalized = normalizeBySchema(parsed, schema);
+    const htmlInner = renderInlineHtml(modules, normalized);
 
-    const modules = getModules('append');
-    // append 里 schema 按 inline 模块生成；如果用户把 inline 全关了，就不生成
-    if (!modules.length) return;
+    inlineCache.set(key, { htmlInner, collapsed: preservedCollapsed, ts: Date.now() });
+    ensureInlineBoxExistsForMessage(key, htmlInner, preservedCollapsed);
 
-    // 对 “compact/standard” 给一点暗示（不强制），避免用户模块 prompt 很长时没起作用
-    const modeHint = (s.appendMode === 'standard')
-      ? `\n【附加要求】inline 输出可比面板更短，但不要丢掉关键信息。\n`
-      : `\n【附加要求】inline 输出尽量短：每个字段尽量 1~2 句/2 条以内。\n`;
-
-    const schema = buildSchemaFromModules(modules);
-    const messages = buildPromptMessages(snapshotText + modeHint, s.spoilerLevel, modules, 'append');
-
-    let jsonText = '';
-    if (s.provider === 'custom') {
-      jsonText = await callViaCustom(s.customEndpoint, s.customApiKey, s.customModel, messages, s.temperature, Math.min(s.customMaxTokens, 4096), s.customTopP);
-    } else {
-      jsonText = await callViaSillyTavern(messages, schema, s.temperature);
-      if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
-      const parsedTry = safeJsonParse(jsonText);
-      if (!parsedTry || Object.keys(parsedTry).length === 0) jsonText = await fallbackAskJson(messages, s.temperature);
-    }
-
-    const parsed = safeJsonParse(jsonText);
-    if (!parsed) return;
-
-    const md = buildInlineMarkdownFromModules(parsed, modules, s.appendMode);
-    const htmlInner = renderMarkdownToHtml(md);
-
-    inlineCache.set(String(mesKey), { htmlInner, collapsed: false, createdAt: Date.now() });
-
-    requestAnimationFrame(() => { ensureInlineBoxPresent(mesKey); });
-
-    // 额外补贴：对付“变量更新晚到”的二次覆盖
-    setTimeout(() => ensureInlineBoxPresent(mesKey), 800);
-    setTimeout(() => ensureInlineBoxPresent(mesKey), 1800);
-    setTimeout(() => ensureInlineBoxPresent(mesKey), 3500);
-    setTimeout(() => ensureInlineBoxPresent(mesKey), 6500);
+    // 如果设置面板打开，顺便刷新世界书统计显示
+    refreshWorldbookInfoLabel();
   } catch (e) {
-    console.warn('[StoryGuide] inline append failed:', e);
+    const msg = e?.message ?? String(e);
+    const htmlInner = `<div class="sg-inline-error">❌ 分析失败：${escapeHtml(msg)}</div>`;
+    inlineCache.set(key, { htmlInner, collapsed: preservedCollapsed, ts: Date.now() });
+    ensureInlineBoxExistsForMessage(key, htmlInner, preservedCollapsed);
   }
 }
+
+async function runInlineAppendForLastMessage() {
+  const ref = getLastAssistantMessageRef();
+  if (!ref) return;
+  await runInlineAppendForMessage(ref.mesKey, false);
+}
+
+async function rerollInlineBox(mesKey) {
+  const key = String(mesKey || '').trim();
+  if (!key) return;
+
+  const prev = inlineCache.get(key);
+  const preservedCollapsed = prev ? !!prev.collapsed : false;
+  inlineCache.delete(key);
+  inlineCache.set(key, { htmlInner: `<div class="sg-inline-loading">⏳ 重roll中…</div>`, collapsed: preservedCollapsed, ts: Date.now() });
+  ensureInlineBoxExistsForMessage(key, `<div class="sg-inline-loading">⏳ 重roll中…</div>`, preservedCollapsed);
+
+  await runInlineAppendForMessage(key, true);
+}
+
 
 function scheduleInlineAppend() {
   const s = ensureSettings();
@@ -1236,7 +1368,11 @@ function buildModalHtml() {
                 <option value="compact">简洁</option>
                 <option value="standard">标准</option>
               </select>
-              <span class="sg-hint">（点击框标题可折叠）</span>
+              <select id="sg_appendFieldsSource">
+                <option value="inline">追加字段：inline 模块</option>
+                <option value="panel">追加字段：报告模块(panel)</option>
+              </select>
+              <span class="sg-hint">（点标题折叠；↻重roll）</span>
             </div>
 
             <div id="sg_custom_block" class="sg-card sg-subcard" style="display:none;">
@@ -1316,6 +1452,15 @@ function buildModalHtml() {
               <select id="sg_worldbookMode">
                 <option value="active">仅注入“可能激活”的条目（推荐）</option>
                 <option value="all">注入全部条目</option>
+              </select>
+            </div>
+
+            <div class="sg-row sg-inline">
+              <span class="sg-label">世界书注入位置</span>
+              <select id="sg_worldbookInsertPos">
+                <option value="afterCanon">在「原著后续/大纲」之后</option>
+                <option value="afterWorld">在「世界观/设定补充」之后</option>
+                <option value="beforeChat">在「聊天记录」之前</option>
               </select>
             </div>
 
@@ -1496,9 +1641,12 @@ function ensureModal() {
 
       saveSettings();
       pullSettingsToUi();
-      setStatus('已导入预设并应用 ✅（建议刷新一次页面）', 'ok');
+      setStatus('已导入预设并应用 ✅', 'ok');
 
+      // 预设变化后：清空 inline 缓存，确保自动追加会用新模块
+      inlineCache.clear();
       scheduleReapplyAll('import_preset');
+      scheduleInlineAppend('preset_import');
     } catch (e) {
       setStatus(`导入失败：${e?.message ?? e}`, 'err');
     }
@@ -1516,7 +1664,7 @@ function ensureModal() {
       s.worldbookJson = txt;
       saveSettings();
 
-      $('#sg_worldbookInfo').text(entries.length ? `已导入世界书：${entries.length} 条` : '已导入，但未解析到条目（格式不兼容）');
+      refreshWorldbookInfoLabel();
       setStatus('世界书已导入 ✅', entries.length ? 'ok' : 'warn');
     } catch (e) {
       setStatus(`导入世界书失败：${e?.message ?? e}`, 'err');
@@ -1527,7 +1675,7 @@ function ensureModal() {
     const s = ensureSettings();
     s.worldbookJson = '';
     saveSettings();
-    $('#sg_worldbookInfo').text('（未导入世界书）');
+    refreshWorldbookInfoLabel();
     setStatus('已清空世界书', 'ok');
   });
 
@@ -1589,6 +1737,7 @@ function pullSettingsToUi() {
 
   $('#sg_autoAppendBox').prop('checked', !!s.autoAppendBox);
   $('#sg_appendMode').val(s.appendMode);
+  $('#sg_appendFieldsSource').val(String(s.appendFieldsSource || 'inline'));
 
   $('#sg_customEndpoint').val(s.customEndpoint);
   $('#sg_customApiKey').val(s.customApiKey);
@@ -1607,15 +1756,11 @@ function pullSettingsToUi() {
 
   $('#sg_worldbookEnabled').prop('checked', !!s.worldbookEnabled);
   $('#sg_worldbookMode').val(String(s.worldbookMode || 'active'));
+  $('#sg_worldbookInsertPos').val(String(s.worldbookInsertPos || 'afterCanon'));
   $('#sg_worldbookMaxChars').val(s.worldbookMaxChars);
   $('#sg_worldbookWindowMessages').val(s.worldbookWindowMessages);
 
-  try {
-    const count = parseWorldbookJson(String(s.worldbookJson || '')).length;
-    $('#sg_worldbookInfo').text(count ? `已导入世界书：${count} 条` : '（未导入世界书）');
-  } catch {
-    $('#sg_worldbookInfo').text('（未导入世界书）');
-  }
+  refreshWorldbookInfoLabel();
 
   $('#sg_custom_block').toggle(s.provider === 'custom');
   updateButtonsEnabled();
@@ -1640,6 +1785,7 @@ function pullUiToSettings() {
 
   s.autoAppendBox = $('#sg_autoAppendBox').is(':checked');
   s.appendMode = String($('#sg_appendMode').val() || 'compact');
+  s.appendFieldsSource = String($('#sg_appendFieldsSource').val() || 'inline');
 
   s.customEndpoint = String($('#sg_customEndpoint').val() || '').trim();
   s.customApiKey = String($('#sg_customApiKey').val() || '');
@@ -1655,6 +1801,7 @@ function pullUiToSettings() {
 
   s.worldbookEnabled = $('#sg_worldbookEnabled').is(':checked');
   s.worldbookMode = String($('#sg_worldbookMode').val() || 'active');
+  s.worldbookInsertPos = String($('#sg_worldbookInsertPos').val() || 'afterCanon');
   s.worldbookMaxChars = clampInt($('#sg_worldbookMaxChars').val(), 500, 50000, s.worldbookMaxChars || 6000);
   s.worldbookWindowMessages = clampInt($('#sg_worldbookWindowMessages').val(), 5, 80, s.worldbookWindowMessages || 18);
 }
@@ -1666,7 +1813,10 @@ function openModal() {
   $('#sg_modal_backdrop').show();
   showPane('md');
 }
-function closeModal() { $('#sg_modal_backdrop').hide(); }
+function closeModal() {
+  try { pullUiToSettings(); saveSettings(); } catch { /* ignore */ }
+  $('#sg_modal_backdrop').hide();
+}
 
 function injectMinimalSettingsPanel() {
   const $root = $('#extensions_settings');
