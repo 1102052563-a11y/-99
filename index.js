@@ -2382,3 +2382,8 @@ function init() {
     buildSnapshot: () => buildSnapshot(),
     getLastReport: () => lastReport,
     refreshModels,
+    _inlineCache: inlineCache,
+  };
+}
+
+init();
