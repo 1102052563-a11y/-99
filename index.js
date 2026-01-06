@@ -2,7 +2,7 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.5.2
+ * v0.5.3
  *
  * 新增：输出模块自定义（更高自由度）
  * - 你可以自定义“输出模块列表”以及每个模块自己的提示词（prompt）
@@ -344,21 +344,78 @@ function parseWorldbookJson(rawText) {
     const content = String(e.content ?? e.entry ?? e.text ?? e.description ?? e.desc ?? e.body ?? '').trim();
     if (!content) continue;
 
-    norm.push({ title: title || (keys[0] ? `条目：${keys[0]}` : '条目'), keys, content });
+    const always = !!(e.constant || e.isConstant || e.is_constant || e.always || e.alwaysActive || e.always_active || e.alwaysOn || e.always_on || e.force || e.forced);
+    const useRegex = !!(e.use_regex || e.useRegex || e.regex || e.isRegex || e.is_regex);
+    const caseSensitive = !!(e.case_sensitive || e.caseSensitive);
+    norm.push({ title: title || (keys[0] ? `条目：${keys[0]}` : '条目'), keys, content, always, useRegex, caseSensitive });
   }
   return norm;
 }
 
+
 function selectActiveWorldbookEntries(entries, recentText) {
-  const text = String(recentText || '').toLowerCase();
-  if (!text) return [];
+  const textRaw = String(recentText || '');
+  const textLower = textRaw.toLowerCase();
+  if (!textRaw) return [];
+
   const picked = [];
   for (const e of entries) {
+    if (!e) continue;
+
+    // 常驻条目：无条件注入（若世界书导出包含该标记）
+    if (e.always === true) {
+      picked.push(e);
+      continue;
+    }
+
     const keys = Array.isArray(e.keys) ? e.keys : [];
     if (!keys.length) continue;
-    const hit = keys.some(k => k && text.includes(String(k).toLowerCase()));
+
+    const tryRegex = (e.useRegex === true);
+    const cs = (e.caseSensitive === true);
+
+    let hit = false;
+
+    for (const k0 of keys) {
+      const k = String(k0 || '').trim();
+      if (!k) continue;
+
+      // /.../i 形式
+      const lastSlash = (k.startsWith('/') ? k.lastIndexOf('/') : -1);
+      const isSlashRegex = (lastSlash > 0);
+
+      if (tryRegex || isSlashRegex) {
+        try {
+          let body = k;
+          let flags = cs ? '' : 'i';
+
+          if (isSlashRegex) {
+            body = k.slice(1, lastSlash);
+            const tail = k.slice(lastSlash + 1);
+            // 如果用户在 /.../i 里自带 flags，优先用用户的
+            flags = tail || (cs ? '' : 'i');
+          }
+
+          // 若不区分大小写但 flags 里没有 i，补上 i
+          if (!cs && flags && !flags.includes('i')) flags += 'i';
+
+          const re = new RegExp(body, flags);
+          if (re.test(textRaw)) { hit = true; break; }
+        } catch {
+          // regex 失败就走普通包含
+        }
+      }
+
+      if (cs) {
+        if (textRaw.includes(k)) { hit = true; break; }
+      } else {
+        if (textLower.includes(k.toLowerCase())) { hit = true; break; }
+      }
+    }
+
     if (hit) picked.push(e);
   }
+
   return picked;
 }
 
@@ -461,7 +518,7 @@ function updateWorldbookInfoUI() {
     return;
   }
   if (!block) {
-    $info.text(`已导入：${total} 条｜本次注入：0 条｜模式：${mode}｜位置：${placement}`);
+    $info.text(`已导入：${total} 条｜本次注入：0 条｜模式：${mode}｜位置：${placement}${mode === 'active' ? '（可能没有触发关键词）' : ''}`);
     return;
   }
   $info.text(`已导入：${total} 条｜本次注入：${used} 条｜字符：${chars}｜Token：${tokens}｜模式：${mode}｜位置：${placement}`);
