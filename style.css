@@ -123,7 +123,7 @@
 
 .sg-actions-row { display:flex; gap: 10px; justify-content:flex-end; flex-wrap: wrap; margin-top: 10px; }
 .sg-btn { padding: 8px 12px; border-radius: 12px; }
-.sg-btn-primary { padding: 8px 12px; border-radius: 12px; }
+.sg-btn-primary { padding: 8px 12px; border-radius: 12px; white-space: nowrap; word-break: keep-all; }
 
 .sg-hint { opacity: .72; font-size: .90rem; line-height: 1.35; }
 .sg-warn { color: var(--warning, #ffcc66); }
@@ -467,4 +467,45 @@
 
 .sg-modal .sg-actions .sg-btn{
   min-width: 110px;
+}
+
+
+
+/* v0.6.0 layout hotfix: action row + prevent vertical text */
+.sg-modal .sg-actions-row{
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.sg-modal button.menu_button,
+.sg-modal .menu_button.sg-btn,
+.sg-modal .menu_button.sg-btn-primary{
+  width: auto !important;
+  min-width: 120px !important;
+  padding: 8px 12px !important;
+  line-height: 1.2 !important;
+  white-space: nowrap !important;
+  word-break: keep-all !important;
+  writing-mode: horizontal-tb !important;
+  height: auto !important;
+}
+
+/* make refresh model button a bit wider */
+.sg-modal #sg_refreshModels{
+  min-width: 140px !important;
+}
+
+/* settings list "打开面板" button should be compact like other extensions */
+.sg-min #sg_open_from_settings{
+  width: auto !important;
+  min-width: 96px !important;
+  padding: 6px 10px !important;
+  line-height: 1.2 !important;
+  white-space: nowrap !important;
+  word-break: keep-all !important;
+  writing-mode: horizontal-tb !important;
 }
