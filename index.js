@@ -1563,17 +1563,18 @@ function buildModalHtml() {
                 </div>
               </div>
 
-              <div class="sg-field">
-                <label>最大回复token数</label>
-                <input id="sg_customMaxTokens" type="number" min="1" max="200000" placeholder="例如：60000">
-                <div class="sg-hint">用于独立API请求的 max_tokens（超出模型上限会被服务端截断/报错）。</div>
-              </div>
-
               <div class="sg-row sg-inline">
                 <button class="menu_button sg-btn" id="sg_refreshModels">检查/刷新模型</button>
                 <select id="sg_modelSelect" class="sg-model-select">
                   <option value="">（选择模型）</option>
                 </select>
+              </div>
+
+              <div class="sg-row">
+                <div class="sg-field sg-field-full">
+                  <label>最大回复token数</label>
+                  <input id="sg_customMaxTokens" type="number" min="256" max="200000" step="1" placeholder="例如：60000">
+                </div>
               </div>
             </div>
 
@@ -1747,6 +1748,7 @@ function ensureModal() {
   $('#sg_modelSelect').on('change', () => {
     const id = String($('#sg_modelSelect').val() || '').trim();
     if (id) $('#sg_customModel').val(id);
+  $('#sg_customMaxTokens').val(s.customMaxTokens || 8192);
   });
 
   
@@ -1912,7 +1914,6 @@ function pullSettingsToUi() {
   $('#sg_customEndpoint').val(s.customEndpoint);
   $('#sg_customApiKey').val(s.customApiKey);
   $('#sg_customModel').val(s.customModel);
-  $('#sg_customMaxTokens').val(s.customMaxTokens);
 
   fillModelSelect(Array.isArray(s.customModelsCache) ? s.customModelsCache : [], s.customModel);
 
@@ -1996,7 +1997,7 @@ function pullUiToSettings() {
   s.customEndpoint = String($('#sg_customEndpoint').val() || '').trim();
   s.customApiKey = String($('#sg_customApiKey').val() || '');
   s.customModel = String($('#sg_customModel').val() || '').trim();
-  s.customMaxTokens = clampInt($('#sg_customMaxTokens').val(), 1, 200000, s.customMaxTokens || 8192);
+  s.customMaxTokens = clampInt($('#sg_customMaxTokens').val(), 256, 200000, s.customMaxTokens || 8192);
 
   // modulesJson：先不强行校验（用户可先保存再校验），但会在分析前用默认兜底
   s.modulesJson = String($('#sg_modulesJson').val() || '').trim() || JSON.stringify(DEFAULT_MODULES, null, 2);

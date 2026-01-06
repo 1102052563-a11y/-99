@@ -595,6 +595,4 @@
 
 
 /* v0.6.4 custom max tokens field */
-#sg_customMaxTokens{
-  width: 100%;
-}
+.sg-field-full{width:100%;}

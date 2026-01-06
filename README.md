@@ -42,4 +42,4 @@ v0.5.1 已改为：导入后存进 `settings.worldbookJson`，并在 buildSnapsh
 
 
 ## v0.6.4
-- 独立API新增“最大回复token数（max_tokens）”显示与设置
+- 面板新增“最大回复token数”（独立API）输入框，显示/设置自定义API的最大token
