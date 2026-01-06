@@ -596,18 +596,3 @@
 
 /* v0.6.4 custom max tokens field */
 .sg-field-full{width:100%;}
-
-
-
-/* v0.6.6 blockquote wrapper to keep module content inside same card */
-.sg-inline-body > ul > li > blockquote{
-  margin: 8px 0 0;
-  padding: 8px 10px;
-  border-left: 3px solid rgba(255,255,255,0.18);
-  background: rgba(255,255,255,0.035);
-  border-radius: 12px;
-}
-
-.sg-inline-body > ul > li > blockquote p{
-  margin: 4px 0;
-}

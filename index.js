@@ -913,10 +913,23 @@ async function runAnalysis() {
 
 // -------------------- inline append (dynamic modules) --------------------
 
-function quoteForListItem(md) {
-  const s = String(md || '').replace(/\r\n/g, '\n');
-  if (!s) return '  > （空）';
-  return s.split('\n').map(line => (line.length ? `  > ${line}` : '  >')).join('\n');
+function indentForListItem(md) {
+  const s = String(md || '');
+  const pad = '    '; // 4 spaces to ensure nested blocks stay inside the module card
+  if (!s) return pad + '（空）';
+  return s.split('\n').map(line => pad + line).join('\n');
+}
+
+function normalizeNumberedHints(arr) {
+  const out = [];
+  for (let i = 0; i < arr.length; i++) {
+    const t = String(arr[i] ?? '').trim();
+    if (!t) continue;
+    // If the item already starts with 【n】, keep it; else prefix with 【i+1】
+    if (/^【\d+】/.test(t)) out.push(t);
+    else out.push(`【${i + 1}】 ${t}`);
+  }
+  return out;
 }
 
 function buildInlineMarkdownFromModules(parsedJson, modules, mode, showEmpty) {
@@ -932,33 +945,33 @@ function buildInlineMarkdownFromModules(parsedJson, modules, mode, showEmpty) {
     if (m.type === 'list') {
       const arr = Array.isArray(val) ? val : [];
       if (!arr.length) {
-        if (showEmpty) lines.push(`- **${title}**\n${quoteForListItem('（空）')}`);
+        if (showEmpty) lines.push(`- **${title}**\n${indentForListItem('（空）')}`);
         continue;
       }
 
-      const limit = (mode === 'standard') ? Math.min(arr.length, 10) : Math.min(arr.length, 3);
-      const picked = arr.slice(0, limit);
-
       if (mode === 'compact') {
+        const limit = Math.min(arr.length, 3);
+        const picked = arr.slice(0, limit).map(x => String(x ?? '').trim()).filter(Boolean);
         lines.push(`- **${title}**：${picked.join(' / ')}`);
       } else {
-        // 标准模式：用 blockquote 包住，确保不会“跳出卡片”变成同级块
-        const inner = picked.map(x => `- ${x}`).join('\n');
-        lines.push(`- **${title}**\n${quoteForListItem(inner)}`);
+        // 标准模式：把整个列表合并到同一个模块卡片内（以【1】等为分隔提示）
+        const normalized = normalizeNumberedHints(arr);
+        const joined = normalized.join('\n\n');
+        lines.push(`- **${title}**\n${indentForListItem(joined)}`);
       }
     } else {
       const text = (val !== undefined && val !== null) ? String(val).trim() : '';
       if (!text) {
-        if (showEmpty) lines.push(`- **${title}**\n${quoteForListItem('（空）')}`);
+        if (showEmpty) lines.push(`- **${title}**\n${indentForListItem('（空）')}`);
         continue;
       }
 
       if (mode === 'compact') {
-        const short = (text.length > 160 ? text.slice(0, 160) + '…' : text);
+        const short = (text.length > 140 ? text.slice(0, 140) + '…' : text);
         lines.push(`- **${title}**：${short}`);
       } else {
-        // 标准模式：用 blockquote 包住（支持 ###/列表/编号/【1】…）
-        lines.push(`- **${title}**\n${quoteForListItem(text)}`);
+        // 标准模式：把内容缩进到 list item 内，避免内部列表/编号变成“同级卡片”
+        lines.push(`- **${title}**\n${indentForListItem(text)}`);
       }
     }
   }
