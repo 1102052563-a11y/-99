@@ -227,9 +227,7 @@
 }
 .sg-inline-title{ font-weight: 800; }
 .sg-inline-sub{ opacity: .72; font-size: .92rem; }
-.sg-inline-reroll{ margin-left: auto; opacity: .9; border: 1px solid rgba(255,255,255,0.14); background: rgba(255,255,255,0.06); border-radius: 10px; height: 24px; padding: 0 10px; cursor: pointer; }
-.sg-inline-reroll:hover{ opacity: 1; }
-.sg-inline-chevron{ margin-left: 6px; opacity: .7; }
+.sg-inline-chevron{ margin-left: auto; opacity: .7; }
 .sg-inline-body{ font-size: 0.97rem; opacity: .96; }
 
 /* collapsed state */
@@ -259,5 +257,17 @@
 }
 
 
-.sg-inline-loading{ opacity: .75; font-style: italic; }
-.sg-inline-error{ opacity: .9; }
+/* v0.5.2 inline reroll button */
+.sg-inline-reroll{
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.06);
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+}
+.sg-inline-reroll:hover{
+  background: rgba(255,255,255,0.10);
+}
