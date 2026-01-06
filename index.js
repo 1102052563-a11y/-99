@@ -2,7 +2,7 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.6.7
+ * v0.7.3
  *
  * 新增：输出模块自定义（更高自由度）
  * - 你可以自定义“输出模块列表”以及每个模块自己的提示词（prompt）
@@ -78,6 +78,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   customModelsCache: [],
   customTopP: 0.95,
   customMaxTokens: 8192,
+  customStream: false,
 
   // 预设导入/导出
   presetIncludeApiKey: false,
@@ -112,6 +113,7 @@ let appendTimer = null;
  * mesKey 优先用 DOM 的 mesid（如果拿不到则用 chatIndex）
  */
 const inlineCache = new Map();
+const panelCache = new Map(); // <mesKey, { htmlInner, collapsed, createdAt }>
 let chatDomObserver = null;
 let bodyDomObserver = null;
 let reapplyTimer = null;
@@ -739,6 +741,25 @@ async function fallbackAskJson(messages, temperature) {
   throw new Error('fallback 失败：缺少 generateRaw/generateQuietPrompt');
 }
 
+async function fallbackAskJsonCustom(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP, stream) {
+  const retry = clone(messages);
+  retry.unshift({ role: 'system', content: `再次强调：只输出 JSON 对象本体，不要任何额外文字，不要代码块。` });
+  return await callViaCustom(apiBaseUrl, apiKey, model, retry, temperature, maxTokens, topP, stream);
+}
+
+function hasAnyModuleKey(obj, modules) {
+  if (!obj || typeof obj !== 'object') return false;
+  for (const m of modules || []) {
+    const k = m?.key;
+    if (k && Object.prototype.hasOwnProperty.call(obj, k)) return true;
+  }
+  return false;
+}
+
+
+
+// -------------------- custom provider
+
 // -------------------- custom provider (proxy-first) --------------------
 
 function normalizeBaseUrl(input) {
@@ -759,7 +780,99 @@ function deriveChatCompletionsUrl(base) {
   return u + '/v1/chat/completions';
 }
 
-async function callViaCustomBackendProxy(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP) {
+
+async function readStreamedChatCompletionToText(res) {
+  const reader = res.body?.getReader?.();
+  if (!reader) {
+    // no stream body; fallback to normal
+    const txt = await res.text().catch(() => '');
+    return txt;
+  }
+
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let out = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+
+    // process line by line
+    let idx;
+    while ((idx = buffer.indexOf('\n')) !== -1) {
+      const line = buffer.slice(0, idx).trimEnd();
+      buffer = buffer.slice(idx + 1);
+
+      const t = line.trim();
+      if (!t) continue;
+
+      // SSE: data: ...
+      if (t.startsWith('data:')) {
+        const payload = t.slice(5).trim();
+        if (!payload) continue;
+        if (payload === '[DONE]') return out;
+
+        try {
+          const j = JSON.parse(payload);
+          const c0 = j?.choices?.[0];
+          const delta = c0?.delta?.content;
+          if (typeof delta === 'string') {
+            out += delta;
+            continue;
+          }
+          const msg = c0?.message?.content;
+          if (typeof msg === 'string') {
+            // some servers stream full message chunks as message.content
+            out += msg;
+            continue;
+          }
+          const txt = c0?.text;
+          if (typeof txt === 'string') {
+            out += txt;
+            continue;
+          }
+          const c = j?.content;
+          if (typeof c === 'string') {
+            out += c;
+            continue;
+          }
+        } catch {
+          // ignore
+        }
+      } else {
+        // NDJSON line
+        try {
+          const j = JSON.parse(t);
+          const c0 = j?.choices?.[0];
+          const delta = c0?.delta?.content;
+          if (typeof delta === 'string') out += delta;
+          else if (typeof c0?.message?.content === 'string') out += c0.message.content;
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
+  // flush remaining (rare)
+  const rest = buffer.trim();
+  if (rest) {
+    // try parse if json line
+    try {
+      const j = JSON.parse(rest);
+      const c0 = j?.choices?.[0];
+      const delta = c0?.delta?.content;
+      if (typeof delta === 'string') out += delta;
+      else if (typeof c0?.message?.content === 'string') out += c0.message.content;
+    } catch { /* ignore */ }
+  }
+
+  return out;
+}
+
+async function callViaCustomBackendProxy(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP, stream) {
   const url = '/api/backends/chat-completions/generate';
 
   const requestBody = {
@@ -768,7 +881,7 @@ async function callViaCustomBackendProxy(apiBaseUrl, apiKey, model, messages, te
     max_tokens: maxTokens ?? 8192,
     temperature: temperature ?? 0.7,
     top_p: topP ?? 0.95,
-    stream: false,
+    stream: !!stream,
     chat_completion_source: 'custom',
     reverse_proxy: apiBaseUrl,
     custom_url: apiBaseUrl,
@@ -785,13 +898,21 @@ async function callViaCustomBackendProxy(apiBaseUrl, apiKey, model, messages, te
     throw err;
   }
 
+
+  const ct = String(res.headers.get('content-type') || '');
+  if (stream && (ct.includes('text/event-stream') || ct.includes('ndjson') || ct.includes('stream'))) {
+    const streamed = await readStreamedChatCompletionToText(res);
+    if (streamed) return String(streamed);
+    // fall through
+  }
+
   const data = await res.json().catch(() => ({}));
   if (data?.choices?.[0]?.message?.content) return String(data.choices[0].message.content);
   if (typeof data?.content === 'string') return data.content;
   return JSON.stringify(data ?? '');
 }
 
-async function callViaCustomBrowserDirect(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP) {
+async function callViaCustomBrowserDirect(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP, stream) {
   const endpoint = deriveChatCompletionsUrl(apiBaseUrl);
   if (!endpoint) throw new Error('custom 模式：API基础URL 为空');
 
@@ -801,7 +922,7 @@ async function callViaCustomBrowserDirect(apiBaseUrl, apiKey, model, messages, t
     max_tokens: maxTokens ?? 8192,
     temperature: temperature ?? 0.7,
     top_p: topP ?? 0.95,
-    stream: false,
+    stream: !!stream,
   };
   const headers = { 'Content-Type': 'application/json' };
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
@@ -811,21 +932,28 @@ async function callViaCustomBrowserDirect(apiBaseUrl, apiKey, model, messages, t
     const text = await res.text().catch(() => '');
     throw new Error(`直连请求失败: HTTP ${res.status} ${res.statusText}\n${text}`);
   }
+
+  const ct = String(res.headers.get('content-type') || '');
+  if (stream && (ct.includes('text/event-stream') || ct.includes('ndjson') || ct.includes('stream'))) {
+    const streamed = await readStreamedChatCompletionToText(res);
+    return String(streamed || '');
+  }
+
   const json = await res.json();
   return String(json?.choices?.[0]?.message?.content ?? '');
 }
 
-async function callViaCustom(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP) {
+async function callViaCustom(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP, stream) {
   const base = normalizeBaseUrl(apiBaseUrl);
   if (!base) throw new Error('custom 模式需要填写 API基础URL');
 
   try {
-    return await callViaCustomBackendProxy(base, apiKey, model, messages, temperature, maxTokens, topP);
+    return await callViaCustomBackendProxy(base, apiKey, model, messages, temperature, maxTokens, topP, stream);
   } catch (e) {
     const status = e?.status;
     if (status === 404 || status === 405) {
       console.warn('[StoryGuide] backend proxy unavailable; fallback to browser direct');
-      return await callViaCustomBrowserDirect(base, apiKey, model, messages, temperature, maxTokens, topP);
+      return await callViaCustomBrowserDirect(base, apiKey, model, messages, temperature, maxTokens, topP, stream);
     }
     throw e;
   }
@@ -880,7 +1008,12 @@ async function runAnalysis() {
 
     let jsonText = '';
     if (s.provider === 'custom') {
-      jsonText = await callViaCustom(s.customEndpoint, s.customApiKey, s.customModel, messages, s.temperature, s.customMaxTokens, s.customTopP);
+      jsonText = await callViaCustom(s.customEndpoint, s.customApiKey, s.customModel, messages, s.temperature, s.customMaxTokens, s.customTopP, s.customStream);
+      const parsedTry = safeJsonParse(jsonText);
+      if (!parsedTry || !hasAnyModuleKey(parsedTry, modules)) {
+        try { jsonText = await fallbackAskJsonCustom(s.customEndpoint, s.customApiKey, s.customModel, messages, s.temperature, s.customMaxTokens, s.customTopP, s.customStream); }
+        catch { /* ignore */ }
+      }
     } else {
       jsonText = await callViaSillyTavern(messages, schema, s.temperature);
       if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
@@ -894,11 +1027,19 @@ async function runAnalysis() {
     $('#sg_json').text(lastJsonText);
     $('#sg_src').text(JSON.stringify(sourceSummary, null, 2));
 
-    if (!parsed) { showPane('json'); throw new Error('模型输出无法解析为 JSON（已切到 JSON 标签，看看原文）'); }
+    if (!parsed) {
+      // 同步原文到聊天末尾（解析失败时也不至于“聊天里看不到”）
+      try { syncPanelOutputToChat(String(jsonText || lastJsonText || ''), true); } catch { /* ignore */ }
+      showPane('json');
+      throw new Error('模型输出无法解析为 JSON（已切到 JSON 标签，看看原文）');
+    }
 
     const md = renderReportMarkdownFromModules(parsed, modules);
     lastReport = { json: parsed, markdown: md, createdAt: Date.now(), sourceSummary };
     renderMarkdownInto($('#sg_md'), md);
+
+    // 同步面板报告到聊天末尾
+    try { syncPanelOutputToChat(md, false); } catch { /* ignore */ }
 
     updateButtonsEnabled();
     showPane('md');
@@ -952,7 +1093,8 @@ function buildInlineMarkdownFromModules(parsedJson, modules, mode, showEmpty) {
       if (mode === 'compact') {
         const limit = Math.min(arr.length, 3);
         const picked = arr.slice(0, limit).map(x => String(x ?? '').trim()).filter(Boolean);
-        lines.push(`- **${title}**：${picked.join(' / ')}`);
+        lines.push(`- **${title}**
+${indentForListItem(picked.join(' / '))}`);
       } else {
         // 标准模式：把整个列表合并到同一个模块卡片内（以【1】等为分隔提示）
         const normalized = normalizeNumberedHints(arr);
@@ -968,7 +1110,8 @@ function buildInlineMarkdownFromModules(parsedJson, modules, mode, showEmpty) {
 
       if (mode === 'compact') {
         const short = (text.length > 140 ? text.slice(0, 140) + '…' : text);
-        lines.push(`- **${title}**：${short}`);
+        lines.push(`- **${title}**
+${indentForListItem(short)}`);
       } else {
         // 标准模式：把内容缩进到 list item 内，避免内部列表/编号变成“同级卡片”
         lines.push(`- **${title}**\n${indentForListItem(text)}`);
@@ -1038,85 +1181,6 @@ function attachToggleHandler(boxEl, mesKey) {
   });
 }
 
-
-function decorateModuleCards(boxEl, mesKey) {
-  const cached = inlineCache.get(String(mesKey));
-  if (!cached) return;
-  if (!cached.cardCollapsed) cached.cardCollapsed = {};
-
-  const body = boxEl.querySelector('.sg-inline-body');
-  if (!body) return;
-
-  const topLis = body.querySelectorAll(':scope > ul > li');
-  if (!topLis || !topLis.length) return;
-
-  topLis.forEach((li, idx) => {
-    // Already decorated
-    if (li.querySelector(':scope > .sg-mod-head')) {
-      // re-apply state
-      const key = li.dataset.sgCardKey || String(idx);
-      const isCollapsed = !!cached.cardCollapsed[key];
-      li.classList.toggle('sg-mod-collapsed', isCollapsed);
-      return;
-    }
-
-    const strong = li.querySelector(':scope > strong');
-    const titleText = (strong?.textContent || '').trim();
-    const key = titleText || String(idx);
-    li.dataset.sgCardKey = key;
-
-    // Build head
-    const head = document.createElement('div');
-    head.className = 'sg-mod-head';
-    head.title = '点击折叠/展开该模块';
-
-    const chevron = document.createElement('span');
-    chevron.className = 'sg-mod-chevron';
-    chevron.textContent = '▾';
-
-    if (strong) {
-      // Move strong into head (keep original node)
-      head.appendChild(strong);
-    } else {
-      const span = document.createElement('strong');
-      span.textContent = `模块 ${idx + 1}`;
-      head.appendChild(span);
-    }
-    head.appendChild(chevron);
-
-    // Build content wrapper and move remaining nodes
-    const content = document.createElement('div');
-    content.className = 'sg-mod-content';
-
-    const nodes = Array.from(li.childNodes);
-    nodes.forEach((node) => {
-      // skip strong (already moved)
-      if (strong && node === strong) return;
-      content.appendChild(node);
-    });
-
-    // Clear li and append
-    li.innerHTML = '';
-    li.appendChild(head);
-    li.appendChild(content);
-
-    const applyState = () => {
-      const isCollapsed = !!cached.cardCollapsed[key];
-      li.classList.toggle('sg-mod-collapsed', isCollapsed);
-    };
-
-    head.addEventListener('click', (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      const now = !li.classList.contains('sg-mod-collapsed');
-      cached.cardCollapsed[key] = now;
-      li.classList.toggle('sg-mod-collapsed', now);
-    });
-
-    applyState();
-  });
-}
-
 function createInlineBoxElement(mesKey, htmlInner, collapsed) {
   const box = document.createElement('div');
   box.className = 'sg-inline-box';
@@ -1137,6 +1201,103 @@ function createInlineBoxElement(mesKey, htmlInner, collapsed) {
   return box;
 }
 
+
+function attachPanelToggleHandler(boxEl, mesKey) {
+  if (!boxEl) return;
+  const head = boxEl.querySelector('.sg-panel-head');
+  if (!head) return;
+  if (head.dataset.sgBound === '1') return;
+  head.dataset.sgBound = '1';
+
+  head.addEventListener('click', (e) => {
+    if (e.target && (e.target.closest('a'))) return;
+
+    const cur = boxEl.classList.contains('collapsed');
+    const next = !cur;
+    setCollapsed(boxEl, next);
+
+    const cached = panelCache.get(String(mesKey));
+    if (cached) {
+      cached.collapsed = next;
+      panelCache.set(String(mesKey), cached);
+    }
+  });
+}
+
+function createPanelBoxElement(mesKey, htmlInner, collapsed) {
+  const box = document.createElement('div');
+  box.className = 'sg-panel-box';
+  box.dataset.sgMesKey = String(mesKey);
+
+  box.innerHTML = `
+    <div class="sg-panel-head" title="点击折叠/展开（面板分析结果）">
+      <span class="sg-inline-badge">🧭</span>
+      <span class="sg-inline-title">剧情指导</span>
+      <span class="sg-inline-sub">（面板报告）</span>
+      <span class="sg-inline-chevron">▾</span>
+    </div>
+    <div class="sg-panel-body">${htmlInner}</div>
+  `.trim();
+
+  setCollapsed(box, !!collapsed);
+  attachPanelToggleHandler(box, mesKey);
+  return box;
+}
+
+function ensurePanelBoxPresent(mesKey) {
+  const cached = panelCache.get(String(mesKey));
+  if (!cached) return false;
+
+  const mesEl = findMesElementByKey(mesKey);
+  if (!mesEl) return false;
+
+  const textEl = mesEl.querySelector('.mes_text');
+  if (!textEl) return false;
+
+  const existing = textEl.querySelector('.sg-panel-box');
+  if (existing) {
+    setCollapsed(existing, !!cached.collapsed);
+    attachPanelToggleHandler(existing, mesKey);
+    const body = existing.querySelector('.sg-panel-body');
+    if (body && cached.htmlInner && body.innerHTML !== cached.htmlInner) body.innerHTML = cached.htmlInner;
+    return true;
+  }
+
+  const box = createPanelBoxElement(mesKey, cached.htmlInner, cached.collapsed);
+  textEl.appendChild(box);
+  return true;
+}
+
+
+function syncPanelOutputToChat(markdownOrText, asCodeBlock = false) {
+  const ref = getLastAssistantMessageRef();
+  if (!ref) return false;
+
+  const mesKey = ref.mesKey;
+
+  let md = String(markdownOrText || '').trim();
+  if (!md) return false;
+
+  if (asCodeBlock) {
+    // show raw output safely
+    md = '```text\n' + md + '\n```';
+  }
+
+  const htmlInner = renderMarkdownToHtml(md);
+  panelCache.set(String(mesKey), { htmlInner, collapsed: false, createdAt: Date.now() });
+
+  requestAnimationFrame(() => { ensurePanelBoxPresent(mesKey); });
+
+  // anti-overwrite reapply (same idea as inline)
+  setTimeout(() => ensurePanelBoxPresent(mesKey), 800);
+  setTimeout(() => ensurePanelBoxPresent(mesKey), 1800);
+  setTimeout(() => ensurePanelBoxPresent(mesKey), 3500);
+  setTimeout(() => ensurePanelBoxPresent(mesKey), 6500);
+
+  return true;
+}
+
+
 function ensureInlineBoxPresent(mesKey) {
   const cached = inlineCache.get(String(mesKey));
   if (!cached) return false;
@@ -1154,13 +1315,11 @@ function ensureInlineBoxPresent(mesKey) {
     // 更新 body（有时候被覆盖成空壳）
     const body = existing.querySelector('.sg-inline-body');
     if (body && cached.htmlInner && body.innerHTML !== cached.htmlInner) body.innerHTML = cached.htmlInner;
-    decorateModuleCards(existing, mesKey);
     return true;
   }
 
   const box = createInlineBoxElement(mesKey, cached.htmlInner, cached.collapsed);
   textEl.appendChild(box);
-  decorateModuleCards(box, mesKey);
   return true;
 }
 
@@ -1179,6 +1338,9 @@ function reapplyAllInlineBoxes(reason = '') {
   if (!s.enabled) return;
   for (const [mesKey] of inlineCache.entries()) {
     ensureInlineBoxPresent(mesKey);
+  }
+  for (const [mesKey] of panelCache.entries()) {
+    ensurePanelBoxPresent(mesKey);
   }
 }
 
@@ -1224,7 +1386,12 @@ async function runInlineAppendForLastMessage(opts = {}) {
 
     let jsonText = '';
     if (s.provider === 'custom') {
-      jsonText = await callViaCustom(s.customEndpoint, s.customApiKey, s.customModel, messages, s.temperature, s.customMaxTokens, s.customTopP);
+      jsonText = await callViaCustom(s.customEndpoint, s.customApiKey, s.customModel, messages, s.temperature, s.customMaxTokens, s.customTopP, s.customStream);
+      const parsedTry = safeJsonParse(jsonText);
+      if (!parsedTry || !hasAnyModuleKey(parsedTry, modules)) {
+        try { jsonText = await fallbackAskJsonCustom(s.customEndpoint, s.customApiKey, s.customModel, messages, s.temperature, s.customMaxTokens, s.customTopP, s.customStream); }
+        catch { /* ignore */ }
+      }
     } else {
       jsonText = await callViaSillyTavern(messages, schema, s.temperature);
       if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
@@ -1233,12 +1400,26 @@ async function runInlineAppendForLastMessage(opts = {}) {
     }
 
     const parsed = safeJsonParse(jsonText);
-    if (!parsed) return;
+    if (!parsed) {
+      // 解析失败：也把原文追加到聊天末尾，避免“有输出但看不到”
+      const raw = String(jsonText || '').trim();
+      const rawMd = raw ? ('```text\n' + raw + '\n```') : '（空）';
+      const mdFail = `**剧情指导（解析失败）**\n\n${rawMd}`;
+      const htmlInnerFail = renderMarkdownToHtml(mdFail);
+
+      inlineCache.set(String(mesKey), { htmlInner: htmlInnerFail, collapsed: false, createdAt: Date.now() });
+      requestAnimationFrame(() => { ensureInlineBoxPresent(mesKey); });
+      setTimeout(() => ensureInlineBoxPresent(mesKey), 800);
+      setTimeout(() => ensureInlineBoxPresent(mesKey), 1800);
+      setTimeout(() => ensureInlineBoxPresent(mesKey), 3500);
+      setTimeout(() => ensureInlineBoxPresent(mesKey), 6500);
+      return;
+    }
 
     const md = buildInlineMarkdownFromModules(parsed, modules, s.appendMode, !!s.inlineShowEmpty);
     const htmlInner = renderMarkdownToHtml(md);
 
-    inlineCache.set(String(mesKey), { htmlInner, collapsed: false, cardCollapsed: {}, createdAt: Date.now() });
+    inlineCache.set(String(mesKey), { htmlInner, collapsed: false, createdAt: Date.now() });
 
     requestAnimationFrame(() => { ensureInlineBoxPresent(mesKey); });
 
@@ -1557,6 +1738,47 @@ function ensureChatActionButtons() {
   schedulePositionChatButtons();
 }
 
+// -------------------- card toggle (shrink/expand per module card) --------------------
+function clearLegacyZoomArtifacts() {
+  try {
+    document.body.classList.remove('sg-zoom-lock');
+    document.querySelectorAll('.sg-zoomed').forEach(el => el.classList.remove('sg-zoomed'));
+    const ov = document.getElementById('sg_zoom_overlay');
+    if (ov) ov.remove();
+  } catch { /* ignore */ }
+}
+
+function installCardZoomDelegation() {
+  // keep old function name for compatibility, but behavior is now "click to shrink/expand"
+  if (window.__storyguide_card_toggle_installed) return;
+  window.__storyguide_card_toggle_installed = true;
+
+  clearLegacyZoomArtifacts();
+
+  document.addEventListener('click', (e) => {
+    const target = e.target;
+
+    // don't hijack interactive elements
+    if (target.closest('a, button, input, textarea, select, label')) return;
+
+    const card = target.closest('.sg-inline-body > ul > li');
+    if (!card) return;
+
+    // if user is selecting text, don't toggle
+    try {
+      const sel = window.getSelection();
+      if (sel && String(sel).trim().length > 0) return;
+    } catch { /* ignore */ }
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    card.classList.toggle('sg-collapsed');
+  }, true);
+}
+
+
+
 function buildModalHtml() {
   return `
   <div id="sg_modal_backdrop" class="sg-backdrop" style="display:none;">
@@ -1682,7 +1904,11 @@ function buildModalHtml() {
                 <div class="sg-field sg-field-full">
                   <label>最大回复token数</label>
                   <input id="sg_customMaxTokens" type="number" min="256" max="200000" step="1" placeholder="例如：60000">
-                </div>
+                
+                  <label class="sg-check" style="margin-top:8px;">
+                    <input type="checkbox" id="sg_customStream"> 使用流式返回（stream=true）
+                  </label>
+</div>
               </div>
             </div>
 
@@ -1857,6 +2083,7 @@ function ensureModal() {
     const id = String($('#sg_modelSelect').val() || '').trim();
     if (id) $('#sg_customModel').val(id);
   $('#sg_customMaxTokens').val(s.customMaxTokens || 8192);
+  $('#sg_customStream').prop('checked', !!s.customStream);
   });
 
   
@@ -2106,6 +2333,7 @@ function pullUiToSettings() {
   s.customApiKey = String($('#sg_customApiKey').val() || '');
   s.customModel = String($('#sg_customModel').val() || '').trim();
   s.customMaxTokens = clampInt($('#sg_customMaxTokens').val(), 256, 200000, s.customMaxTokens || 8192);
+  s.customStream = $('#sg_customStream').is(':checked');
 
   // modulesJson：先不强行校验（用户可先保存再校验），但会在分析前用默认兜底
   s.modulesJson = String($('#sg_modulesJson').val() || '').trim() || JSON.stringify(DEFAULT_MODULES, null, 2);
@@ -2211,6 +2439,9 @@ function startObservers() {
   ensureChatActionButtons();
 
   scheduleReapplyAll('start');
+  installCardZoomDelegation();
+
+  scheduleReapplyAll('start');
 }
 
 // -------------------- events --------------------
@@ -2259,6 +2490,7 @@ function init() {
 
     injectMinimalSettingsPanel();
     ensureChatActionButtons();
+    installCardZoomDelegation();
   });
 
   globalThis.StoryGuide = {

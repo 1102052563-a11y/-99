@@ -599,35 +599,302 @@
 
 
 
-/* v0.6.7 per-module card collapse */
-.sg-inline-body > ul > li .sg-mod-head{
-  display: flex;
-  align-items: center;
-  gap: 10px;
+/* v0.6.7 zoom each module card */
+.sg-inline-body > ul > li{
+  cursor: zoom-in;
+}
+
+.sg-zoom-overlay{
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  backdrop-filter: blur(3px);
+  z-index: 9998;
+  display: none;
+}
+
+.sg-zoom-overlay.is-on{
+  display: block;
+}
+
+body.sg-zoom-lock{
+  overflow: hidden !important;
+}
+
+.sg-inline-body > ul > li.sg-zoomed{
+  cursor: zoom-out;
+  position: fixed !important;
+  left: 50% !important;
+  top: 50% !important;
+  transform: translate(-50%, -50%) !important;
+  width: min(980px, 92vw) !important;
+  max-height: 86vh !important;
+  overflow: auto !important;
+  z-index: 9999 !important;
+  background: rgba(25,25,25,0.95) !important;
+  border-color: rgba(255,255,255,0.18) !important;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.55) !important;
+}
+
+.sg-inline-body > ul > li.sg-zoomed::before{
+  top: 16px;
+  bottom: 16px;
+}
+
+
+/* v0.6.8 custom stream checkbox */
+#sg_customStream{transform: scale(1.05);} 
+
+
+
+.sg-modal{
+    width: 98vw;
+    height: 96vh;
+    border-radius: 14px;
+  }
+
+  /* one-column layout on mobile; single scroll area */
+  .sg-modal-body{
+    display: block;
+    grid-template-columns: 1fr !important;
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .sg-left, .sg-right{
+    overflow: visible;
+    padding: 10px;
+  }
+
+  .sg-left{
+    border-right: none;
+    border-bottom: 1px solid rgba(255,255,255,0.10);
+  }
+
+  .sg-grid2, .sg-grid3{
+    grid-template-columns: 1fr !important;
+  }
+
+  .sg-row{
+    gap: 10px;
+  }
+
+  .sg-field, .sg-field-full{
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .sg-model-select{
+    width: 100%;
+  }
+
+  .sg-actions-row{
+    justify-content: stretch;
+  }
+
+  .sg-actions-row .menu_button,
+  .sg-modal button.menu_button,
+  .sg-modal .menu_button.sg-btn,
+  .sg-modal .menu_button.sg-btn-primary{
+    min-width: 0 !important;
+    width: auto !important;
+    flex: 1 1 calc(50% - 10px);
+  }
+
+  .sg-tabs{
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .sg-tab{
+    flex: 1 1 auto;
+  }
+}
+
+
+/* v0.7.0 panel report box appended to messages */
+.sg-panel-box{
+  margin-top: 12px;
+  padding: 10px 10px;
+  border-radius: 14px;
+  border: 1px solid rgba(180,255,200,0.26);
+  background: rgba(180,255,200,0.06);
+}
+.sg-panel-head{
+  display:flex;
+  align-items:center;
+  gap: 8px;
+  margin-bottom: 8px;
   cursor: pointer;
   user-select: none;
 }
+.sg-panel-body{ font-size: 0.97rem; opacity: .96; }
 
-.sg-inline-body > ul > li .sg-mod-head strong{
+/* collapsed state */
+.sg-panel-box.collapsed .sg-panel-body{ display: none; }
+.sg-panel-box.collapsed .sg-inline-chevron{ transform: rotate(-90deg); }
+
+
+
+/* v0.7.1 card click behavior: shrink/expand (no zoom overlay) */
+#sg_zoom_overlay{ display:none !important; }
+
+.sg-inline-body > ul > li{
+  cursor: pointer;
+}
+
+/* collapsed card: clamp height */
+.sg-inline-body > ul > li.sg-collapsed{
+  max-height: 92px; /* ~3-4 lines depending on font */
+  overflow: hidden;
+}
+
+.sg-inline-body > ul > li.sg-collapsed::after{
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 42px;
+  background: linear-gradient(to bottom, rgba(0,0,0,0), rgba(0,0,0,0.55));
+  pointer-events: none;
+  border-radius: 0 0 14px 14px;
+}
+
+/* ensure old zoomed style doesn't break layout */
+.sg-inline-body > ul > li.sg-zoomed{
+  position: static !important;
+  transform: none !important;
+  left: auto !important;
+  top: auto !important;
+  width: auto !important;
+  max-height: none !important;
+  overflow: visible !important;
+  z-index: auto !important;
+}
+
+
+
+/* v0.7.2 card collapse: show only title */
+.sg-inline-body > ul > li.sg-collapsed{
+  max-height: none;
+  overflow: hidden;
+  padding-top: 10px;
+  padding-bottom: 10px;
+  padding-right: 34px;
+}
+
+.sg-inline-body > ul > li.sg-collapsed::after{
+  content: "▸";
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0.65;
+  font-size: 14px;
+}
+
+.sg-inline-body > ul > li.sg-collapsed > *:not(strong){
+  display: none !important;
+}
+
+.sg-inline-body > ul > li.sg-collapsed strong{
   margin: 0 !important;
-  display: inline-block;
 }
 
-.sg-inline-body > ul > li .sg-mod-chevron{
-  margin-left: auto;
-  opacity: 0.75;
-  transition: transform 160ms ease, opacity 160ms ease;
+/* disable old gradient overlay if any */
+.sg-inline-body > ul > li.sg-collapsed::before{
+  /* keep left bar */
+}
+.sg-inline-body > ul > li.sg-collapsed::after{
+  /* arrow defined above */
 }
 
-.sg-inline-body > ul > li.sg-mod-collapsed .sg-mod-chevron{
-  transform: rotate(-90deg);
-  opacity: 0.9;
-}
 
-.sg-inline-body > ul > li .sg-mod-content{
-  margin-top: 6px;
-}
+/* v0.7.2 override old gradient */
+.sg-inline-body > ul > li.sg-collapsed::after{background:none !important; height:auto !important;}
 
-.sg-inline-body > ul > li.sg-mod-collapsed .sg-mod-content{
-  display: none;
+
+
+/* v0.7.3 mobile responsive modal (fix header hidden / overflow) */
+@media (max-width: 680px){
+  .sg-backdrop{
+    /* avoid centering a tall modal which pushes header offscreen on mobile */
+    align-items: flex-start;
+    justify-content: center;
+    padding-left: 10px;
+    padding-right: 10px;
+    padding-top: max(10px, env(safe-area-inset-top));
+    padding-bottom: max(10px, env(safe-area-inset-bottom));
+  }
+
+  .sg-modal{
+    width: 98vw;
+    /* prefer dynamic viewport units to avoid "100vh includes URL bar" issues */
+    height: calc(100dvh - 20px);
+    max-height: calc(100dvh - 20px);
+    border-radius: 14px;
+  }
+
+  /* keep header visible even when content scrolls */
+  .sg-modal-head{
+    position: sticky;
+    top: 0;
+    z-index: 3;
+  }
+
+  /* one-column layout on mobile; single scroll area */
+  .sg-modal-body{
+    display: block;
+    grid-template-columns: 1fr !important;
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .sg-left, .sg-right{
+    overflow: visible;
+    padding: 10px;
+  }
+
+  .sg-left{
+    border-right: none;
+    border-bottom: 1px solid rgba(255,255,255,0.10);
+  }
+
+  .sg-grid2, .sg-grid3{
+    grid-template-columns: 1fr !important;
+  }
+
+  .sg-row{
+    gap: 10px;
+  }
+
+  .sg-field, .sg-field-full{
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .sg-model-select{
+    width: 100%;
+  }
+
+  .sg-actions-row{
+    justify-content: stretch;
+  }
+
+  .sg-actions-row .menu_button,
+  .sg-modal button.menu_button,
+  .sg-modal .menu_button.sg-btn,
+  .sg-modal .menu_button.sg-btn-primary{
+    min-width: 0 !important;
+    width: auto !important;
+    flex: 1 1 calc(50% - 10px);
+  }
+
+  .sg-tabs{
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .sg-tab{
+    flex: 1 1 auto;
+  }
 }
