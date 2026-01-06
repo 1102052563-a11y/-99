@@ -523,8 +523,3 @@
   overflow: hidden !important;
   text-overflow: ellipsis !important;
 }
-
-
-
-/* v0.6.2 hide topbar book button */
-#sg_topbar_btn{ display: none !important; }
