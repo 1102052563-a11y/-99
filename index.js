@@ -2,7 +2,7 @@
 
 /**
  * 剧情指导 StoryGuide (SillyTavern UI Extension)
- * v0.7.3
+ * v0.9.8
  *
  * 新增：输出模块自定义（更高自由度）
  * - 你可以自定义“输出模块列表”以及每个模块自己的提示词（prompt）
@@ -10,7 +10,22 @@
  * - 插件会根据模块自动生成 JSON Schema（动态字段）并要求模型按该 Schema 输出
  *
  * 兼容：仍然保持 v0.3.x 的“独立API走后端代理 + 抗变量更新覆盖（自动补贴）+ 点击折叠”能力
+ *
+ * v0.8.2 修复：兼容 SlashCommand 返回 [object Object] 的情况（自动解析 UID / 文本输出）
+ * v0.8.3 新增：总结功能支持自定义提示词（system + user 模板，支持占位符）
+ * v0.8.6 修复：写入世界书不再依赖 JS 解析 UID（改为在同一段 STscript 管线内用 {{pipe}} 传递 UID），避免误报“无法解析 UID”。
+ * v0.9.0 修复：实时读取蓝灯世界书在部分 ST 版本返回包装字段（如 data 为 JSON 字符串）时解析为 0 条的问题；并增强读取端点/文件名兼容。
+ * v0.9.1 新增：蓝灯索引→绿灯触发 的“索引日志”（显示命中条目名称/注入关键词），便于排查触发效果。
+ * v0.9.2 修复：条目标题前缀（comment）现在始终加在最前（即使模型输出了自定义 title 也会保留前缀）。
+ * v0.9.4 新增：总结写入世界书的“主要关键词(key)”可切换为“索引编号”（如 A-001），只写 1 个触发词，触发更精确。
+ * v0.9.5 改进：蓝灯索引匹配会综合“最近 N 条消息正文 + 本次用户输入”，而不是只看最近正文（可在面板里关闭/调整权重）。
+ * v0.9.6 改进：在面板标题处显示版本号，方便确认是否已正确更新到包含“用户输入权重”设置的版本。
+ * v0.9.9 改进：把“剧情指导 / 总结设置 / 索引设置”拆成三页（左侧分页标签），界面更清晰。
+ * v0.9.8 新增：手动选择总结楼层范围（例如 20-40）并点击立即总结。
+ * v0.10.0 新增：手动楼层范围总结支持“按每 N 层拆分生成多条世界书条目”（例如 1-80 且 N=40 → 2 条）。
  */
+
+const SG_VERSION = '0.10.0';
 
 const MODULE_NAME = 'storyguide';
 
@@ -40,6 +55,22 @@ const DEFAULT_MODULES = Object.freeze([
   { key: 'protagonist_impact', title: '主角行为造成的影响', type: 'text', prompt: '主角行为对剧情/关系/风险造成的改变', required: true, panel: true, inline: false },
   { key: 'tips', title: '给主角的提示（基于原著后续/大纲）', type: 'list', prompt: '给出可执行提示（尽量具体）', maxItems: 4, required: true, panel: true, inline: true },
 ]);
+
+// ===== 总结提示词默认值（可在面板中自定义） =====
+const DEFAULT_SUMMARY_SYSTEM_PROMPT = `你是一个“剧情总结/世界书记忆”助手。\n\n任务：\n1) 阅读用户与AI对话片段，生成一段简洁摘要（中文，150~400字，尽量包含：主要人物/目标/冲突/关键物品/地点/关系变化/未解决的悬念）。\n2) 提取 6~14 个关键词（中文优先，人物/地点/势力/物品/事件/关系等），用于世界书条目触发词。关键词尽量去重、不要太泛（如“然后”“好的”）。`;
+
+const DEFAULT_SUMMARY_USER_TEMPLATE = `【楼层范围】{{fromFloor}}-{{toFloor}}\n\n【对话片段】\n{{chunk}}`;
+
+// 无论用户怎么自定义提示词，仍会强制追加 JSON 输出结构要求，避免写入世界书失败
+const SUMMARY_JSON_REQUIREMENT = `输出要求：\n- 只输出严格 JSON，不要 Markdown、不要代码块、不要任何多余文字。\n- JSON 结构必须为：{"title": string, "summary": string, "keywords": string[]}。\n- keywords 为 6~14 个词/短语，尽量去重、避免泛词。`;
+
+
+// ===== 索引提示词默认值（可在面板中自定义；用于“LLM 综合判断”模式） =====
+const DEFAULT_INDEX_SYSTEM_PROMPT = `你是一个“剧情索引匹配”助手。\n\n任务：\n- 输入包含：最近剧情正文（节选）、用户当前输入、以及若干候选索引条目（每条含标题/摘要/触发词）。\n- 你的目标是：综合判断哪些候选条目与“当前剧情”最相关（不是只匹配用户这一句话），并返回这些候选的 id。\n\n要求：\n- 优先选择与当前剧情主线/关键人物/关键地点/关键物品/未解决悬念相关的条目。\n- 避免选择明显无关或过于泛的条目。\n- 返回条目数量应 <= maxPick。`;
+
+const DEFAULT_INDEX_USER_TEMPLATE = `【用户当前输入】\n{{userMessage}}\n\n【最近剧情（节选）】\n{{recentText}}\n\n【候选索引条目（JSON）】\n{{candidates}}\n\n请从候选中选出与当前剧情最相关的条目（不超过 {{maxPick}} 条），并仅输出 JSON。`;
+
+const INDEX_JSON_REQUIREMENT = `输出要求：\n- 只输出严格 JSON，不要 Markdown、不要代码块、不要任何多余文字。\n- JSON 结构必须为：{"pickedIds": number[]}。\n- pickedIds 必须是候选列表里的 id（整数）。\n- 返回的 pickedIds 数量 <= maxPick。`;
 
 const DEFAULT_SETTINGS = Object.freeze({
   enabled: true,
@@ -90,6 +121,118 @@ const DEFAULT_SETTINGS = Object.freeze({
   worldbookWindowMessages: 18,
   worldbookJson: '',
 
+  // ===== 总结功能（独立于剧情提示的 API 设置） =====
+  summaryEnabled: false,
+  // 多少“楼层”总结一次（楼层统计方式见 summaryCountMode）
+  summaryEvery: 20,
+  // 手动楼层范围总结：是否按“每 N 层”拆分生成多条（N=summaryEvery）
+  summaryManualSplit: false,
+  // assistant: 仅统计 AI 回复；all: 统计全部消息（用户+AI）
+  summaryCountMode: 'assistant',
+  // 自动总结时，默认只总结“上次总结之后新增”的内容；首次则总结最近 summaryEvery 段
+  summaryMaxCharsPerMessage: 4000,
+  summaryMaxTotalChars: 24000,
+
+  // 总结调用方式：st=走酒馆当前已连接的 LLM；custom=独立 OpenAI 兼容 API
+  summaryProvider: 'st',
+  summaryTemperature: 0.4,
+
+  // 自定义总结提示词（可选）
+  // - system：决定总结风格/重点
+  // - userTemplate：决定如何把楼层范围/对话片段塞给模型（支持占位符）
+  summarySystemPrompt: DEFAULT_SUMMARY_SYSTEM_PROMPT,
+  summaryUserTemplate: DEFAULT_SUMMARY_USER_TEMPLATE,
+  summaryCustomEndpoint: '',
+  summaryCustomApiKey: '',
+  summaryCustomModel: 'gpt-4o-mini',
+  summaryCustomModelsCache: [],
+  summaryCustomMaxTokens: 2048,
+  summaryCustomStream: false,
+
+  // 总结结果写入世界书（Lorebook / World Info）
+  // —— 绿灯世界书（关键词触发）——
+  summaryToWorldInfo: true,
+  // chatbook=写入当前聊天绑定世界书；file=写入指定世界书文件名
+  summaryWorldInfoTarget: 'chatbook',
+  summaryWorldInfoFile: '',
+  summaryWorldInfoCommentPrefix: '剧情总结',
+
+  // 总结写入世界书 key（触发词）的来源
+  // - keywords: 使用模型输出的 keywords（默认）
+  // - indexId: 使用自动生成的索引编号（如 A-001），只写 1 个触发词，触发更精确
+  summaryWorldInfoKeyMode: 'keywords',
+  // 当 keyMode=indexId 时：索引编号格式
+  summaryIndexPrefix: 'A-',
+  summaryIndexPad: 3,
+  summaryIndexStart: 1,
+  // 是否把索引编号写入条目标题（comment），便于世界书列表定位
+  summaryIndexInComment: true,
+
+  // —— 蓝灯世界书（常开索引：给本插件做检索用）——
+  // 注意：蓝灯世界书建议写入“指定世界书文件名”，因为 chatbook 通常只有一个。
+  summaryToBlueWorldInfo: false,
+  summaryBlueWorldInfoFile: '',
+  summaryBlueWorldInfoCommentPrefix: '剧情总结',
+
+  // —— 蓝灯索引 → 绿灯触发 ——
+  wiTriggerEnabled: false,
+
+// 匹配方式：local=本地相似度；llm=LLM 综合判断（可自定义提示词 & 独立 API）
+wiTriggerMatchMode: 'local',
+
+// —— 索引 LLM（独立于总结 API 的第二套配置）——
+wiIndexProvider: 'st',         // st | custom
+wiIndexTemperature: 0.2,
+wiIndexTopP: 0.95,
+wiIndexSystemPrompt: DEFAULT_INDEX_SYSTEM_PROMPT,
+wiIndexUserTemplate: DEFAULT_INDEX_USER_TEMPLATE,
+
+// LLM 模式：先用本地相似度预筛选 TopK，再交给模型综合判断（更省 tokens）
+wiIndexPrefilterTopK: 24,
+// 每条候选摘要截断字符（控制 tokens）
+wiIndexCandidateMaxChars: 420,
+
+// 索引独立 OpenAI 兼容 API
+wiIndexCustomEndpoint: '',
+wiIndexCustomApiKey: '',
+wiIndexCustomModel: 'gpt-4o-mini',
+wiIndexCustomModelsCache: [],
+wiIndexCustomMaxTokens: 1024,
+wiIndexCustomStream: false,
+
+  // 在用户发送消息前（MESSAGE_SENT）读取“最近 N 条消息正文”（不含当前条），从蓝灯索引里挑相关条目。
+  wiTriggerLookbackMessages: 20,
+  // 是否把“本次用户输入”纳入索引匹配（综合判断）。
+  wiTriggerIncludeUserMessage: true,
+  // 本次用户输入在相似度向量中的权重（越大越看重用户输入；1=与最近正文同权重）
+  wiTriggerUserMessageWeight: 1.6,
+  // 至少已有 N 条 AI 回复（楼层）才开始索引触发；0=立即
+  wiTriggerStartAfterAssistantMessages: 0,
+  // 最多选择多少条 summary 条目来触发
+  wiTriggerMaxEntries: 4,
+  // 相关度阈值（0~1，越大越严格）
+  wiTriggerMinScore: 0.08,
+  // 最多注入多少个触发词（去重后）
+  wiTriggerMaxKeywords: 24,
+  // 注入模式：appendToUser = 追加到用户消息末尾
+  wiTriggerInjectMode: 'appendToUser',
+  // 注入样式：hidden=HTML 注释隐藏；plain=直接文本（更稳）
+  wiTriggerInjectStyle: 'hidden',
+  wiTriggerTag: 'SG_WI_TRIGGERS',
+  wiTriggerDebugLog: false,
+
+  // 蓝灯索引读取方式：默认“实时读取蓝灯世界书文件”
+  // - live：每次触发前会按需拉取蓝灯世界书（带缓存/节流）
+  // - cache：只使用导入/缓存的 summaryBlueIndex
+  wiBlueIndexMode: 'live',
+  // 读取蓝灯索引时使用的世界书文件名；留空则回退使用 summaryBlueWorldInfoFile
+  wiBlueIndexFile: '',
+  // 实时读取的最小刷新间隔（秒），防止每条消息都请求一次
+  wiBlueIndexMinRefreshSec: 20,
+
+  // 蓝灯索引缓存（可选：用于检索；每条为 {title, summary, keywords, range?}）
+  summaryBlueIndex: [],
+
   // 模块自定义（JSON 字符串 + 解析备份）
   modulesJson: '',
   // 额外可自定义提示词“骨架”
@@ -100,12 +243,20 @@ const DEFAULT_SETTINGS = Object.freeze({
 const META_KEYS = Object.freeze({
   canon: 'storyguide_canon_outline',
   world: 'storyguide_world_setup',
+  summaryMeta: 'storyguide_summary_meta',
 });
 
 let lastReport = null;
 let lastJsonText = '';
+let lastSummary = null; // { title, summary, keywords, ... }
+let lastSummaryText = '';
 let refreshTimer = null;
 let appendTimer = null;
+let summaryTimer = null;
+let isSummarizing = false;
+
+// 蓝灯索引“实时读取”缓存（防止每条消息都请求一次）
+let blueIndexLiveCache = { file: '', loadedAt: 0, entries: [], lastError: '' };
 
 // ============== 关键：DOM 追加缓存 & 观察者（抗重渲染） ==============
 /**
@@ -176,6 +327,17 @@ function stripHtml(input) {
   return String(input).replace(/<[^>]*>/g, '').replace(/\s+\n/g, '\n').trim();
 }
 
+function escapeHtml(input) {
+  const s = String(input ?? '');
+  return s.replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[ch]));
+}
+
 function clampInt(v, min, max, fallback) {
   const n = Number.parseInt(v, 10);
   if (Number.isFinite(n)) return Math.min(max, Math.max(min, n));
@@ -185,6 +347,15 @@ function clampFloat(v, min, max, fallback) {
   const n = Number.parseFloat(v);
   if (Number.isFinite(n)) return Math.min(max, Math.max(min, n));
   return fallback;
+}
+
+// 简易模板替换：支持 {{fromFloor}} / {{toFloor}} / {{chunk}} 等占位符
+function renderTemplate(tpl, vars = {}) {
+  const str = String(tpl ?? '');
+  return str.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, k) => {
+    const v = vars?.[k];
+    return v == null ? '' : String(v);
+  });
 }
 
 function safeJsonParse(maybeJson) {
@@ -216,6 +387,39 @@ async function setChatMetaValue(key, value) {
   await ctx.saveMetadata();
 }
 
+// -------------------- summary meta (per chat) --------------------
+function getDefaultSummaryMeta() {
+  return {
+    lastFloor: 0,
+    lastChatLen: 0,
+    // 用于“索引编号触发”（A-001/A-002…）的递增计数器（按聊天存储）
+    nextIndex: 1,
+    history: [], // [{title, summary, keywords, createdAt, range:{fromFloor,toFloor,fromIdx,toIdx}, worldInfo:{file,uid}}]
+    wiTriggerLogs: [], // [{ts,userText,picked:[{title,score,keywordsPreview}], injectedKeywords, lookback, style, tag}]
+  };
+}
+
+function getSummaryMeta() {
+  const raw = String(getChatMetaValue(META_KEYS.summaryMeta) || '').trim();
+  if (!raw) return getDefaultSummaryMeta();
+  try {
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== 'object') return getDefaultSummaryMeta();
+    return {
+      ...getDefaultSummaryMeta(),
+      ...data,
+      history: Array.isArray(data.history) ? data.history : [],
+      wiTriggerLogs: Array.isArray(data.wiTriggerLogs) ? data.wiTriggerLogs : [],
+    };
+  } catch {
+    return getDefaultSummaryMeta();
+  }
+}
+
+async function setSummaryMeta(meta) {
+  await setChatMetaValue(META_KEYS.summaryMeta, JSON.stringify(meta ?? getDefaultSummaryMeta()));
+}
+
 function setStatus(text, kind = '') {
   const $s = $('#sg_status');
   $s.removeClass('ok err warn').addClass(kind || '');
@@ -227,6 +431,7 @@ function updateButtonsEnabled() {
   $('#sg_copyMd').prop('disabled', !ok);
   $('#sg_copyJson').prop('disabled', !Boolean(lastJsonText));
   $('#sg_injectTips').prop('disabled', !ok);
+  $('#sg_copySum').prop('disabled', !Boolean(lastSummaryText));
 }
 
 function showPane(name) {
@@ -323,6 +528,41 @@ function parseWorldbookJson(rawText) {
   if (typeof data === 'string') {
     try { data = JSON.parse(data); } catch { /* ignore */ }
   }
+  // Some ST endpoints wrap the lorebook JSON inside a string field (e.g. { data: "<json>" }).
+  // Try to unwrap a few common wrapper fields.
+  for (let i = 0; i < 4; i++) {
+    if (!data || typeof data !== 'object') break;
+    const wrappers = ['data', 'world_info', 'worldInfo', 'lorebook', 'book', 'worldbook', 'worldBook', 'payload', 'result'];
+    let changed = false;
+    for (const k of wrappers) {
+      const v = data?.[k];
+      if (typeof v === 'string') {
+        const t = v.trim();
+        if (t && (t.startsWith('{') || t.startsWith('['))) {
+          try { data = JSON.parse(t); changed = true; break; } catch { /* ignore */ }
+        }
+      } else if (v && typeof v === 'object') {
+        // Sometimes the real file is nested under a wrapper object
+        if (v.entries || v.world_info || v.worldInfo || v.lorebook || v.items) {
+          data = v;
+          changed = true;
+          break;
+        }
+        // Or a nested string field again
+        if (typeof v.data === 'string') {
+          const t2 = String(v.data || '').trim();
+          if (t2 && (t2.startsWith('{') || t2.startsWith('['))) {
+            try { data = JSON.parse(t2); changed = true; break; } catch { /* ignore */ }
+          }
+        }
+      }
+    }
+    if (!changed) break;
+    if (typeof data === 'string') {
+      try { data = JSON.parse(data); } catch { break; }
+    }
+  }
+
 
   function toArray(maybe) {
     if (!maybe) return null;
@@ -416,6 +656,164 @@ function parseWorldbookJson(rawText) {
     norm.push({ title: title || (keys[0] ? `条目：${keys[0]}` : '条目'), keys, content });
   }
   return norm;
+}
+
+// -------------------- 实时读取蓝灯世界书（World Info / Lorebook） --------------------
+
+function pickBlueIndexFileName() {
+  const s = ensureSettings();
+  const explicit = String(s.wiBlueIndexFile || '').trim();
+  if (explicit) return explicit;
+  const fromBlueWrite = String(s.summaryBlueWorldInfoFile || '').trim();
+  if (fromBlueWrite) return fromBlueWrite;
+  // 最后兜底：若用户把蓝灯索引建在绿灯同文件里，也能读到（不推荐，但不阻断）
+  const fromGreen = String(s.summaryWorldInfoFile || '').trim();
+  return fromGreen;
+}
+
+async function fetchJsonCompat(url, options) {
+  const headers = { ...getStRequestHeadersCompat(), ...(options?.headers || {}) };
+  const res = await fetch(url, { ...(options || {}), headers });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    const err = new Error(`HTTP ${res.status} ${res.statusText}${text ? `\n${text}` : ''}`);
+    err.status = res.status;
+    throw err;
+  }
+  // some ST endpoints may return plain text
+  const ct = String(res.headers.get('content-type') || '');
+  if (ct.includes('application/json')) return await res.json();
+  const t = await res.text().catch(() => '');
+  try { return JSON.parse(t); } catch { return { text: t }; }
+}
+
+// 尝试从 ST 后端读取指定世界书文件（不同版本的参数名/方法可能不同）
+async function fetchWorldInfoFileJsonCompat(fileName) {
+  const raw = String(fileName || '').trim();
+  if (!raw) throw new Error('蓝灯世界书文件名为空');
+
+  // Some ST versions store lorebook names with/without .json extension.
+  const names = Array.from(new Set([
+    raw,
+    raw.endsWith('.json') ? raw.slice(0, -5) : (raw + '.json'),
+  ].filter(Boolean)));
+
+  const tryList = [];
+  for (const name of names) {
+    // POST JSON body
+    tryList.push(
+      { method: 'POST', url: '/api/worldinfo/get', body: { name } },
+      { method: 'POST', url: '/api/worldinfo/get', body: { file: name } },
+      { method: 'POST', url: '/api/worldinfo/get', body: { filename: name } },
+      { method: 'POST', url: '/api/worldinfo/get', body: { world: name } },
+      { method: 'POST', url: '/api/worldinfo/get', body: { lorebook: name } },
+      // GET query
+      { method: 'GET', url: `/api/worldinfo/get?name=${encodeURIComponent(name)}` },
+      { method: 'GET', url: `/api/worldinfo/get?file=${encodeURIComponent(name)}` },
+      { method: 'GET', url: `/api/worldinfo/get?filename=${encodeURIComponent(name)}` },
+
+      // Some forks/versions use /read instead of /get
+      { method: 'POST', url: '/api/worldinfo/read', body: { name } },
+      { method: 'POST', url: '/api/worldinfo/read', body: { file: name } },
+      { method: 'GET', url: `/api/worldinfo/read?name=${encodeURIComponent(name)}` },
+      { method: 'GET', url: `/api/worldinfo/read?file=${encodeURIComponent(name)}` },
+
+      // Rare: /load
+      { method: 'POST', url: '/api/worldinfo/load', body: { name } },
+      { method: 'GET', url: `/api/worldinfo/load?name=${encodeURIComponent(name)}` },
+    );
+  }
+
+  let lastErr = null;
+  for (const t of tryList) {
+    try {
+      if (t.method === 'POST') {
+        const data = await fetchJsonCompat(t.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(t.body),
+        });
+        if (data) return data;
+      } else {
+        const data = await fetchJsonCompat(t.url, { method: 'GET' });
+        if (data) return data;
+      }
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('读取世界书失败');
+}
+
+function buildBlueIndexFromWorldInfoJson(worldInfoJson, prefixFilter = '') {
+  // 复用 parseWorldbookJson 的“兼容解析”逻辑
+  const parsed = parseWorldbookJson(JSON.stringify(worldInfoJson || {}));
+  const prefix = String(prefixFilter || '').trim();
+
+  const base = parsed.filter(e => e && e.content);
+
+  // 优先用“总结前缀”筛选（避免把其他世界书条目全塞进索引）
+  // 但如果因不同 ST 结构导致 title/comment 不一致而筛选到 0 条，则自动回退到全部条目，避免“明明有内容却显示 0 条”。
+  let picked = base;
+  if (prefix) {
+    picked = base.filter(e =>
+      String(e.title || '').includes(prefix) ||
+      String(e.content || '').includes(prefix)
+    );
+    if (!picked.length) picked = base;
+  }
+
+  const items = picked
+    .map(e => ({
+      title: String(e.title || '').trim() || (e.keys?.[0] ? `条目：${e.keys[0]}` : '条目'),
+      summary: String(e.content || '').trim(),
+      keywords: Array.isArray(e.keys) ? e.keys.slice(0, 120) : [],
+      importedAt: Date.now(),
+    }))
+    .filter(x => x.summary);
+
+  return items;
+}
+
+async function ensureBlueIndexLive(force = false) {
+  const s = ensureSettings();
+  const mode = String(s.wiBlueIndexMode || 'live');
+  if (mode !== 'live') {
+    const arr = Array.isArray(s.summaryBlueIndex) ? s.summaryBlueIndex : [];
+    return arr;
+  }
+
+  const file = pickBlueIndexFileName();
+  if (!file) return [];
+
+  const minSec = clampInt(s.wiBlueIndexMinRefreshSec, 5, 600, 20);
+  const now = Date.now();
+  const ageMs = now - Number(blueIndexLiveCache.loadedAt || 0);
+  const need = force || blueIndexLiveCache.file !== file || ageMs > (minSec * 1000);
+
+  if (!need && Array.isArray(blueIndexLiveCache.entries) && blueIndexLiveCache.entries.length) {
+    return blueIndexLiveCache.entries;
+  }
+
+  try {
+    const json = await fetchWorldInfoFileJsonCompat(file);
+    const prefix = String(s.summaryBlueWorldInfoCommentPrefix || '').trim();
+    const entries = buildBlueIndexFromWorldInfoJson(json, prefix);
+
+    blueIndexLiveCache = { file, loadedAt: now, entries, lastError: '' };
+
+    // 同步到设置里，便于 UI 显示（同时也是“缓存”兜底）
+    s.summaryBlueIndex = entries;
+    saveSettings();
+    updateBlueIndexInfoLabel();
+
+    return entries;
+  } catch (e) {
+    blueIndexLiveCache.lastError = String(e?.message ?? e);
+    // 读取失败就回退到现有缓存
+    const fallback = Array.isArray(s.summaryBlueIndex) ? s.summaryBlueIndex : [];
+    return fallback;
+  }
 }
 
 function selectActiveWorldbookEntries(entries, recentText) {
@@ -1052,6 +1450,1215 @@ async function runAnalysis() {
   }
 }
 
+// -------------------- summary (auto + world info) --------------------
+
+function isCountableMessage(m) {
+  if (!m) return false;
+  if (m.is_system === true) return false;
+  if (m.is_hidden === true) return false;
+  const txt = String(m.mes ?? '').trim();
+  return Boolean(txt);
+}
+
+function isCountableAssistantMessage(m) {
+  return isCountableMessage(m) && m.is_user !== true;
+}
+
+function computeFloorCount(chat, mode) {
+  const arr = Array.isArray(chat) ? chat : [];
+  let c = 0;
+  for (const m of arr) {
+    if (mode === 'assistant') {
+      if (isCountableAssistantMessage(m)) c++;
+    } else {
+      if (isCountableMessage(m)) c++;
+    }
+  }
+  return c;
+}
+
+function findStartIndexForLastNFloors(chat, mode, n) {
+  const arr = Array.isArray(chat) ? chat : [];
+  let remaining = Math.max(1, Number(n) || 1);
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const m = arr[i];
+    const hit = (mode === 'assistant') ? isCountableAssistantMessage(m) : isCountableMessage(m);
+    if (!hit) continue;
+    remaining -= 1;
+    if (remaining <= 0) return i;
+  }
+  return 0;
+}
+
+function buildSummaryChunkText(chat, startIdx, maxCharsPerMessage, maxTotalChars) {
+  const arr = Array.isArray(chat) ? chat : [];
+  const start = Math.max(0, Math.min(arr.length, Number(startIdx) || 0));
+  const perMsg = clampInt(maxCharsPerMessage, 200, 8000, 4000);
+  const totalMax = clampInt(maxTotalChars, 2000, 80000, 24000);
+
+  const parts = [];
+  let total = 0;
+  for (let i = start; i < arr.length; i++) {
+    const m = arr[i];
+    if (!isCountableMessage(m)) continue;
+    const who = m.is_user === true ? '用户' : (m.name || 'AI');
+    let txt = stripHtml(m.mes || '');
+    if (!txt) continue;
+    if (txt.length > perMsg) txt = txt.slice(0, perMsg) + '…';
+    const block = `【${who}】${txt}`;
+    if (total + block.length + 2 > totalMax) break;
+    parts.push(block);
+    total += block.length + 2;
+  }
+  return parts.join('\n');
+}
+
+// 手动楼层范围总结：按 floor 号定位到聊天索引
+function findChatIndexByFloor(chat, mode, floorNo) {
+  const arr = Array.isArray(chat) ? chat : [];
+  const target = Math.max(1, Number(floorNo) || 1);
+  let c = 0;
+  for (let i = 0; i < arr.length; i++) {
+    const m = arr[i];
+    const hit = (mode === 'assistant') ? isCountableAssistantMessage(m) : isCountableMessage(m);
+    if (!hit) continue;
+    c += 1;
+    if (c === target) return i;
+  }
+  return -1;
+}
+
+function resolveChatRangeByFloors(chat, mode, fromFloor, toFloor) {
+  const floorNow = computeFloorCount(chat, mode);
+  if (floorNow <= 0) return null;
+  let a = clampInt(fromFloor, 1, floorNow, 1);
+  let b = clampInt(toFloor, 1, floorNow, floorNow);
+  if (b < a) { const t = a; a = b; b = t; }
+
+  let startIdx = findChatIndexByFloor(chat, mode, a);
+  let endIdx = findChatIndexByFloor(chat, mode, b);
+  if (startIdx < 0 || endIdx < 0) return null;
+
+  // 在 assistant 模式下，为了更贴近“回合”，把起始 assistant 楼层前一条用户消息也纳入（若存在）。
+  if (mode === 'assistant' && startIdx > 0) {
+    const prev = chat[startIdx - 1];
+    if (prev && prev.is_user === true && isCountableMessage(prev)) startIdx -= 1;
+  }
+
+  if (startIdx > endIdx) { const t = startIdx; startIdx = endIdx; endIdx = t; }
+  return { fromFloor: a, toFloor: b, startIdx, endIdx, floorNow };
+}
+
+function buildSummaryChunkTextRange(chat, startIdx, endIdx, maxCharsPerMessage, maxTotalChars) {
+  const arr = Array.isArray(chat) ? chat : [];
+  const start = Math.max(0, Math.min(arr.length - 1, Number(startIdx) || 0));
+  const end = Math.max(start, Math.min(arr.length - 1, Number(endIdx) || 0));
+  const perMsg = clampInt(maxCharsPerMessage, 200, 8000, 4000);
+  const totalMax = clampInt(maxTotalChars, 2000, 80000, 24000);
+
+  const parts = [];
+  let total = 0;
+  for (let i = start; i <= end; i++) {
+    const m = arr[i];
+    if (!isCountableMessage(m)) continue;
+    const who = m.is_user === true ? '用户' : (m.name || 'AI');
+    let txt = stripHtml(m.mes || '');
+    if (!txt) continue;
+    if (txt.length > perMsg) txt = txt.slice(0, perMsg) + '…';
+    const block = `【${who}】${txt}`;
+    if (total + block.length + 2 > totalMax) break;
+    parts.push(block);
+    total += block.length + 2;
+  }
+  return parts.join('\n');
+}
+
+function getSummarySchema() {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      title: { type: 'string' },
+      summary: { type: 'string' },
+      keywords: { type: 'array', items: { type: 'string' } },
+    },
+    required: ['summary', 'keywords'],
+  };
+}
+
+function buildSummaryPromptMessages(chunkText, fromFloor, toFloor) {
+  const s = ensureSettings();
+
+  // system prompt
+  let sys = String(s.summarySystemPrompt || '').trim();
+  if (!sys) sys = DEFAULT_SUMMARY_SYSTEM_PROMPT;
+  // 强制追加 JSON 结构要求，避免用户自定义提示词导致解析失败
+  sys = sys + '\n\n' + SUMMARY_JSON_REQUIREMENT;
+
+  // user template (supports placeholders)
+  let tpl = String(s.summaryUserTemplate || '').trim();
+  if (!tpl) tpl = DEFAULT_SUMMARY_USER_TEMPLATE;
+  let user = renderTemplate(tpl, {
+    fromFloor: String(fromFloor),
+    toFloor: String(toFloor),
+    chunk: String(chunkText || ''),
+  });
+  // 如果用户模板里没有包含 chunk，占位补回去，防止误配导致无内容
+  if (!/{{\s*chunk\s*}}/i.test(tpl) && !String(user).includes(String(chunkText || '').slice(0, 12))) {
+    user = String(user || '').trim() + `\n\n【对话片段】\n${chunkText}`;
+  }
+  return [
+    { role: 'system', content: sys },
+    { role: 'user', content: user },
+  ];
+}
+
+function sanitizeKeywords(kws) {
+  const out = [];
+  const seen = new Set();
+  for (const k of (Array.isArray(kws) ? kws : [])) {
+    let t = String(k ?? '').trim();
+    if (!t) continue;
+    t = t.replace(/[\r\n\t]/g, ' ').replace(/\s+/g, ' ').trim();
+    // split by common delimiters
+    const split = t.split(/[,，、;；/|]+/g).map(x => x.trim()).filter(Boolean);
+    for (const s of split) {
+      if (s.length < 2) continue;
+      if (s.length > 24) continue;
+      if (seen.has(s)) continue;
+      seen.add(s);
+      out.push(s);
+      if (out.length >= 16) return out;
+    }
+  }
+  return out;
+}
+
+function appendToBlueIndexCache(rec) {
+  const s = ensureSettings();
+  const item = {
+    title: String(rec?.title || '').trim(),
+    summary: String(rec?.summary || '').trim(),
+    keywords: sanitizeKeywords(rec?.keywords),
+    createdAt: Number(rec?.createdAt) || Date.now(),
+    range: rec?.range ?? undefined,
+  };
+  if (!item.summary) return;
+  if (!item.title) item.title = item.keywords?.[0] ? `条目：${item.keywords[0]}` : '条目';
+  const arr = Array.isArray(s.summaryBlueIndex) ? s.summaryBlueIndex : [];
+  // de-dup (only check recent items)
+  for (let i = arr.length - 1; i >= 0 && i >= arr.length - 10; i--) {
+    const prev = arr[i];
+    if (!prev) continue;
+    if (String(prev.title || '') === item.title && String(prev.summary || '') === item.summary) {
+      return;
+    }
+  }
+  arr.push(item);
+  // keep bounded
+  if (arr.length > 600) arr.splice(0, arr.length - 600);
+  s.summaryBlueIndex = arr;
+  saveSettings();
+  updateBlueIndexInfoLabel();
+}
+
+let cachedSlashExecutor = null;
+
+async function getSlashExecutor() {
+  if (cachedSlashExecutor) return cachedSlashExecutor;
+
+  const ctx = SillyTavern.getContext?.();
+  // SillyTavern has renamed / refactored slash command executors multiple times.
+  // We support a broad set of known entry points (newest first), and then best-effort
+  // call them with compatible signatures.
+  const candidates = [
+    // Newer ST versions expose this via getContext()
+    ctx?.executeSlashCommandsWithOptions,
+    ctx?.executeSlashCommands,
+    ctx?.processChatSlashCommands,
+    ctx?.executeSlashCommandsOnChatInput,
+
+    // Some builds expose the parser/executor objects
+    ctx?.SlashCommandParser?.executeSlashCommandsWithOptions,
+    ctx?.SlashCommandParser?.execute,
+    globalThis.SlashCommandParser?.executeSlashCommandsWithOptions,
+    globalThis.SlashCommandParser?.execute,
+
+    // Global fallbacks
+    globalThis.executeSlashCommandsWithOptions,
+    globalThis.executeSlashCommands,
+    globalThis.processChatSlashCommands,
+    globalThis.executeSlashCommandsOnChatInput,
+  ].filter(fn => typeof fn === 'function');
+
+  if (candidates.length) {
+    cachedSlashExecutor = async (cmd) => {
+      // best-effort signature compatibility
+      for (const fn of candidates) {
+        // common signatures:
+        // - fn(text)
+        // - fn(text, boolean)
+        // - fn(text, { quiet, silent, execute, ... })
+        // - fn({ input: text, ... })
+        try { return await fn(cmd); } catch { /* try next */ }
+        try { return await fn(cmd, true); } catch { /* try next */ }
+        try { return await fn(cmd, { quiet: true, silent: true }); } catch { /* try next */ }
+        try { return await fn(cmd, { shouldDisplayMessage: false, quiet: true, silent: true }); } catch { /* try next */ }
+        try { return await fn({ input: cmd, quiet: true, silent: true }); } catch { /* try next */ }
+        try { return await fn({ command: cmd, quiet: true, silent: true }); } catch { /* try next */ }
+      }
+      throw new Error('Slash command executor found but failed to run.');
+    };
+    return cachedSlashExecutor;
+  }
+
+  try {
+    const mod = await import(/* webpackIgnore: true */ '/script.js');
+    const modFns = [
+      mod?.executeSlashCommandsWithOptions,
+      mod?.executeSlashCommands,
+      mod?.processChatSlashCommands,
+      mod?.executeSlashCommandsOnChatInput,
+    ].filter(fn => typeof fn === 'function');
+    if (modFns.length) {
+      cachedSlashExecutor = async (cmd) => {
+        for (const fn of modFns) {
+          try { return await fn(cmd); } catch { /* try next */ }
+          try { return await fn(cmd, true); } catch { /* try next */ }
+          try { return await fn(cmd, { quiet: true, silent: true }); } catch { /* try next */ }
+        }
+        throw new Error('Slash command executor from /script.js failed to run.');
+      };
+      return cachedSlashExecutor;
+    }
+  } catch {
+    // ignore
+  }
+
+  cachedSlashExecutor = null;
+  throw new Error('未找到可用的 STscript/SlashCommand 执行函数（无法自动写入世界书）。');
+}
+
+async function execSlash(cmd) {
+  const exec = await getSlashExecutor();
+  return await exec(String(cmd || '').trim());
+}
+
+function safeStringifyShort(v, maxLen = 260) {
+  try {
+    const s = (typeof v === 'string') ? v : JSON.stringify(v);
+    if (!s) return '';
+    return s.length > maxLen ? (s.slice(0, maxLen) + '...') : s;
+  } catch {
+    try {
+      const s = String(v);
+      if (!s) return '';
+      return s.length > maxLen ? (s.slice(0, maxLen) + '...') : s;
+    } catch {
+      return '';
+    }
+  }
+}
+
+/**
+ * 兼容不同版本 SlashCommand 执行器的返回值形态：
+ * - string
+ * - number/boolean
+ * - array
+ * - object（常见字段：text/output/message/result/value/data/html...）
+ */
+function slashOutputToText(out, seen = new Set()) {
+  if (out == null) return '';
+  const t = typeof out;
+  if (t === 'string') return out;
+  if (t === 'number' || t === 'boolean') return String(out);
+
+  if (Array.isArray(out)) {
+    return out.map(x => slashOutputToText(x, seen)).filter(Boolean).join('\n');
+  }
+
+  if (t === 'object') {
+    if (seen.has(out)) return '';
+    seen.add(out);
+
+    // common fields in different ST builds
+    const common = ['text', 'output', 'message', 'content', 'result', 'value', 'data', 'html', 'return', 'payload', 'response'];
+    for (const k of common) {
+      if (Object.hasOwn(out, k)) {
+        const s = slashOutputToText(out[k], seen);
+        if (s) return s;
+      }
+    }
+
+    // any non-empty string field
+    for (const v of Object.values(out)) {
+      if (typeof v === 'string' && v.trim()) return v;
+    }
+
+    return '';
+  }
+
+  try { return String(out); } catch { return ''; }
+}
+
+/**
+ * 从 SlashCommand 输出中提取世界书条目 UID
+ * - 支持 text / object / array 多种形态
+ * - 支持 uid=123、UID:123、以及返回对象里直接包含 uid 字段
+ */
+function extractUid(out, seen = new Set()) {
+  if (out == null) return null;
+
+  const t = typeof out;
+
+  if (t === 'number') {
+    const n = Math.trunc(out);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
+  if (t === 'string') {
+    const s = out;
+    const m1 = s.match(/\buid\s*[:=]\s*(\d{1,12})\b/i);
+    if (m1) return Number.parseInt(m1[1], 10);
+    const m2 = s.match(/\b(\d{1,12})\b/);
+    if (m2) return Number.parseInt(m2[1], 10);
+    return null;
+  }
+
+  if (Array.isArray(out)) {
+    for (const it of out) {
+      const r = extractUid(it, seen);
+      if (r) return r;
+    }
+    return null;
+  }
+
+  if (t === 'object') {
+    if (seen.has(out)) return null;
+    seen.add(out);
+
+    // direct uid/id fields
+    const directKeys = ['uid', 'id', 'entryId', 'entry_id', 'worldInfoUid', 'worldinfoUid'];
+    for (const k of directKeys) {
+      if (Object.hasOwn(out, k)) {
+        const n = Number(out[k]);
+        if (Number.isFinite(n) && n > 0) return Math.trunc(n);
+      }
+    }
+
+    // nested containers
+    const nestedKeys = ['result', 'data', 'value', 'output', 'return', 'payload', 'response', 'entry'];
+    for (const k of nestedKeys) {
+      if (Object.hasOwn(out, k)) {
+        const r = extractUid(out[k], seen);
+        if (r) return r;
+      }
+    }
+
+    // scan all values (shallow + recursion)
+    for (const v of Object.values(out)) {
+      const r = extractUid(v, seen);
+      if (r) return r;
+    }
+
+    // fallback: parse from textified output
+    const s = slashOutputToText(out, seen);
+    if (s) return extractUid(s, seen);
+
+    return null;
+  }
+
+  // fallback
+  return extractUid(String(out), seen);
+}
+
+function quoteSlashValue(v) {
+  const s = String(v ?? '').replace(/"/g, '\\"');
+  return `"${s}"`;
+}
+
+async function writeSummaryToWorldInfoEntry(rec, meta, {
+  target = 'file',
+  file = '',
+  commentPrefix = '剧情总结',
+  constant = 0,
+} = {}) {
+  const kws = sanitizeKeywords(rec.keywords);
+  const range = rec?.range ? `${rec.range.fromFloor}-${rec.range.toFloor}` : '';
+  const prefix = String(commentPrefix || '剧情总结').trim() || '剧情总结';
+  const rawTitle = String(rec.title || '').trim();
+
+  const s = ensureSettings();
+  const keyMode = String(s.summaryWorldInfoKeyMode || 'keywords');
+  const indexId = String(rec?.indexId || '').trim();
+  const indexInComment = (keyMode === 'indexId') && !!s.summaryIndexInComment && !!indexId;
+  // comment 字段通常就是世界书列表里的"标题"。这里保证 prefix 始终在最前，避免"前缀设置无效"。
+  let commentTitle = rawTitle;
+  if (prefix) {
+    if (!commentTitle) commentTitle = prefix;
+    else if (!commentTitle.startsWith(prefix)) commentTitle = `${prefix}｜${commentTitle}`;
+  }
+  // 若启用“索引编号触发”：把 A-001 写进 comment，便于在世界书列表里一眼定位。
+  if (indexInComment) {
+    if (!commentTitle.includes(indexId)) {
+      if (commentTitle === prefix) commentTitle = `${prefix}｜${indexId}`;
+      else if (commentTitle.startsWith(`${prefix}｜`)) commentTitle = commentTitle.replace(`${prefix}｜`, `${prefix}｜${indexId}｜`);
+      else commentTitle = `${prefix}｜${indexId}｜${commentTitle}`;
+      commentTitle = commentTitle.replace(/｜｜+/g, '｜');
+    }
+  }
+  if (!commentTitle) commentTitle = '剧情总结';
+  const comment = `${commentTitle}${range ? `（${range}）` : ''}`;
+
+  // normalize content and make it safe for slash parser (avoid accidental pipe split)
+  const content = String(rec.summary || '')
+    .replace(/\s*\n+\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\|/g, '｜');
+
+  const t = String(target || 'file');
+  const f = String(file || '').trim();
+  if (t === 'file' && !f) throw new Error('WorldInfo 目标为 file 时必须填写世界书文件名。');
+
+  // We purposely avoid parsing UID in JS, because some ST builds return only a status object
+  // (e.g. {pipe:"0", ...}) even when the command pipes the UID internally.
+  // Instead, we build a single STscript pipeline that:
+  // 1) resolves chatbook file name (if needed)
+  // 2) creates the entry (UID goes into pipe)
+  // 3) stores UID into a local var
+  // 4) sets fields using the stored UID
+  // This works regardless of whether JS can read the piped output.
+  const uidVar = '__sg_summary_uid';
+  const fileVar = '__sg_summary_wbfile';
+
+  const keyValue = (kws.length ? kws.join(',') : prefix);
+  const constantVal = (Number(constant) === 1) ? 1 : 0;
+
+  const fileExpr = (t === 'chatbook') ? `{{getvar::${fileVar}}}` : f;
+
+  const parts = [];
+  if (t === 'chatbook') {
+    parts.push('/getchatbook');
+    parts.push(`/setvar key=${fileVar}`);
+  }
+
+  // create entry + capture uid
+  parts.push(`/createentry file=${quoteSlashValue(fileExpr)} key=${quoteSlashValue(keyValue)} ${quoteSlashValue(content)}`);
+  parts.push(`/setvar key=${uidVar}`);
+
+  // update fields
+  parts.push(`/setentryfield file=${quoteSlashValue(fileExpr)} uid={{getvar::${uidVar}}} field=content ${quoteSlashValue(content)}`);
+  parts.push(`/setentryfield file=${quoteSlashValue(fileExpr)} uid={{getvar::${uidVar}}} field=key ${quoteSlashValue(keyValue)}`);
+  parts.push(`/setentryfield file=${quoteSlashValue(fileExpr)} uid={{getvar::${uidVar}}} field=comment ${quoteSlashValue(comment)}`);
+  parts.push(`/setentryfield file=${quoteSlashValue(fileExpr)} uid={{getvar::${uidVar}}} field=disable 0`);
+  parts.push(`/setentryfield file=${quoteSlashValue(fileExpr)} uid={{getvar::${uidVar}}} field=constant ${constantVal}`);
+
+  // cleanup temp vars
+  parts.push(`/flushvar ${uidVar}`);
+  if (t === 'chatbook') parts.push(`/flushvar ${fileVar}`);
+
+  const script = parts.join(' | ');
+  const out = await execSlash(script);
+  if (out && typeof out === 'object' && (out.isError || out.isAborted || out.isQuietlyAborted)) {
+    throw new Error(`写入世界书失败（返回：${safeStringifyShort(out)}）`);
+  }
+
+  // store link (UID is intentionally omitted because it may be inaccessible from JS in some ST builds)
+  const keyName = (constantVal === 1) ? 'worldInfoBlue' : 'worldInfoGreen';
+  rec[keyName] = { file: (t === 'file') ? f : 'chatbook', uid: null };
+  if (meta && Array.isArray(meta.history) && meta.history.length) {
+    meta.history[meta.history.length - 1] = rec;
+    await setSummaryMeta(meta);
+  }
+
+  return { file: (t === 'file') ? f : 'chatbook', uid: null };
+}
+
+async function runSummary({ reason = 'manual', manualFromFloor = null, manualToFloor = null, manualSplit = null } = {}) {
+  const s = ensureSettings();
+  const ctx = SillyTavern.getContext();
+
+  if (reason === 'auto' && !s.enabled) return;
+
+  if (isSummarizing) return;
+  isSummarizing = true;
+  setStatus('总结中…', 'warn');
+
+  try {
+    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+    const mode = String(s.summaryCountMode || 'assistant');
+    const floorNow = computeFloorCount(chat, mode);
+
+    let meta = getSummaryMeta();
+    if (!meta || typeof meta !== 'object') meta = getDefaultSummaryMeta();
+    // choose range(s)
+    const every = clampInt(s.summaryEvery, 1, 200, 20);
+    const segments = [];
+
+    if (reason === 'manual_range') {
+      const resolved0 = resolveChatRangeByFloors(chat, mode, manualFromFloor, manualToFloor);
+      if (!resolved0) {
+        setStatus('手动楼层范围无效（请检查起止层号）', 'warn');
+        return;
+      }
+
+      const splitEnabled = (manualSplit === null || manualSplit === undefined)
+        ? !!s.summaryManualSplit
+        : !!manualSplit;
+
+      if (splitEnabled && every > 0) {
+        const a0 = resolved0.fromFloor;
+        const b0 = resolved0.toFloor;
+        for (let f = a0; f <= b0; f += every) {
+          const g = Math.min(b0, f + every - 1);
+          const r = resolveChatRangeByFloors(chat, mode, f, g);
+          if (r) segments.push(r);
+        }
+        if (!segments.length) segments.push(resolved0);
+      } else {
+        segments.push(resolved0);
+      }
+    } else if (reason === 'auto' && meta.lastChatLen > 0 && meta.lastChatLen < chat.length) {
+      const startIdx = meta.lastChatLen;
+      const fromFloor = Math.max(1, Number(meta.lastFloor || 0) + 1);
+      const toFloor = floorNow;
+      const endIdx = Math.max(0, chat.length - 1);
+      segments.push({ startIdx, endIdx, fromFloor, toFloor, floorNow });
+    } else {
+      const startIdx = findStartIndexForLastNFloors(chat, mode, every);
+      const fromFloor = Math.max(1, floorNow - every + 1);
+      const toFloor = floorNow;
+      const endIdx = Math.max(0, chat.length - 1);
+      segments.push({ startIdx, endIdx, fromFloor, toFloor, floorNow });
+    }
+
+    const totalSeg = segments.length;
+    if (!totalSeg) {
+      setStatus('没有可总结的内容（范围为空）', 'warn');
+      return;
+    }
+
+    const affectsProgress = (reason !== 'manual_range');
+    const keyMode = String(s.summaryWorldInfoKeyMode || 'keywords');
+
+    let created = 0;
+    let wroteGreenOk = 0;
+    let wroteBlueOk = 0;
+    const writeErrs = [];
+    const runErrs = [];
+
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const startIdx = seg.startIdx;
+      const endIdx = seg.endIdx;
+      const fromFloor = seg.fromFloor;
+      const toFloor = seg.toFloor;
+
+      if (totalSeg > 1) setStatus(`手动分段总结中…（${i + 1}/${totalSeg}｜${fromFloor}-${toFloor}）`, 'warn');
+      else setStatus('总结中…', 'warn');
+
+      const chunkText = buildSummaryChunkTextRange(chat, startIdx, endIdx, s.summaryMaxCharsPerMessage, s.summaryMaxTotalChars);
+      if (!chunkText) {
+        runErrs.push(`${fromFloor}-${toFloor}：片段为空`);
+        continue;
+      }
+
+      const messages = buildSummaryPromptMessages(chunkText, fromFloor, toFloor);
+      const schema = getSummarySchema();
+
+      let jsonText = '';
+      if (String(s.summaryProvider || 'st') === 'custom') {
+        jsonText = await callViaCustom(s.summaryCustomEndpoint, s.summaryCustomApiKey, s.summaryCustomModel, messages, s.summaryTemperature, s.summaryCustomMaxTokens, 0.95, s.summaryCustomStream);
+        const parsedTry = safeJsonParse(jsonText);
+        if (!parsedTry || !parsedTry.summary) {
+          try { jsonText = await fallbackAskJsonCustom(s.summaryCustomEndpoint, s.summaryCustomApiKey, s.summaryCustomModel, messages, s.summaryTemperature, s.summaryCustomMaxTokens, 0.95, s.summaryCustomStream); }
+          catch { /* ignore */ }
+        }
+      } else {
+        jsonText = await callViaSillyTavern(messages, schema, s.summaryTemperature);
+        if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
+        const parsedTry = safeJsonParse(jsonText);
+        if (!parsedTry || !parsedTry.summary) jsonText = await fallbackAskJson(messages, s.summaryTemperature);
+      }
+
+      const parsed = safeJsonParse(jsonText);
+      if (!parsed || !parsed.summary) {
+        runErrs.push(`${fromFloor}-${toFloor}：总结输出无法解析为 JSON`);
+        continue;
+      }
+
+      const prefix = String(s.summaryWorldInfoCommentPrefix || '剧情总结').trim() || '剧情总结';
+      const rawTitle = String(parsed.title || '').trim();
+      const summary = String(parsed.summary || '').trim();
+      const modelKeywords = sanitizeKeywords(parsed.keywords);
+      let indexId = '';
+      let keywords = modelKeywords;
+
+      if (keyMode === 'indexId') {
+        // init nextIndex
+        if (!Number.isFinite(Number(meta.nextIndex))) {
+          let maxN = 0;
+          const pref = String(s.summaryIndexPrefix || 'A-');
+          const re = new RegExp('^' + escapeRegExp(pref) + '(\\d+)$');
+          for (const h of (Array.isArray(meta.history) ? meta.history : [])) {
+            const id0 = String(h?.indexId || '').trim();
+            const m = id0.match(re);
+            if (m) maxN = Math.max(maxN, Number.parseInt(m[1], 10) || 0);
+          }
+          meta.nextIndex = Math.max(clampInt(s.summaryIndexStart, 1, 1000000, 1), maxN + 1);
+        }
+
+        const pref = String(s.summaryIndexPrefix || 'A-');
+        const pad = clampInt(s.summaryIndexPad, 1, 12, 3);
+        const n = clampInt(meta.nextIndex, 1, 100000000, 1);
+        indexId = `${pref}${String(n).padStart(pad, '0')}`;
+        keywords = [indexId];
+      }
+
+      const title = rawTitle || `${prefix}`;
+
+      const rec = {
+        title,
+        summary,
+        keywords,
+        indexId: indexId || undefined,
+        modelKeywords: (keyMode === 'indexId') ? modelKeywords : undefined,
+        createdAt: Date.now(),
+        range: { fromFloor, toFloor, fromIdx: startIdx, toIdx: endIdx },
+      };
+
+      if (keyMode === 'indexId') {
+        meta.nextIndex = clampInt(Number(meta.nextIndex) + 1, 1, 1000000000, Number(meta.nextIndex) + 1);
+      }
+
+      meta.history = Array.isArray(meta.history) ? meta.history : [];
+      meta.history.push(rec);
+      if (meta.history.length > 120) meta.history = meta.history.slice(-120);
+      if (affectsProgress) {
+        meta.lastFloor = toFloor;
+        meta.lastChatLen = chat.length;
+      }
+      await setSummaryMeta(meta);
+      created += 1;
+
+      // 同步进蓝灯索引缓存（用于本地匹配/预筛选）
+      try { appendToBlueIndexCache(rec); } catch { /* ignore */ }
+
+      // world info write
+      if (s.summaryToWorldInfo || s.summaryToBlueWorldInfo) {
+        if (s.summaryToWorldInfo) {
+          try {
+            await writeSummaryToWorldInfoEntry(rec, meta, {
+              target: String(s.summaryWorldInfoTarget || 'chatbook'),
+              file: String(s.summaryWorldInfoFile || ''),
+              commentPrefix: String(s.summaryWorldInfoCommentPrefix || '剧情总结'),
+              constant: 0,
+            });
+            wroteGreenOk += 1;
+          } catch (e) {
+            console.warn('[StoryGuide] write green world info failed:', e);
+            writeErrs.push(`${fromFloor}-${toFloor} 绿灯：${e?.message ?? e}`);
+          }
+        }
+
+        if (s.summaryToBlueWorldInfo) {
+          try {
+            await writeSummaryToWorldInfoEntry(rec, meta, {
+              target: 'file',
+              file: String(s.summaryBlueWorldInfoFile || ''),
+              commentPrefix: String(s.summaryBlueWorldInfoCommentPrefix || s.summaryWorldInfoCommentPrefix || '剧情总结'),
+              constant: 1,
+            });
+            wroteBlueOk += 1;
+          } catch (e) {
+            console.warn('[StoryGuide] write blue world info failed:', e);
+            writeErrs.push(`${fromFloor}-${toFloor} 蓝灯：${e?.message ?? e}`);
+          }
+        }
+      }
+    }
+
+    updateSummaryInfoLabel();
+    renderSummaryPaneFromMeta();
+
+    // 若启用实时读取索引：在手动分段写入蓝灯后，尽快刷新一次缓存
+    if (s.summaryToBlueWorldInfo && String(ensureSettings().wiBlueIndexMode || 'live') === 'live') {
+      ensureBlueIndexLive(true).catch(() => void 0);
+    }
+
+    if (created <= 0) {
+      setStatus(`总结未生成（${runErrs.length ? runErrs[0] : '未知原因'}）`, 'warn');
+      return;
+    }
+
+    // final status
+    if (totalSeg > 1) {
+      const parts = [`生成 ${created} 条`];
+      if (s.summaryToWorldInfo || s.summaryToBlueWorldInfo) {
+        const wrote = [];
+        if (s.summaryToWorldInfo) wrote.push(`绿灯 ${wroteGreenOk}/${created}`);
+        if (s.summaryToBlueWorldInfo) wrote.push(`蓝灯 ${wroteBlueOk}/${created}`);
+        if (wrote.length) parts.push(`写入：${wrote.join('｜')}`);
+      }
+      const errCount = writeErrs.length + runErrs.length;
+      if (errCount) {
+        const sample = (writeErrs.concat(runErrs)).slice(0, 2).join('；');
+        setStatus(`手动分段总结完成 ✅（${parts.join('｜')}｜失败：${errCount}｜${sample}${errCount > 2 ? '…' : ''}）`, 'warn');
+      } else {
+        setStatus(`手动分段总结完成 ✅（${parts.join('｜')}）`, 'ok');
+      }
+    } else {
+      // single
+      if (s.summaryToWorldInfo || s.summaryToBlueWorldInfo) {
+        const ok = [];
+        const err = [];
+        if (s.summaryToWorldInfo) {
+          if (wroteGreenOk >= 1) ok.push('绿灯世界书');
+          else if (writeErrs.find(x => x.includes('绿灯'))) err.push(writeErrs.find(x => x.includes('绿灯')));
+        }
+        if (s.summaryToBlueWorldInfo) {
+          if (wroteBlueOk >= 1) ok.push('蓝灯世界书');
+          else if (writeErrs.find(x => x.includes('蓝灯'))) err.push(writeErrs.find(x => x.includes('蓝灯')));
+        }
+        if (!err.length) setStatus(`总结完成 ✅（已写入：${ok.join(' + ') || '（无）'}）`, 'ok');
+        else setStatus(`总结完成 ✅（写入失败：${err.join('；')}）`, 'warn');
+      } else {
+        setStatus('总结完成 ✅', 'ok');
+      }
+    }
+  } finally {
+    isSummarizing = false;
+    updateButtonsEnabled();
+  }
+}
+
+function scheduleAutoSummary(reason = '') {
+  const s = ensureSettings();
+  if (!s.enabled) return;
+  if (!s.summaryEnabled) return;
+  const delay = clampInt(s.debounceMs, 300, 10000, DEFAULT_SETTINGS.debounceMs);
+  if (summaryTimer) clearTimeout(summaryTimer);
+  summaryTimer = setTimeout(() => {
+    summaryTimer = null;
+    maybeAutoSummary(reason).catch(() => void 0);
+  }, delay);
+}
+
+async function maybeAutoSummary(reason = '') {
+  const s = ensureSettings();
+  if (!s.enabled) return;
+  if (!s.summaryEnabled) return;
+  if (isSummarizing) return;
+
+  const ctx = SillyTavern.getContext();
+  const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+  const mode = String(s.summaryCountMode || 'assistant');
+  const every = clampInt(s.summaryEvery, 1, 200, 20);
+  const floorNow = computeFloorCount(chat, mode);
+  if (floorNow <= 0) return;
+  if (floorNow % every !== 0) return;
+
+  const meta = getSummaryMeta();
+  const last = Number(meta?.lastFloor || 0);
+  if (floorNow <= last) return;
+
+  await runSummary({ reason: 'auto' });
+}
+
+// -------------------- 蓝灯索引 → 绿灯触发（发送消息时注入触发词） --------------------
+
+function escapeRegExp(str) {
+  return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function stripTriggerInjection(text, tag = 'SG_WI_TRIGGERS') {
+  const t = String(text || '');
+  const et = escapeRegExp(tag);
+  // remove all existing injections of this tag (safe)
+  const reComment = new RegExp(`\\n?\\s*<!--\\s*${et}\\b[\\s\\S]*?-->`, 'g');
+  const rePlain = new RegExp(`\\n?\\s*\\[${et}\\][^\\n]*\\n?`, 'g');
+  return t.replace(reComment, '').replace(rePlain, '').trimEnd();
+}
+
+function buildTriggerInjection(keywords, tag = 'SG_WI_TRIGGERS', style = 'hidden') {
+  const kws = sanitizeKeywords(Array.isArray(keywords) ? keywords : []);
+  if (!kws.length) return '';
+  if (String(style || 'hidden') === 'plain') {
+    // Visible but most reliable for world-info scan.
+    return `\n\n[${tag}] ${kws.join(' ')}\n`;
+  }
+  // Hidden comment: put each keyword on its own line, so substring match is very likely to hit.
+  const body = kws.join('\n');
+  return `\n\n<!--${tag}\n${body}\n-->`;
+}
+
+function tokenizeForSimilarity(text) {
+  const s = String(text || '').toLowerCase();
+  const tokens = new Map();
+
+  function add(tok, w = 1) {
+    if (!tok) return;
+    const k = String(tok).trim();
+    if (!k) return;
+    tokens.set(k, (tokens.get(k) || 0) + w);
+  }
+
+  // latin words
+  const latin = s.match(/[a-z0-9_]{2,}/g) || [];
+  for (const w of latin) add(w, 1);
+
+  // CJK sequences -> bigrams (better than single-char)
+  const cjkSeqs = s.match(/[\u4e00-\u9fff]{2,}/g) || [];
+  for (const seq of cjkSeqs) {
+    // include short full seq for exact hits
+    if (seq.length <= 6) add(seq, 2);
+    for (let i = 0; i < seq.length - 1; i++) {
+      add(seq.slice(i, i + 2), 1);
+    }
+  }
+
+  return tokens;
+}
+
+function cosineSimilarity(mapA, mapB) {
+  if (!mapA?.size || !mapB?.size) return 0;
+  // iterate smaller
+  const small = mapA.size <= mapB.size ? mapA : mapB;
+  const large = mapA.size <= mapB.size ? mapB : mapA;
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (const v of mapA.values()) normA += v * v;
+  for (const v of mapB.values()) normB += v * v;
+  if (!normA || !normB) return 0;
+  for (const [k, va] of small.entries()) {
+    const vb = large.get(k);
+    if (vb) dot += va * vb;
+  }
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+function buildRecentChatText(chat, lookback, excludeLast = true, stripTag = '') {
+  const msgs = [];
+  const arr = Array.isArray(chat) ? chat : [];
+  let i = arr.length - 1;
+  if (excludeLast) i -= 1;
+  for (; i >= 0 && msgs.length < lookback; i--) {
+    const m = arr[i];
+    if (!m) continue;
+    if (m.is_system === true) continue;
+    let t = stripHtml(m.mes ?? m.message ?? '');
+    if (stripTag) t = stripTriggerInjection(t, stripTag);
+    if (t) msgs.push(t);
+  }
+  return msgs.reverse().join('\n');
+}
+
+function getBlueIndexEntriesFast() {
+  const s = ensureSettings();
+  const mode = String(s.wiBlueIndexMode || 'live');
+  if (mode !== 'live') return (Array.isArray(s.summaryBlueIndex) ? s.summaryBlueIndex : []);
+
+  const file = pickBlueIndexFileName();
+  if (!file) return (Array.isArray(s.summaryBlueIndex) ? s.summaryBlueIndex : []);
+
+  const minSec = clampInt(s.wiBlueIndexMinRefreshSec, 5, 600, 20);
+  const now = Date.now();
+  const ageMs = now - Number(blueIndexLiveCache.loadedAt || 0);
+  const need = (blueIndexLiveCache.file !== file) || ageMs > (minSec * 1000);
+
+  // 注意：为了尽量不阻塞 MESSAGE_SENT（确保触发词注入在生成前完成），这里不 await。
+  // 如果需要刷新，就后台拉取一次，下次消息即可使用最新索引。
+  if (need) {
+    ensureBlueIndexLive(false).catch(() => void 0);
+  }
+
+  const live = Array.isArray(blueIndexLiveCache.entries) ? blueIndexLiveCache.entries : [];
+  if (live.length) return live;
+  return (Array.isArray(s.summaryBlueIndex) ? s.summaryBlueIndex : []);
+}
+
+function collectBlueIndexCandidates() {
+  const s = ensureSettings();
+  const meta = getSummaryMeta();
+  const out = [];
+  const seen = new Set();
+
+  const fromMeta = Array.isArray(meta?.history) ? meta.history : [];
+  for (const r of fromMeta) {
+    const title = String(r?.title || '').trim();
+    const summary = String(r?.summary || '').trim();
+    const keywords = sanitizeKeywords(r?.keywords);
+    if (!summary) continue;
+    const key = `${title}__${summary.slice(0, 24)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ title: title || (keywords[0] ? `条目：${keywords[0]}` : '条目'), summary, keywords });
+  }
+
+  const fromImported = getBlueIndexEntriesFast();
+  for (const r of fromImported) {
+    const title = String(r?.title || '').trim();
+    const summary = String(r?.summary || '').trim();
+    const keywords = sanitizeKeywords(r?.keywords);
+    if (!summary) continue;
+    const key = `${title}__${summary.slice(0, 24)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ title: title || (keywords[0] ? `条目：${keywords[0]}` : '条目'), summary, keywords });
+  }
+
+  return out;
+}
+
+function pickRelevantIndexEntries(recentText, userText, candidates, maxEntries, minScore, includeUser = true, userWeight = 1.0) {
+  const recentVec = tokenizeForSimilarity(recentText);
+  if (includeUser && userText) {
+    const uvec = tokenizeForSimilarity(userText);
+    const w = Number(userWeight);
+    const mul = Number.isFinite(w) ? Math.max(0, Math.min(10, w)) : 1;
+    for (const [k, v] of uvec.entries()) {
+      recentVec.set(k, (recentVec.get(k) || 0) + v * mul);
+    }
+  }
+  const scored = [];
+  for (const e of candidates) {
+    const txt = `${e.title || ''}\n${e.summary || ''}\n${(Array.isArray(e.keywords) ? e.keywords.join(' ') : '')}`;
+    const vec = tokenizeForSimilarity(txt);
+    const score = cosineSimilarity(recentVec, vec);
+    if (score >= minScore) scored.push({ e, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, maxEntries);
+}
+
+function buildIndexPromptMessages(recentText, userText, candidatesForModel, maxPick) {
+  const s = ensureSettings();
+  const sys = String(s.wiIndexSystemPrompt || DEFAULT_INDEX_SYSTEM_PROMPT).trim() || DEFAULT_INDEX_SYSTEM_PROMPT;
+  const tmpl = String(s.wiIndexUserTemplate || DEFAULT_INDEX_USER_TEMPLATE).trim() || DEFAULT_INDEX_USER_TEMPLATE;
+
+  const candidatesJson = JSON.stringify(candidatesForModel, null, 0);
+
+  const user = tmpl
+    .replaceAll('{{userMessage}}', String(userText || ''))
+    .replaceAll('{{recentText}}', String(recentText || ''))
+    .replaceAll('{{candidates}}', candidatesJson)
+    .replaceAll('{{maxPick}}', String(maxPick));
+
+  const enforced = user + `
+
+` + INDEX_JSON_REQUIREMENT.replaceAll('maxPick', String(maxPick));
+
+  return [
+    { role: 'system', content: sys },
+    { role: 'user', content: enforced },
+  ];
+}
+
+async function pickRelevantIndexEntriesLLM(recentText, userText, candidates, maxEntries, includeUser, userWeight) {
+  const s = ensureSettings();
+
+  const topK = clampInt(s.wiIndexPrefilterTopK, 5, 80, 24);
+  const candMaxChars = clampInt(s.wiIndexCandidateMaxChars, 120, 2000, 420);
+
+  const pre = pickRelevantIndexEntries(
+    recentText,
+    userText,
+    candidates,
+    Math.max(topK, maxEntries),
+    0,
+    includeUser,
+    userWeight
+  );
+
+  const shortlist = (pre.length ? pre : candidates.map(e => ({ e, score: 0 }))).slice(0, topK);
+
+  const candidatesForModel = shortlist.map((x, i) => {
+    const e = x.e || x;
+    const title = String(e.title || '').trim();
+    const summary0 = String(e.summary || '').trim();
+    const summary = summary0.length > candMaxChars ? (summary0.slice(0, candMaxChars) + '…') : summary0;
+    const kws = Array.isArray(e.keywords) ? e.keywords.slice(0, 24) : [];
+    return { id: i, title: title || '条目', summary, keywords: kws };
+  });
+
+  const messages = buildIndexPromptMessages(recentText, userText, candidatesForModel, maxEntries);
+
+  let jsonText = '';
+  if (String(s.wiIndexProvider || 'st') === 'custom') {
+    jsonText = await callViaCustom(
+      s.wiIndexCustomEndpoint,
+      s.wiIndexCustomApiKey,
+      s.wiIndexCustomModel,
+      messages,
+      clampFloat(s.wiIndexTemperature, 0, 2, 0.2),
+      clampInt(s.wiIndexCustomMaxTokens, 128, 200000, 1024),
+      clampFloat(s.wiIndexTopP, 0, 1, 0.95),
+      !!s.wiIndexCustomStream
+    );
+    const parsedTry = safeJsonParse(jsonText);
+    if (!parsedTry || !Array.isArray(parsedTry?.pickedIds)) {
+      try {
+        jsonText = await fallbackAskJsonCustom(
+          s.wiIndexCustomEndpoint,
+          s.wiIndexCustomApiKey,
+          s.wiIndexCustomModel,
+          messages,
+          clampFloat(s.wiIndexTemperature, 0, 2, 0.2),
+          clampInt(s.wiIndexCustomMaxTokens, 128, 200000, 1024),
+          clampFloat(s.wiIndexTopP, 0, 1, 0.95),
+          !!s.wiIndexCustomStream
+        );
+      } catch { /* ignore */ }
+    }
+  } else {
+    const schema = {
+      type: 'object',
+      properties: { pickedIds: { type: 'array', items: { type: 'integer' } } },
+      required: ['pickedIds'],
+    };
+    jsonText = await callViaSillyTavern(messages, schema, clampFloat(s.wiIndexTemperature, 0, 2, 0.2));
+    if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
+    const parsedTry = safeJsonParse(jsonText);
+    if (!parsedTry || !Array.isArray(parsedTry?.pickedIds)) {
+      jsonText = await fallbackAskJson(messages, clampFloat(s.wiIndexTemperature, 0, 2, 0.2));
+    }
+  }
+
+  const parsed = safeJsonParse(jsonText);
+  const pickedIds = Array.isArray(parsed?.pickedIds) ? parsed.pickedIds : [];
+  const uniq = Array.from(new Set(pickedIds.map(x => Number(x)).filter(n => Number.isFinite(n))));
+
+  const picked = [];
+  for (const id of uniq) {
+    const origin = shortlist[id]?.e || null;
+    if (origin) picked.push({ e: origin, score: Number(shortlist[id]?.score || 0) });
+    if (picked.length >= maxEntries) break;
+  }
+  return picked;
+}
+
+
+async function maybeInjectWorldInfoTriggers(reason = 'msg_sent') {
+  const s = ensureSettings();
+  if (!s.wiTriggerEnabled) return;
+
+  const ctx = SillyTavern.getContext();
+  const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+  if (!chat.length) return;
+
+  const last = chat[chat.length - 1];
+  if (!last || last.is_user !== true) return; // only on user send
+  const lastText = String(last.mes ?? last.message ?? '').trim();
+  if (!lastText || lastText.startsWith('/')) return;
+
+  // 仅在达到指定 AI 楼层后才开始索引触发（避免前期噪声/浪费）
+  const startAfter = clampInt(s.wiTriggerStartAfterAssistantMessages, 0, 200000, 0);
+  if (startAfter > 0) {
+    const assistantFloors = computeFloorCount(chat, 'assistant');
+    if (assistantFloors < startAfter) {
+      // log (optional)
+      appendWiTriggerLog({
+        ts: Date.now(),
+        reason: String(reason || 'msg_sent'),
+        userText: lastText,
+        skipped: true,
+        skippedReason: 'minAssistantFloors',
+        assistantFloors,
+        startAfter,
+      });
+      const modalOpen = $('#sg_modal_backdrop').is(':visible');
+      if (modalOpen || s.wiTriggerDebugLog) {
+        setStatus(`索引未启动：AI 回复楼层 ${assistantFloors}/${startAfter}`, 'info');
+      }
+      return;
+    }
+  }
+
+  const lookback = clampInt(s.wiTriggerLookbackMessages, 5, 120, 20);
+  // 最近正文（不含本次用户输入）；为避免“触发词注入”污染相似度，先剔除同 tag 的注入片段。
+  const tagForStrip = String(s.wiTriggerTag || 'SG_WI_TRIGGERS').trim() || 'SG_WI_TRIGGERS';
+  const recentText = buildRecentChatText(chat, lookback, true, tagForStrip);
+  if (!recentText) return;
+
+  const candidates = collectBlueIndexCandidates();
+  if (!candidates.length) return;
+
+  const maxEntries = clampInt(s.wiTriggerMaxEntries, 1, 20, 4);
+  const minScore = clampFloat(s.wiTriggerMinScore, 0, 1, 0.08);
+  const includeUser = !!s.wiTriggerIncludeUserMessage;
+  const userWeight = clampFloat(s.wiTriggerUserMessageWeight, 0, 10, 1.6);
+const matchMode = String(s.wiTriggerMatchMode || 'local');
+let picked = [];
+if (matchMode === 'llm') {
+  try {
+    picked = await pickRelevantIndexEntriesLLM(recentText, lastText, candidates, maxEntries, includeUser, userWeight);
+  } catch (e) {
+    console.warn('[StoryGuide] index LLM failed; fallback to local similarity', e);
+    picked = pickRelevantIndexEntries(recentText, lastText, candidates, maxEntries, minScore, includeUser, userWeight);
+  }
+} else {
+  picked = pickRelevantIndexEntries(recentText, lastText, candidates, maxEntries, minScore, includeUser, userWeight);
+}
+if (!picked.length) return;
+
+  const maxKeywords = clampInt(s.wiTriggerMaxKeywords, 1, 200, 24);
+  const kwSet = new Set();
+  const pickedTitles = []; // debug display with score
+  const pickedNames = [];  // entry names (等价于将触发的绿灯条目名称)
+  const pickedForLog = [];
+  for (const { e, score } of picked) {
+    const name = String(e.title || '').trim() || '条目';
+    pickedNames.push(name);
+    pickedTitles.push(`${name}（${score.toFixed(2)}）`);
+    pickedForLog.push({
+      title: name,
+      score: Number(score),
+      keywordsPreview: (Array.isArray(e.keywords) ? e.keywords.slice(0, 24) : []),
+    });
+    for (const k of (Array.isArray(e.keywords) ? e.keywords : [])) {
+      const kk = String(k || '').trim();
+      if (!kk) continue;
+      kwSet.add(kk);
+      if (kwSet.size >= maxKeywords) break;
+    }
+    if (kwSet.size >= maxKeywords) break;
+  }
+  const keywords = Array.from(kwSet);
+  if (!keywords.length) return;
+
+  const tag = tagForStrip;
+  const style = String(s.wiTriggerInjectStyle || 'hidden').trim() || 'hidden';
+  const cleaned = stripTriggerInjection(last.mes ?? last.message ?? '', tag);
+  const injected = cleaned + buildTriggerInjection(keywords, tag, style);
+  last.mes = injected;
+
+  // append log (fire-and-forget)
+  appendWiTriggerLog({
+    ts: Date.now(),
+    reason: String(reason || 'msg_sent'),
+    userText: lastText,
+    lookback,
+    style,
+    tag,
+    picked: pickedForLog,
+    injectedKeywords: keywords,
+  });
+
+  // try save
+  try {
+    if (typeof ctx.saveChatDebounced === 'function') ctx.saveChatDebounced();
+    else if (typeof ctx.saveChat === 'function') ctx.saveChat();
+  } catch { /* ignore */ }
+
+  // debug status (only when pane open or explicitly enabled)
+  const modalOpen = $('#sg_modal_backdrop').is(':visible');
+  if (modalOpen || s.wiTriggerDebugLog) {
+    setStatus(`已注入触发词：${keywords.slice(0, 12).join('、')}${keywords.length > 12 ? '…' : ''}${s.wiTriggerDebugLog ? `｜命中：${pickedTitles.join('；')}` : `｜将触发：${pickedNames.slice(0,4).join('；')}${pickedNames.length>4?'…':''}`}`, 'ok');
+  }
+}
+
 // -------------------- inline append (dynamic modules) --------------------
 
 function indentForListItem(md) {
@@ -1459,6 +3066,234 @@ function fillModelSelect(modelIds, selected) {
   });
 }
 
+
+function fillSummaryModelSelect(modelIds, selected) {
+  const $sel = $('#sg_summaryModelSelect');
+  if (!$sel.length) return;
+  $sel.empty();
+  $sel.append(`<option value="">（选择模型）</option>`);
+  (modelIds || []).forEach(id => {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = id;
+    if (selected && id === selected) opt.selected = true;
+    $sel.append(opt);
+  });
+}
+
+
+function fillIndexModelSelect(modelIds, selected) {
+  const $sel = $('#sg_wiIndexModelSelect');
+  if (!$sel.length) return;
+  $sel.empty();
+  $sel.append(`<option value="">（选择模型）</option>`);
+  (modelIds || []).forEach(id => {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = id;
+    if (selected && id === selected) opt.selected = true;
+    $sel.append(opt);
+  });
+}
+
+
+async function refreshSummaryModels() {
+  const s = ensureSettings();
+  const raw = String($('#sg_summaryCustomEndpoint').val() || s.summaryCustomEndpoint || '').trim();
+  const apiBase = normalizeBaseUrl(raw);
+  if (!apiBase) { setStatus('请先填写“总结独立API基础URL”再刷新模型', 'warn'); return; }
+
+  setStatus('正在刷新“总结独立API”模型列表…', 'warn');
+
+  const apiKey = String($('#sg_summaryCustomApiKey').val() || s.summaryCustomApiKey || '');
+  const statusUrl = '/api/backends/chat-completions/status';
+
+  const body = {
+    reverse_proxy: apiBase,
+    chat_completion_source: 'custom',
+    custom_url: apiBase,
+    custom_include_headers: apiKey ? `Authorization: Bearer ${apiKey}` : ''
+  };
+
+  // prefer backend status (兼容 ST 后端代理)
+  try {
+    const headers = { ...getStRequestHeadersCompat(), 'Content-Type': 'application/json' };
+    const res = await fetch(statusUrl, { method: 'POST', headers, body: JSON.stringify(body) });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      const err = new Error(`状态检查失败: HTTP ${res.status} ${res.statusText}\n${txt}`);
+      err.status = res.status;
+      throw err;
+    }
+
+    const data = await res.json().catch(() => ({}));
+
+    let modelsList = [];
+    if (Array.isArray(data?.models)) modelsList = data.models;
+    else if (Array.isArray(data?.data)) modelsList = data.data;
+    else if (Array.isArray(data)) modelsList = data;
+
+    let ids = [];
+    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
+
+    ids = Array.from(new Set(ids)).sort((a,b) => String(a).localeCompare(String(b)));
+
+    if (!ids.length) {
+      setStatus('刷新成功，但未解析到模型列表（返回格式不兼容）', 'warn');
+      return;
+    }
+
+    s.summaryCustomModelsCache = ids;
+    saveSettings();
+    fillSummaryModelSelect(ids, s.summaryCustomModel);
+    setStatus(`已刷新总结模型：${ids.length} 个（后端代理）`, 'ok');
+    return;
+  } catch (e) {
+    const status = e?.status;
+    if (!(status === 404 || status === 405)) console.warn('[StoryGuide] summary status check failed; fallback to direct /models', e);
+  }
+
+  // fallback direct /models
+  try {
+    const modelsUrl = (function (base) {
+      const u = normalizeBaseUrl(base);
+      if (!u) return '';
+      if (/\/v1$/.test(u)) return u + '/models';
+      if (/\/v1\b/i.test(u)) return u.replace(/\/+$/, '') + '/models';
+      return u + '/v1/models';
+    })(apiBase);
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+    const res = await fetch(modelsUrl, { method: 'GET', headers });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      throw new Error(`直连 /models 失败: HTTP ${res.status} ${res.statusText}\n${txt}`);
+    }
+    const data = await res.json().catch(() => ({}));
+
+    let modelsList = [];
+    if (Array.isArray(data?.models)) modelsList = data.models;
+    else if (Array.isArray(data?.data)) modelsList = data.data;
+    else if (Array.isArray(data)) modelsList = data;
+
+    let ids = [];
+    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
+
+    ids = Array.from(new Set(ids)).sort((a,b) => String(a).localeCompare(String(b)));
+
+    if (!ids.length) { setStatus('直连刷新失败：未解析到模型列表', 'warn'); return; }
+
+    s.summaryCustomModelsCache = ids;
+    saveSettings();
+    fillSummaryModelSelect(ids, s.summaryCustomModel);
+    setStatus(`已刷新总结模型：${ids.length} 个（直连 fallback）`, 'ok');
+  } catch (e) {
+    setStatus(`刷新总结模型失败：${e?.message ?? e}`, 'err');
+  }
+}
+
+
+async function refreshIndexModels() {
+  const s = ensureSettings();
+  const raw = String($('#sg_wiIndexCustomEndpoint').val() || s.wiIndexCustomEndpoint || '').trim();
+  const apiBase = normalizeBaseUrl(raw);
+  if (!apiBase) { setStatus('请先填写“索引独立API基础URL”再刷新模型', 'warn'); return; }
+
+  setStatus('正在刷新“索引独立API”模型列表…', 'warn');
+
+  const apiKey = String($('#sg_wiIndexCustomApiKey').val() || s.wiIndexCustomApiKey || '');
+  const statusUrl = '/api/backends/chat-completions/status';
+
+  const body = {
+    reverse_proxy: apiBase,
+    chat_completion_source: 'custom',
+    custom_url: apiBase,
+    custom_include_headers: apiKey ? `Authorization: Bearer ${apiKey}` : ''
+  };
+
+  try {
+    const headers = { ...getStRequestHeadersCompat(), 'Content-Type': 'application/json' };
+    const res = await fetch(statusUrl, { method: 'POST', headers, body: JSON.stringify(body) });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      const err = new Error(`状态检查失败: HTTP ${res.status} ${res.statusText}\n${txt}`);
+      err.status = res.status;
+      throw err;
+    }
+
+    const data = await res.json().catch(() => ({}));
+
+    let modelsList = [];
+    if (Array.isArray(data?.models)) modelsList = data.models;
+    else if (Array.isArray(data?.data)) modelsList = data.data;
+    else if (Array.isArray(data)) modelsList = data;
+
+    let ids = [];
+    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
+
+    ids = Array.from(new Set(ids)).sort((a,b) => String(a).localeCompare(String(b)));
+
+    if (!ids.length) {
+      setStatus('刷新成功，但未解析到模型列表（返回格式不兼容）', 'warn');
+      return;
+    }
+
+    s.wiIndexCustomModelsCache = ids;
+    saveSettings();
+    fillIndexModelSelect(ids, s.wiIndexCustomModel);
+    setStatus(`已刷新索引模型：${ids.length} 个（后端代理）`, 'ok');
+    return;
+  } catch (e) {
+    const status = e?.status;
+    if (!(status === 404 || status === 405)) console.warn('[StoryGuide] index status check failed; fallback to direct /models', e);
+  }
+
+  try {
+    const modelsUrl = (function (base) {
+      const u = normalizeBaseUrl(base);
+      if (!u) return '';
+      if (/\/v1$/.test(u)) return u + '/models';
+      if (/\/v1\b/i.test(u)) return u.replace(/\/+$/, '') + '/models';
+      return u + '/v1/models';
+    })(apiBase);
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+    const res = await fetch(modelsUrl, { method: 'GET', headers });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      throw new Error(`直连 /models 失败: HTTP ${res.status} ${res.statusText}\n${txt}`);
+    }
+    const data = await res.json().catch(() => ({}));
+
+    let modelsList = [];
+    if (Array.isArray(data?.models)) modelsList = data.models;
+    else if (Array.isArray(data?.data)) modelsList = data.data;
+    else if (Array.isArray(data)) modelsList = data;
+
+    let ids = [];
+    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
+
+    ids = Array.from(new Set(ids)).sort((a,b) => String(a).localeCompare(String(b)));
+
+    if (!ids.length) { setStatus('直连刷新失败：未解析到模型列表', 'warn'); return; }
+
+    s.wiIndexCustomModelsCache = ids;
+    saveSettings();
+    fillIndexModelSelect(ids, s.wiIndexCustomModel);
+    setStatus(`已刷新索引模型：${ids.length} 个（直连 fallback）`, 'ok');
+  } catch (e) {
+    setStatus(`刷新索引模型失败：${e?.message ?? e}`, 'err');
+  }
+}
+
+
+
 async function refreshModels() {
   const s = ensureSettings();
   const raw = String($('#sg_customEndpoint').val() || s.customEndpoint || '').trim();
@@ -1620,9 +3455,74 @@ function findChatInputAnchor() {
   return ta;
 }
 
+const SG_CHAT_POS_KEY = 'storyguide_chat_controls_pos_v1';
+let sgChatPinnedLoaded = false;
+let sgChatPinnedPos = null; // {left, top, pinned}
+let sgChatPinned = false;
+
+function loadPinnedChatPos() {
+  if (sgChatPinnedLoaded) return;
+  sgChatPinnedLoaded = true;
+  try {
+    const raw = localStorage.getItem(SG_CHAT_POS_KEY);
+    if (!raw) return;
+    const j = JSON.parse(raw);
+    if (j && typeof j.left === 'number' && typeof j.top === 'number') {
+      sgChatPinnedPos = { left: j.left, top: j.top, pinned: j.pinned !== false };
+      sgChatPinned = sgChatPinnedPos.pinned;
+    }
+  } catch { /* ignore */ }
+}
+
+function savePinnedChatPos(left, top) {
+  try {
+    sgChatPinnedPos = { left: Number(left) || 0, top: Number(top) || 0, pinned: true };
+    sgChatPinned = true;
+    localStorage.setItem(SG_CHAT_POS_KEY, JSON.stringify(sgChatPinnedPos));
+  } catch { /* ignore */ }
+}
+
+function clearPinnedChatPos() {
+  try {
+    sgChatPinnedPos = null;
+    sgChatPinned = false;
+    localStorage.removeItem(SG_CHAT_POS_KEY);
+  } catch { /* ignore */ }
+}
+
+function clampToViewport(left, top, w, h) {
+  const pad = 8;
+  const L = Math.max(pad, Math.min(left, window.innerWidth - w - pad));
+  const T = Math.max(pad, Math.min(top, window.innerHeight - h - pad));
+  return { left: L, top: T };
+}
+
+function measureWrap(wrap) {
+  const prevVis = wrap.style.visibility;
+  wrap.style.visibility = 'hidden';
+  wrap.style.left = '0px';
+  wrap.style.top = '0px';
+  const w = wrap.offsetWidth || 220;
+  const h = wrap.offsetHeight || 38;
+  wrap.style.visibility = prevVis || 'visible';
+  return { w, h };
+}
+
 function positionChatActionButtons() {
   const wrap = document.getElementById('sg_chat_controls');
   if (!wrap) return;
+
+  loadPinnedChatPos();
+
+  const { w, h } = measureWrap(wrap);
+
+  // If user dragged & pinned position, keep it.
+  if (sgChatPinned && sgChatPinnedPos) {
+    const clamped = clampToViewport(sgChatPinnedPos.left, sgChatPinnedPos.top, w, h);
+    wrap.style.left = `${Math.round(clamped.left)}px`;
+    wrap.style.top = `${Math.round(clamped.top)}px`;
+    return;
+  }
 
   const sendBtn =
     document.querySelector('#send_but') ||
@@ -1637,26 +3537,13 @@ function positionChatActionButtons() {
 
   const rect = sendBtn.getBoundingClientRect();
 
-  // measure
-  const prevVis = wrap.style.visibility;
-  wrap.style.visibility = 'hidden';
-  wrap.style.left = '0px';
-  wrap.style.top = '0px';
-  const w = wrap.offsetWidth || 200;
-  const h = wrap.offsetHeight || 36;
-
   // place to the left of send button, vertically centered
   let left = rect.left - w - 10;
   let top = rect.top + (rect.height - h) / 2;
 
-  // clamp to viewport
-  const pad = 8;
-  left = Math.max(pad, Math.min(left, window.innerWidth - w - pad));
-  top = Math.max(pad, Math.min(top, window.innerHeight - h - pad));
-
-  wrap.style.left = `${Math.round(left)}px`;
-  wrap.style.top = `${Math.round(top)}px`;
-  wrap.style.visibility = prevVis || 'visible';
+  const clamped = clampToViewport(left, top, w, h);
+  wrap.style.left = `${Math.round(clamped.left)}px`;
+  wrap.style.top = `${Math.round(clamped.top)}px`;
 }
 
 let sgChatPosTimer = null;
@@ -1667,7 +3554,6 @@ function schedulePositionChatButtons() {
     try { positionChatActionButtons(); } catch {}
   }, 60);
 }
-
 function ensureChatActionButtons() {
   if (document.getElementById('sg_chat_controls')) {
     schedulePositionChatButtons();
@@ -1679,6 +3565,12 @@ function ensureChatActionButtons() {
 
   const wrap = document.createElement('div');
   wrap.id = 'sg_chat_controls';
+
+  // draggable handle (drag to pin position; double click to reset)
+  const handle = document.createElement('div');
+  handle.className = 'sg-chat-drag-handle';
+  handle.title = '拖动按钮位置（双击复位为自动贴边）';
+  handle.textContent = '⋮⋮';
   wrap.className = 'sg-chat-controls';
 
   const gen = document.createElement('button');
@@ -1725,11 +3617,75 @@ function ensureChatActionButtons() {
     }
   });
 
+  wrap.appendChild(handle);
+
   wrap.appendChild(gen);
   wrap.appendChild(reroll);
 
   // Use fixed positioning to avoid overlapping with send button / different themes.
+  
+  // drag to move (pin position)
+  let dragging = false;
+  let startX = 0, startY = 0, startLeft = 0, startTop = 0;
+  let moved = false;
+
+  const onMove = (ev) => {
+    if (!dragging) return;
+    const dx = ev.clientX - startX;
+    const dy = ev.clientY - startY;
+    if (!moved && (Math.abs(dx) + Math.abs(dy) > 4)) moved = true;
+
+    const { w, h } = measureWrap(wrap);
+    const clamped = clampToViewport(startLeft + dx, startTop + dy, w, h);
+    wrap.style.left = `${Math.round(clamped.left)}px`;
+    wrap.style.top = `${Math.round(clamped.top)}px`;
+  };
+
+  const onUp = (ev) => {
+    if (!dragging) return;
+    dragging = false;
+    wrap.classList.remove('is-dragging');
+    try { handle.releasePointerCapture(ev.pointerId); } catch {}
+    window.removeEventListener('pointermove', onMove, true);
+    window.removeEventListener('pointerup', onUp, true);
+    window.removeEventListener('pointercancel', onUp, true);
+
+    if (moved) {
+      const left = parseInt(wrap.style.left || '0', 10);
+      const top = parseInt(wrap.style.top || '0', 10);
+      savePinnedChatPos(left, top);
+    }
+  };
+
+  handle.addEventListener('pointerdown', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    loadPinnedChatPos();
+    dragging = true;
+    moved = false;
+    wrap.classList.add('is-dragging');
+
+    const rect = wrap.getBoundingClientRect();
+    startX = ev.clientX;
+    startY = ev.clientY;
+    startLeft = rect.left;
+    startTop = rect.top;
+
+    try { handle.setPointerCapture(ev.pointerId); } catch {}
+    window.addEventListener('pointermove', onMove, true);
+    window.addEventListener('pointerup', onUp, true);
+    window.addEventListener('pointercancel', onUp, true);
+  });
+
+  handle.addEventListener('dblclick', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    clearPinnedChatPos();
+    schedulePositionChatButtons();
+  });
+
   document.body.appendChild(wrap);
+  loadPinnedChatPos();
 
   // Keep it positioned correctly
   window.addEventListener('resize', schedulePositionChatButtons, { passive: true });
@@ -1786,7 +3742,7 @@ function buildModalHtml() {
       <div class="sg-modal-head">
         <div class="sg-modal-title">
           <span class="sg-badge">📘</span>
-          剧情指导 <span class="sg-sub">StoryGuide</span>
+          剧情指导 <span class="sg-sub">StoryGuide v${SG_VERSION}</span>
         </div>
         <div class="sg-modal-actions">
           <button class="menu_button sg-btn" id="sg_close">关闭</button>
@@ -1795,6 +3751,13 @@ function buildModalHtml() {
 
       <div class="sg-modal-body">
         <div class="sg-left">
+          <div class="sg-pagetabs">
+            <button class="sg-pgtab active" id="sg_pgtab_guide">剧情指导</button>
+            <button class="sg-pgtab" id="sg_pgtab_summary">总结设置</button>
+            <button class="sg-pgtab" id="sg_pgtab_index">索引设置</button>
+          </div>
+
+          <div class="sg-page active" id="sg_page_guide">
           <div class="sg-card">
             <div class="sg-card-title">生成设置</div>
 
@@ -1983,8 +3946,335 @@ function buildModalHtml() {
             <div class="sg-hint" id="sg_worldbookInfo">（未导入世界书）</div>
           </div>
 
+          </div> <!-- sg_page_guide -->
 
+          <div class="sg-page" id="sg_page_summary">
 
+          <div class="sg-card">
+            <div class="sg-card-title">自动总结（写入世界书）</div>
+
+            <div class="sg-row sg-inline">
+              <label class="sg-check"><input type="checkbox" id="sg_summaryEnabled">启用自动总结</label>
+              <span>每</span>
+              <input id="sg_summaryEvery" type="number" min="1" max="200" style="width:90px">
+              <span>层</span>
+              <select id="sg_summaryCountMode">
+                <option value="assistant">按 AI 回复计数</option>
+                <option value="all">按全部消息计数</option>
+              </select>
+            </div>
+
+            <div class="sg-grid2">
+              <div class="sg-field">
+                <label>总结 Provider</label>
+                <select id="sg_summaryProvider">
+                  <option value="st">使用酒馆当前连接的模型</option>
+                  <option value="custom">使用独立 OpenAI 兼容 API</option>
+                </select>
+              </div>
+              <div class="sg-field">
+                <label>总结 Temperature</label>
+                <input id="sg_summaryTemperature" type="number" min="0" max="2" step="0.1">
+              </div>
+            </div>
+
+            <div class="sg-card sg-subcard">
+              <div class="sg-field">
+                <label>自定义总结提示词（System，可选）</label>
+                <textarea id="sg_summarySystemPrompt" rows="6" placeholder="例如：更强调线索/关系变化/回合制记录，或要求英文输出…（仍需输出 JSON）"></textarea>
+              </div>
+              <div class="sg-field">
+                <label>对话片段模板（User，可选）</label>
+                <textarea id="sg_summaryUserTemplate" rows="4" placeholder="支持占位符：{{fromFloor}} {{toFloor}} {{chunk}}"></textarea>
+              </div>
+              <div class="sg-row sg-inline">
+                <button class="menu_button sg-btn" id="sg_summaryResetPrompt">恢复默认提示词</button>
+                <div class="sg-hint" style="margin-left:auto">占位符：{{fromFloor}} {{toFloor}} {{chunk}}。插件会强制要求输出 JSON：{title, summary, keywords[]}。</div>
+              </div>
+            </div>
+
+            <div class="sg-card sg-subcard" id="sg_summary_custom_block" style="display:none">
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>独立API基础URL</label>
+                  <input id="sg_summaryCustomEndpoint" type="text" placeholder="https://api.openai.com/v1">
+                </div>
+                <div class="sg-field">
+                  <label>API Key</label>
+                  <input id="sg_summaryCustomApiKey" type="password" placeholder="sk-...">
+                </div>
+              </div>
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>模型ID（可手填）</label>
+                  <input id="sg_summaryCustomModel" type="text" placeholder="gpt-4o-mini">
+                  <div class="sg-row sg-inline" style="margin-top:6px;">
+                    <button class="menu_button sg-btn" id="sg_refreshSummaryModels">刷新模型</button>
+                    <select id="sg_summaryModelSelect" class="sg-model-select">
+                      <option value="">（选择模型）</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="sg-field">
+                  <label>Max Tokens</label>
+                  <input id="sg_summaryCustomMaxTokens" type="number" min="128" max="200000">
+                </div>
+              </div>
+              <label class="sg-check"><input type="checkbox" id="sg_summaryCustomStream">stream（若支持）</label>
+            </div>
+
+            <div class="sg-row sg-inline">
+              <label class="sg-check"><input type="checkbox" id="sg_summaryToWorldInfo">写入世界书（绿灯启用）</label>
+              <select id="sg_summaryWorldInfoTarget">
+                <option value="chatbook">写入当前聊天绑定世界书</option>
+                <option value="file">写入指定世界书文件名</option>
+              </select>
+              <input id="sg_summaryWorldInfoFile" type="text" placeholder="Target=file 时填写世界书文件名" style="flex:1; min-width: 220px;">
+            </div>
+
+            <div class="sg-row sg-inline">
+              <label class="sg-check"><input type="checkbox" id="sg_summaryToBlueWorldInfo">同时写入蓝灯世界书（常开索引）</label>
+              <input id="sg_summaryBlueWorldInfoFile" type="text" placeholder="蓝灯世界书文件名（建议单独建一个）" style="flex:1; min-width: 260px;">
+            </div>
+
+            <div class="sg-grid2">
+              <div class="sg-field">
+                <label>条目标题前缀（写入 comment，始终在最前）</label>
+                <input id="sg_summaryWorldInfoCommentPrefix" type="text" placeholder="剧情总结">
+              </div>
+              <div class="sg-field">
+                <label>限制：每条消息最多字符 / 总字符</label>
+                <div class="sg-row" style="margin-top:0">
+                  <input id="sg_summaryMaxChars" type="number" min="200" max="8000" style="width:110px">
+                  <input id="sg_summaryMaxTotalChars" type="number" min="2000" max="80000" style="width:120px">
+                </div>
+              </div>
+            </div>
+
+            <div class="sg-grid2">
+              <div class="sg-field">
+                <label>世界书触发词写入 key</label>
+                <select id="sg_summaryWorldInfoKeyMode">
+                  <option value="keywords">使用模型输出的关键词（6~14 个）</option>
+                  <option value="indexId">使用索引编号（只写 1 个，如 A-001）</option>
+                </select>
+                <div class="sg-hint">想让“主要关键词”只显示 A-001，就选“索引编号”。</div>
+              </div>
+              <div class="sg-field" id="sg_summaryIndexFormat" style="display:none;">
+                <label>索引编号格式（keyMode=indexId）</label>
+                <div class="sg-row" style="margin-top:0; gap:8px; align-items:center;">
+                  <input id="sg_summaryIndexPrefix" type="text" placeholder="A-" style="width:90px">
+                  <span class="sg-hint">位数</span>
+                  <input id="sg_summaryIndexPad" type="number" min="1" max="12" style="width:80px">
+                  <span class="sg-hint">起始</span>
+                  <input id="sg_summaryIndexStart" type="number" min="1" max="1000000" style="width:100px">
+                </div>
+                <label class="sg-check" style="margin-top:6px;"><input type="checkbox" id="sg_summaryIndexInComment">条目标题（comment）包含编号</label>
+              </div>
+            </div>
+
+            <div class="sg-card sg-subcard">
+              <div class="sg-row sg-inline">
+                <label class="sg-check"><input type="checkbox" id="sg_wiTriggerEnabled">启用“蓝灯索引 → 绿灯触发”（发送消息前自动注入触发词）</label>
+              </div>
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>读取前 N 条消息正文</label>
+                  <input id="sg_wiTriggerLookbackMessages" type="number" min="5" max="120" placeholder="20">
+                </div>
+                <div class="sg-field">
+                  <label>最多触发条目数</label>
+                  <input id="sg_wiTriggerMaxEntries" type="number" min="1" max="20" placeholder="4">
+                </div>
+
+<div class="sg-grid2">
+  <div class="sg-field">
+    <label>匹配方式</label>
+    <select id="sg_wiTriggerMatchMode">
+      <option value="local">本地相似度（快）</option>
+      <option value="llm">LLM 综合判断（可自定义提示词）</option>
+    </select>
+  </div>
+  <div class="sg-field">
+    <label>预筛选 TopK（仅 LLM 模式）</label>
+    <input id="sg_wiIndexPrefilterTopK" type="number" min="5" max="80" placeholder="24">
+    <div class="sg-hint">先用相似度挑 TopK，再交给模型选出最相关的几条（省 tokens）。</div>
+  </div>
+</div>
+
+<div class="sg-card sg-subcard" id="sg_index_llm_block" style="display:none; margin-top:10px;">
+  <div class="sg-grid2">
+    <div class="sg-field">
+      <label>索引 Provider</label>
+      <select id="sg_wiIndexProvider">
+        <option value="st">使用酒馆当前连接的模型</option>
+        <option value="custom">使用独立 OpenAI 兼容 API</option>
+      </select>
+    </div>
+    <div class="sg-field">
+      <label>索引 Temperature</label>
+      <input id="sg_wiIndexTemperature" type="number" min="0" max="2" step="0.1">
+    </div>
+  </div>
+
+  <div class="sg-field">
+    <label>自定义索引提示词（System，可选）</label>
+    <textarea id="sg_wiIndexSystemPrompt" rows="6" placeholder="例如：更强调人物关系/线索回收/当前目标；或要求更严格的筛选…"></textarea>
+  </div>
+  <div class="sg-field">
+    <label>索引模板（User，可选）</label>
+    <textarea id="sg_wiIndexUserTemplate" rows="6" placeholder="支持占位符：{{userMessage}} {{recentText}} {{candidates}} {{maxPick}}"></textarea>
+  </div>
+  <div class="sg-row sg-inline">
+    <button class="menu_button sg-btn" id="sg_wiIndexResetPrompt">恢复默认索引提示词</button>
+    <div class="sg-hint" style="margin-left:auto">占位符：{{userMessage}} {{recentText}} {{candidates}} {{maxPick}}。插件会强制要求输出 JSON：{pickedIds:number[]}。</div>
+  </div>
+
+  <div class="sg-card sg-subcard" id="sg_index_custom_block" style="display:none">
+    <div class="sg-grid2">
+      <div class="sg-field">
+        <label>索引独立API基础URL</label>
+        <input id="sg_wiIndexCustomEndpoint" type="text" placeholder="https://api.openai.com/v1">
+      </div>
+      <div class="sg-field">
+        <label>API Key</label>
+        <input id="sg_wiIndexCustomApiKey" type="password" placeholder="sk-...">
+      </div>
+    </div>
+    <div class="sg-grid2">
+      <div class="sg-field">
+        <label>模型ID（可手填）</label>
+        <input id="sg_wiIndexCustomModel" type="text" placeholder="gpt-4o-mini">
+        <div class="sg-row sg-inline" style="margin-top:6px;">
+          <button class="menu_button sg-btn" id="sg_refreshIndexModels">刷新模型</button>
+          <select id="sg_wiIndexModelSelect" class="sg-model-select">
+            <option value="">（选择模型）</option>
+          </select>
+        </div>
+      </div>
+      <div class="sg-field">
+        <label>Max Tokens</label>
+        <input id="sg_wiIndexCustomMaxTokens" type="number" min="128" max="200000">
+        <div class="sg-row sg-inline" style="margin-top:6px;">
+          <span class="sg-hint">TopP</span>
+          <input id="sg_wiIndexTopP" type="number" min="0" max="1" step="0.01" style="width:110px">
+        </div>
+      </div>
+    </div>
+    <label class="sg-check"><input type="checkbox" id="sg_wiIndexCustomStream">stream（若支持）</label>
+  </div>
+</div>
+
+              </div>
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label class="sg-check"><input type="checkbox" id="sg_wiTriggerIncludeUserMessage">结合本次用户输入（综合判断）</label>
+                  <div class="sg-hint">开启后会综合“最近 N 条正文 + 你这句话”来决定与当前剧情最相关的条目。</div>
+                </div>
+                <div class="sg-field">
+                  <label>用户输入权重（0~10）</label>
+                  <input id="sg_wiTriggerUserMessageWeight" type="number" min="0" max="10" step="0.1" placeholder="1.6">
+                  <div class="sg-hint">越大越看重你这句话；1=与最近正文同权重。</div>
+                </div>
+              </div>
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>相关度阈值（0~1）</label>
+                  <input id="sg_wiTriggerMinScore" type="number" min="0" max="1" step="0.01" placeholder="0.08">
+                </div>
+                <div class="sg-field">
+                  <label>最多注入触发词</label>
+                  <input id="sg_wiTriggerMaxKeywords" type="number" min="1" max="200" placeholder="24">
+                </div>
+              </div>
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>至少已有 N 条 AI 回复才开始索引（0=立即）</label>
+                  <input id="sg_wiTriggerStartAfterAssistantMessages" type="number" min="0" max="200000" placeholder="0">
+                </div>
+                <div class="sg-field">
+                  <label>说明</label>
+                  <div class="sg-hint" style="padding-top:8px;">（只统计 AI 回复楼层；例如填 100 表示第 100 层之后才注入）</div>
+                </div>
+              </div>
+              <div class="sg-row sg-inline">
+                <label>注入方式</label>
+                <select id="sg_wiTriggerInjectStyle" style="min-width:200px">
+                  <option value="hidden">隐藏注释（推荐）</option>
+                  <option value="plain">普通文本（更稳）</option>
+                </select>
+              </div>
+              <div class="sg-row sg-inline">
+                <label>蓝灯索引</label>
+                <select id="sg_wiBlueIndexMode" style="min-width:180px">
+                  <option value="live">实时读取蓝灯世界书</option>
+                  <option value="cache">使用导入/缓存</option>
+                </select>
+                <input id="sg_wiBlueIndexFile" type="text" placeholder="蓝灯世界书文件名（留空=使用上方蓝灯写入文件名）" style="flex:1; min-width: 260px;">
+                <button class="menu_button sg-btn" id="sg_refreshBlueIndexLive">刷新</button>
+              </div>
+              <div class="sg-row sg-inline">
+                <label class="sg-check"><input type="checkbox" id="sg_wiTriggerDebugLog">调试：状态栏显示命中条目/触发词</label>
+                <button class="menu_button sg-btn" id="sg_importBlueIndex">导入蓝灯世界书JSON（备用）</button>
+                <button class="menu_button sg-btn" id="sg_clearBlueIndex">清空蓝灯索引</button>
+                <div class="sg-hint" id="sg_blueIndexInfo" style="margin-left:auto">（蓝灯索引：0 条）</div>
+              </div>
+              <div class="sg-hint">
+                说明：本功能会用“蓝灯索引”里的每条总结（title/summary/keywords）与 <b>最近 N 条正文</b>（可选再加上 <b>本次用户输入</b>）做相似度匹配，选出最相关的几条，把它们的 <b>keywords</b> 追加到你刚发送的消息末尾（可选隐藏注释/普通文本），从而触发“绿灯世界书”的对应条目。
+              </div>
+
+              <div class="sg-card sg-subcard" style="margin-top:10px;">
+                <div class="sg-row sg-inline" style="margin-top:0;">
+                  <div class="sg-card-title" style="margin:0;">索引日志</div>
+                  <div class="sg-spacer"></div>
+                  <button class="menu_button sg-btn" id="sg_clearWiLogs">清空</button>
+                </div>
+                <div class="sg-loglist" id="sg_wiLogs" style="margin-top:8px;">(暂无)</div>
+                <div class="sg-hint" style="margin-top:8px;">提示：日志记录“这次发送消息时命中了哪些索引条目（等价于将触发的绿灯条目）”以及注入了哪些关键词。</div>
+              </div>
+            </div>
+
+            <div class="sg-card sg-subcard" id="sg_indexMovedHint" style="margin-top:10px;">
+              <div class="sg-row sg-inline" style="margin-top:0;">
+                <div class="sg-hint">索引相关设置已移至上方“索引设置”页。</div>
+                <div class="sg-spacer"></div>
+                <button class="menu_button sg-btn" id="sg_gotoIndexPage">打开索引设置</button>
+              </div>
+            </div>
+
+            <div class="sg-row sg-inline">
+              <label>手动楼层范围</label>
+              <input id="sg_summaryManualFrom" type="number" min="1" style="width:110px" placeholder="起始层">
+              <span> - </span>
+              <input id="sg_summaryManualTo" type="number" min="1" style="width:110px" placeholder="结束层">
+              <button class="menu_button sg-btn" id="sg_summarizeRange">立即总结该范围</button>
+              <div class="sg-hint" id="sg_summaryManualHint" style="margin-left:auto">（可选范围：1-0）</div>
+            </div>
+
+            <div class="sg-row sg-inline" style="margin-top:6px;">
+              <label class="sg-check" style="margin:0;"><input type="checkbox" id="sg_summaryManualSplit">手动范围按每 N 层拆分生成多条（N=上方“每 N 层总结一次”）</label>
+              <div class="sg-hint" style="margin-left:auto">例如 1-80 且 N=40 → 2 条</div>
+            </div>
+
+            <div class="sg-row sg-inline">
+              <button class="menu_button sg-btn" id="sg_summarizeNow">立即总结</button>
+              <button class="menu_button sg-btn" id="sg_resetSummaryState">重置本聊天总结进度</button>
+              <div class="sg-hint" id="sg_summaryInfo" style="margin-left:auto">（未生成）</div>
+            </div>
+
+            <div class="sg-hint">
+              自动总结会按“每 N 层”触发；每次输出会生成 <b>摘要</b> + <b>关键词</b>，并可自动创建世界书条目（disable=0 绿灯启用，关键词写入 key 作为触发词）。
+            </div>
+          </div>
+          </div> <!-- sg_page_summary -->
+
+          <div class="sg-page" id="sg_page_index">
+            <div class="sg-card">
+              <div class="sg-card-title">索引设置（蓝灯索引 → 绿灯触发）</div>
+              <div class="sg-hint" style="margin-bottom:10px;">索引会从“蓝灯世界书”里挑选与当前剧情最相关的总结条目，并把对应触发词注入到你发送的消息末尾，以触发绿灯世界书条目。</div>
+              <div id="sg_index_mount"></div>
+            </div>
+          </div> <!-- sg_page_index -->
 
           <div class="sg-status" id="sg_status"></div>
         </div>
@@ -1997,15 +4287,18 @@ function buildModalHtml() {
               <button class="sg-tab active" id="sg_tab_md">报告</button>
               <button class="sg-tab" id="sg_tab_json">JSON</button>
               <button class="sg-tab" id="sg_tab_src">来源</button>
+              <button class="sg-tab" id="sg_tab_sum">总结</button>
               <div class="sg-spacer"></div>
               <button class="menu_button sg-btn" id="sg_copyMd" disabled>复制MD</button>
               <button class="menu_button sg-btn" id="sg_copyJson" disabled>复制JSON</button>
+              <button class="menu_button sg-btn" id="sg_copySum" disabled>复制总结</button>
               <button class="menu_button sg-btn" id="sg_injectTips" disabled>注入提示</button>
             </div>
 
             <div class="sg-pane active" id="sg_pane_md"><div class="sg-md" id="sg_md">(尚未生成)</div></div>
             <div class="sg-pane" id="sg_pane_json"><pre class="sg-pre" id="sg_json"></pre></div>
             <div class="sg-pane" id="sg_pane_src"><pre class="sg-pre" id="sg_src"></pre></div>
+            <div class="sg-pane" id="sg_pane_sum"><div class="sg-md" id="sg_sum">(尚未生成)</div></div>
           </div>
         </div>
       </div>
@@ -2018,12 +4311,16 @@ function ensureModal() {
   if (document.getElementById('sg_modal_backdrop')) return;
   document.body.insertAdjacentHTML('beforeend', buildModalHtml());
 
+  // --- settings pages (剧情指导 / 总结设置 / 索引设置) ---
+  setupSettingsPages();
+
   $('#sg_modal_backdrop').on('click', (e) => { if (e.target && e.target.id === 'sg_modal_backdrop') closeModal(); });
   $('#sg_close').on('click', closeModal);
 
   $('#sg_tab_md').on('click', () => showPane('md'));
   $('#sg_tab_json').on('click', () => showPane('json'));
   $('#sg_tab_src').on('click', () => showPane('src'));
+  $('#sg_tab_sum').on('click', () => showPane('sum'));
 
   $('#sg_saveSettings').on('click', () => {
     pullUiToSettings();
@@ -2057,6 +4354,11 @@ function ensureModal() {
     catch (e) { setStatus(`复制失败：${e?.message ?? e}`, 'err'); }
   });
 
+  $('#sg_copySum').on('click', async () => {
+    try { await navigator.clipboard.writeText(lastSummaryText || ''); setStatus('已复制：总结', 'ok'); }
+    catch (e) { setStatus(`复制失败：${e?.message ?? e}`, 'err'); }
+  });
+
   $('#sg_injectTips').on('click', () => {
     const tips = Array.isArray(lastReport?.json?.tips) ? lastReport.json.tips : [];
     const spoiler = ensureSettings().spoilerLevel;
@@ -2074,16 +4376,220 @@ function ensureModal() {
     $('#sg_custom_block').toggle(provider === 'custom');
   });
 
+  // summary provider toggle
+  $('#sg_summaryProvider').on('change', () => {
+    const p = String($('#sg_summaryProvider').val() || 'st');
+    $('#sg_summary_custom_block').toggle(p === 'custom');
+    pullUiToSettings(); saveSettings();
+  });
+
+
+// wiTrigger match mode toggle
+$('#sg_wiTriggerMatchMode').on('change', () => {
+  const m = String($('#sg_wiTriggerMatchMode').val() || 'local');
+  $('#sg_index_llm_block').toggle(m === 'llm');
+  const p = String($('#sg_wiIndexProvider').val() || 'st');
+  $('#sg_index_custom_block').toggle(m === 'llm' && p === 'custom');
+  pullUiToSettings(); saveSettings();
+});
+
+// index provider toggle (only meaningful under LLM mode)
+$('#sg_wiIndexProvider').on('change', () => {
+  const m = String($('#sg_wiTriggerMatchMode').val() || 'local');
+  const p = String($('#sg_wiIndexProvider').val() || 'st');
+  $('#sg_index_custom_block').toggle(m === 'llm' && p === 'custom');
+  pullUiToSettings(); saveSettings();
+});
+
+// index prompt reset
+$('#sg_wiIndexResetPrompt').on('click', () => {
+  $('#sg_wiIndexSystemPrompt').val(DEFAULT_INDEX_SYSTEM_PROMPT);
+  $('#sg_wiIndexUserTemplate').val(DEFAULT_INDEX_USER_TEMPLATE);
+  pullUiToSettings();
+  saveSettings();
+  setStatus('已恢复默认索引提示词 ✅', 'ok');
+});
+
+  $('#sg_summaryWorldInfoTarget').on('change', () => {
+    const t = String($('#sg_summaryWorldInfoTarget').val() || 'chatbook');
+    $('#sg_summaryWorldInfoFile').toggle(t === 'file');
+    pullUiToSettings(); saveSettings();
+  });
+
+  $('#sg_summaryToBlueWorldInfo').on('change', () => {
+    const checked = $('#sg_summaryToBlueWorldInfo').is(':checked');
+    $('#sg_summaryBlueWorldInfoFile').toggle(!!checked);
+    pullUiToSettings(); saveSettings();
+    updateBlueIndexInfoLabel();
+  });
+
+  // summary key mode toggle (keywords vs indexId)
+  $('#sg_summaryWorldInfoKeyMode').on('change', () => {
+    const m = String($('#sg_summaryWorldInfoKeyMode').val() || 'keywords');
+    $('#sg_summaryIndexFormat').toggle(m === 'indexId');
+    pullUiToSettings();
+    saveSettings();
+  });
+
+  // summary prompt reset
+  $('#sg_summaryResetPrompt').on('click', () => {
+    $('#sg_summarySystemPrompt').val(DEFAULT_SUMMARY_SYSTEM_PROMPT);
+    $('#sg_summaryUserTemplate').val(DEFAULT_SUMMARY_USER_TEMPLATE);
+    pullUiToSettings();
+    saveSettings();
+    setStatus('已恢复默认总结提示词 ✅', 'ok');
+  });
+
+  // manual range split toggle & hint refresh
+  $('#sg_summaryManualSplit').on('change', () => {
+    pullUiToSettings();
+    saveSettings();
+    updateSummaryManualRangeHint(false);
+  });
+  $('#sg_summaryManualFrom, #sg_summaryManualTo, #sg_summaryEvery, #sg_summaryCountMode').on('input change', () => {
+    // count mode / every affects the computed floor range and split pieces
+    updateSummaryManualRangeHint(false);
+  });
+
+  // summary actions
+  $('#sg_summarizeNow').on('click', async () => {
+    try {
+      pullUiToSettings();
+      saveSettings();
+      await runSummary({ reason: 'manual' });
+    } catch (e) {
+      setStatus(`总结失败：${e?.message ?? e}`, 'err');
+    }
+  });
+
+  $('#sg_summarizeRange').on('click', async () => {
+    try {
+      pullUiToSettings();
+      saveSettings();
+      const from = clampInt($('#sg_summaryManualFrom').val(), 1, 200000, 1);
+      const to = clampInt($('#sg_summaryManualTo').val(), 1, 200000, 1);
+      await runSummary({ reason: 'manual_range', manualFromFloor: from, manualToFloor: to });
+    } catch (e) {
+      setStatus(`手动范围总结失败：${e?.message ?? e}`, 'err');
+    }
+  });
+
+  $('#sg_resetSummaryState').on('click', async () => {
+    try {
+      const meta = getDefaultSummaryMeta();
+      await setSummaryMeta(meta);
+      updateSummaryInfoLabel();
+      renderSummaryPaneFromMeta();
+      setStatus('已重置本聊天总结进度 ✅', 'ok');
+    } catch (e) {
+      setStatus(`重置失败：${e?.message ?? e}`, 'err');
+    }
+  });
+
+  // auto-save summary settings
+  $('#sg_summaryEnabled, #sg_summaryEvery, #sg_summaryCountMode, #sg_summaryTemperature, #sg_summarySystemPrompt, #sg_summaryUserTemplate, #sg_summaryCustomEndpoint, #sg_summaryCustomApiKey, #sg_summaryCustomModel, #sg_summaryCustomMaxTokens, #sg_summaryCustomStream, #sg_summaryToWorldInfo, #sg_summaryWorldInfoFile, #sg_summaryWorldInfoCommentPrefix, #sg_summaryWorldInfoKeyMode, #sg_summaryIndexPrefix, #sg_summaryIndexPad, #sg_summaryIndexStart, #sg_summaryIndexInComment, #sg_summaryToBlueWorldInfo, #sg_summaryBlueWorldInfoFile, #sg_wiTriggerEnabled, #sg_wiTriggerLookbackMessages, #sg_wiTriggerIncludeUserMessage, #sg_wiTriggerUserMessageWeight, #sg_wiTriggerStartAfterAssistantMessages, #sg_wiTriggerMaxEntries, #sg_wiTriggerMinScore, #sg_wiTriggerMaxKeywords, #sg_wiTriggerInjectStyle, #sg_wiTriggerDebugLog, #sg_wiBlueIndexMode, #sg_wiBlueIndexFile, #sg_summaryMaxChars, #sg_summaryMaxTotalChars, #sg_wiTriggerMatchMode, #sg_wiIndexPrefilterTopK, #sg_wiIndexProvider, #sg_wiIndexTemperature, #sg_wiIndexSystemPrompt, #sg_wiIndexUserTemplate, #sg_wiIndexCustomEndpoint, #sg_wiIndexCustomApiKey, #sg_wiIndexCustomModel, #sg_wiIndexCustomMaxTokens, #sg_wiIndexTopP, #sg_wiIndexCustomStream').on('change input', () => {
+    pullUiToSettings();
+    saveSettings();
+    updateSummaryInfoLabel();
+    updateBlueIndexInfoLabel();
+    updateSummaryManualRangeHint(false);
+  });
+
   $('#sg_refreshModels').on('click', async () => {
     pullUiToSettings(); saveSettings();
     await refreshModels();
   });
 
+  $('#sg_refreshSummaryModels').on('click', async () => {
+    pullUiToSettings(); saveSettings();
+    await refreshSummaryModels();
+  });
+
+
+$('#sg_refreshIndexModels').on('click', async () => {
+  pullUiToSettings(); saveSettings();
+  await refreshIndexModels();
+});
+
   $('#sg_modelSelect').on('change', () => {
     const id = String($('#sg_modelSelect').val() || '').trim();
     if (id) $('#sg_customModel').val(id);
-  $('#sg_customMaxTokens').val(s.customMaxTokens || 8192);
-  $('#sg_customStream').prop('checked', !!s.customStream);
+  });
+
+  $('#sg_summaryModelSelect').on('change', () => {
+    const id = String($('#sg_summaryModelSelect').val() || '').trim();
+    if (id) $('#sg_summaryCustomModel').val(id);
+  });
+
+
+$('#sg_wiIndexModelSelect').on('change', () => {
+  const id = String($('#sg_wiIndexModelSelect').val() || '').trim();
+  if (id) $('#sg_wiIndexCustomModel').val(id);
+});
+
+  // 蓝灯索引导入/清空
+  $('#sg_refreshBlueIndexLive').on('click', async () => {
+    try {
+      pullUiToSettings();
+      saveSettings();
+      const s = ensureSettings();
+      const mode = String(s.wiBlueIndexMode || 'live');
+      if (mode !== 'live') {
+        setStatus('当前为“缓存”模式：不会实时读取（可切换为“实时读取蓝灯世界书”）', 'warn');
+        return;
+      }
+      const file = pickBlueIndexFileName();
+      if (!file) {
+        setStatus('蓝灯世界书文件名为空：请在“蓝灯索引”里填写文件名，或在“同时写入蓝灯世界书”里填写文件名', 'err');
+        return;
+      }
+      const entries = await ensureBlueIndexLive(true);
+      setStatus(`已实时读取蓝灯世界书 ✅（${entries.length} 条）`, entries.length ? 'ok' : 'warn');
+    } catch (e) {
+      setStatus(`实时读取蓝灯世界书失败：${e?.message ?? e}`, 'err');
+    }
+  });
+
+  $('#sg_importBlueIndex').on('click', async () => {
+    try {
+      const file = await pickFile('.json,application/json');
+      if (!file) return;
+      const txt = await readFileText(file);
+      const entries = parseWorldbookJson(txt);
+      const s = ensureSettings();
+      // 仅保留必要字段
+      s.summaryBlueIndex = entries.map(e => ({
+        title: String(e.title || '').trim() || (e.keys?.[0] ? `条目：${e.keys[0]}` : '条目'),
+        summary: String(e.content || '').trim(),
+        keywords: Array.isArray(e.keys) ? e.keys.slice(0, 80) : [],
+        importedAt: Date.now(),
+      })).filter(x => x.summary);
+      saveSettings();
+      updateBlueIndexInfoLabel();
+      setStatus(`蓝灯索引已导入 ✅（${s.summaryBlueIndex.length} 条）`, s.summaryBlueIndex.length ? 'ok' : 'warn');
+    } catch (e) {
+      setStatus(`导入蓝灯索引失败：${e?.message ?? e}`, 'err');
+    }
+  });
+
+  $('#sg_clearBlueIndex').on('click', () => {
+    const s = ensureSettings();
+    s.summaryBlueIndex = [];
+    saveSettings();
+    updateBlueIndexInfoLabel();
+    setStatus('已清空蓝灯索引', 'ok');
+  });
+
+  $('#sg_clearWiLogs').on('click', async () => {
+    try {
+      const meta = getSummaryMeta();
+      meta.wiTriggerLogs = [];
+      await setSummaryMeta(meta);
+      renderWiTriggerLogs(meta);
+      setStatus('已清空索引日志', 'ok');
+    } catch (e) {
+      setStatus(`清空索引日志失败：${e?.message ?? e}`, 'err');
+    }
   });
 
   
@@ -2223,6 +4729,46 @@ function ensureModal() {
   });
 }
 
+function showSettingsPage(page) {
+  const p = String(page || 'guide');
+  $('#sg_pgtab_guide, #sg_pgtab_summary, #sg_pgtab_index').removeClass('active');
+  $('#sg_page_guide, #sg_page_summary, #sg_page_index').removeClass('active');
+
+  if (p === 'summary') {
+    $('#sg_pgtab_summary').addClass('active');
+    $('#sg_page_summary').addClass('active');
+  } else if (p === 'index') {
+    $('#sg_pgtab_index').addClass('active');
+    $('#sg_page_index').addClass('active');
+  } else {
+    $('#sg_pgtab_guide').addClass('active');
+    $('#sg_page_guide').addClass('active');
+  }
+
+  // 切页后回到顶部，避免“看不到设置项”
+  try { $('.sg-left').scrollTop(0); } catch {}
+}
+
+function setupSettingsPages() {
+  // 把“索引设置块”从总结页移到索引页（保留内部所有控件 id，不影响事件绑定）
+  try {
+    const $mount = $('#sg_index_mount');
+    const $idxWrapper = $('#sg_wiTriggerEnabled').closest('.sg-card.sg-subcard');
+    if ($mount.length && $idxWrapper.length) {
+      $mount.append($idxWrapper.children());
+      $idxWrapper.remove();
+    }
+  } catch { /* ignore */ }
+
+  // tabs
+  $('#sg_pgtab_guide').on('click', () => showSettingsPage('guide'));
+  $('#sg_pgtab_summary').on('click', () => showSettingsPage('summary'));
+  $('#sg_pgtab_index').on('click', () => showSettingsPage('index'));
+
+  // quick jump
+  $('#sg_gotoIndexPage').on('click', () => showSettingsPage('index'));
+}
+
 function pullSettingsToUi() {
   const s = ensureSettings();
 
@@ -2276,7 +4822,180 @@ function pullSettingsToUi() {
   }
 
   $('#sg_custom_block').toggle(s.provider === 'custom');
+
+  // summary
+  $('#sg_summaryEnabled').prop('checked', !!s.summaryEnabled);
+  $('#sg_summaryEvery').val(s.summaryEvery);
+  $('#sg_summaryManualSplit').prop('checked', !!s.summaryManualSplit);
+  $('#sg_summaryCountMode').val(String(s.summaryCountMode || 'assistant'));
+  $('#sg_summaryProvider').val(String(s.summaryProvider || 'st'));
+  $('#sg_summaryTemperature').val(s.summaryTemperature);
+  $('#sg_summarySystemPrompt').val(String(s.summarySystemPrompt || DEFAULT_SUMMARY_SYSTEM_PROMPT));
+  $('#sg_summaryUserTemplate').val(String(s.summaryUserTemplate || DEFAULT_SUMMARY_USER_TEMPLATE));
+  $('#sg_summaryCustomEndpoint').val(String(s.summaryCustomEndpoint || ''));
+  $('#sg_summaryCustomApiKey').val(String(s.summaryCustomApiKey || ''));
+  $('#sg_summaryCustomModel').val(String(s.summaryCustomModel || ''));
+  fillSummaryModelSelect(Array.isArray(s.summaryCustomModelsCache) ? s.summaryCustomModelsCache : [], String(s.summaryCustomModel || ''));
+  $('#sg_summaryCustomMaxTokens').val(s.summaryCustomMaxTokens || 2048);
+  $('#sg_summaryCustomStream').prop('checked', !!s.summaryCustomStream);
+  $('#sg_summaryToWorldInfo').prop('checked', !!s.summaryToWorldInfo);
+  $('#sg_summaryWorldInfoTarget').val(String(s.summaryWorldInfoTarget || 'chatbook'));
+  $('#sg_summaryWorldInfoFile').val(String(s.summaryWorldInfoFile || ''));
+  $('#sg_summaryWorldInfoCommentPrefix').val(String(s.summaryWorldInfoCommentPrefix || '剧情总结'));
+  $('#sg_summaryWorldInfoKeyMode').val(String(s.summaryWorldInfoKeyMode || 'keywords'));
+  $('#sg_summaryIndexPrefix').val(String(s.summaryIndexPrefix || 'A-'));
+  $('#sg_summaryIndexPad').val(s.summaryIndexPad ?? 3);
+  $('#sg_summaryIndexStart').val(s.summaryIndexStart ?? 1);
+  $('#sg_summaryIndexInComment').prop('checked', !!s.summaryIndexInComment);
+  $('#sg_summaryToBlueWorldInfo').prop('checked', !!s.summaryToBlueWorldInfo);
+  $('#sg_summaryBlueWorldInfoFile').val(String(s.summaryBlueWorldInfoFile || ''));
+  $('#sg_wiTriggerEnabled').prop('checked', !!s.wiTriggerEnabled);
+  $('#sg_wiTriggerLookbackMessages').val(s.wiTriggerLookbackMessages || 20);
+  $('#sg_wiTriggerIncludeUserMessage').prop('checked', !!s.wiTriggerIncludeUserMessage);
+  $('#sg_wiTriggerUserMessageWeight').val(s.wiTriggerUserMessageWeight ?? 1.6);
+  $('#sg_wiTriggerStartAfterAssistantMessages').val(s.wiTriggerStartAfterAssistantMessages || 0);
+  $('#sg_wiTriggerMaxEntries').val(s.wiTriggerMaxEntries || 4);
+  $('#sg_wiTriggerMinScore').val(s.wiTriggerMinScore ?? 0.08);
+  $('#sg_wiTriggerMaxKeywords').val(s.wiTriggerMaxKeywords || 24);
+  $('#sg_wiTriggerInjectStyle').val(String(s.wiTriggerInjectStyle || 'hidden'));
+  $('#sg_wiTriggerDebugLog').prop('checked', !!s.wiTriggerDebugLog);
+
+$('#sg_wiTriggerMatchMode').val(String(s.wiTriggerMatchMode || 'local'));
+$('#sg_wiIndexPrefilterTopK').val(s.wiIndexPrefilterTopK ?? 24);
+$('#sg_wiIndexProvider').val(String(s.wiIndexProvider || 'st'));
+$('#sg_wiIndexTemperature').val(s.wiIndexTemperature ?? 0.2);
+$('#sg_wiIndexSystemPrompt').val(String(s.wiIndexSystemPrompt || DEFAULT_INDEX_SYSTEM_PROMPT));
+$('#sg_wiIndexUserTemplate').val(String(s.wiIndexUserTemplate || DEFAULT_INDEX_USER_TEMPLATE));
+$('#sg_wiIndexCustomEndpoint').val(String(s.wiIndexCustomEndpoint || ''));
+$('#sg_wiIndexCustomApiKey').val(String(s.wiIndexCustomApiKey || ''));
+$('#sg_wiIndexCustomModel').val(String(s.wiIndexCustomModel || 'gpt-4o-mini'));
+$('#sg_wiIndexCustomMaxTokens').val(s.wiIndexCustomMaxTokens || 1024);
+$('#sg_wiIndexTopP').val(s.wiIndexTopP ?? 0.95);
+$('#sg_wiIndexCustomStream').prop('checked', !!s.wiIndexCustomStream);
+fillIndexModelSelect(Array.isArray(s.wiIndexCustomModelsCache) ? s.wiIndexCustomModelsCache : [], s.wiIndexCustomModel);
+
+const mm = String(s.wiTriggerMatchMode || 'local');
+$('#sg_index_llm_block').toggle(mm === 'llm');
+$('#sg_index_custom_block').toggle(mm === 'llm' && String(s.wiIndexProvider || 'st') === 'custom');
+
+  $('#sg_wiBlueIndexMode').val(String(s.wiBlueIndexMode || 'live'));
+  $('#sg_wiBlueIndexFile').val(String(s.wiBlueIndexFile || ''));
+  $('#sg_summaryMaxChars').val(s.summaryMaxCharsPerMessage || 4000);
+  $('#sg_summaryMaxTotalChars').val(s.summaryMaxTotalChars || 24000);
+
+  $('#sg_summary_custom_block').toggle(String(s.summaryProvider || 'st') === 'custom');
+  $('#sg_summaryWorldInfoFile').toggle(String(s.summaryWorldInfoTarget || 'chatbook') === 'file');
+  $('#sg_summaryBlueWorldInfoFile').toggle(!!s.summaryToBlueWorldInfo);
+  $('#sg_summaryIndexFormat').toggle(String(s.summaryWorldInfoKeyMode || 'keywords') === 'indexId');
+
+  updateBlueIndexInfoLabel();
+
+  updateSummaryInfoLabel();
+  renderSummaryPaneFromMeta();
+  renderWiTriggerLogs();
+
   updateButtonsEnabled();
+}
+
+function updateBlueIndexInfoLabel() {
+  const $info = $('#sg_blueIndexInfo');
+  if (!$info.length) return;
+  const s = ensureSettings();
+  const count = Array.isArray(s.summaryBlueIndex) ? s.summaryBlueIndex.length : 0;
+  const mode = String(s.wiBlueIndexMode || 'live');
+  if (mode === 'live') {
+    const file = pickBlueIndexFileName();
+    const ts = blueIndexLiveCache?.loadedAt ? new Date(Number(blueIndexLiveCache.loadedAt)).toLocaleTimeString() : '';
+    const err = String(blueIndexLiveCache?.lastError || '').trim();
+    const errShort = err ? err.replace(/\s+/g, ' ').slice(0, 60) + (err.length > 60 ? '…' : '') : '';
+    $info.text(`（蓝灯索引：${count} 条｜实时：${file || '未设置'}${ts ? `｜更新：${ts}` : ''}${errShort ? `｜读取失败：${errShort}` : ''}）`);
+  } else {
+    $info.text(`（蓝灯索引：${count} 条｜缓存）`);
+  }
+}
+
+// -------------------- wiTrigger logs (per chat meta) --------------------
+
+function formatTimeShort(ts) {
+  try {
+    const d = new Date(Number(ts) || Date.now());
+    return d.toLocaleTimeString();
+  } catch {
+    return '';
+  }
+}
+
+function renderWiTriggerLogs(metaOverride = null) {
+  const $box = $('#sg_wiLogs');
+  if (!$box.length) return;
+  const meta = metaOverride || getSummaryMeta();
+  const logs = Array.isArray(meta?.wiTriggerLogs) ? meta.wiTriggerLogs : [];
+  if (!logs.length) {
+    $box.html('<div class="sg-hint">(暂无)</div>');
+    return;
+  }
+
+  const shown = logs.slice(0, 30);
+  const html = shown.map((l) => {
+    const ts = formatTimeShort(l.ts);
+    const skipped = l.skipped === true;
+    const picked = Array.isArray(l.picked) ? l.picked : [];
+    const titles = picked.map(x => String(x?.title || '').trim()).filter(Boolean);
+    const titleShort = titles.length
+      ? (titles.slice(0, 4).join('；') + (titles.length > 4 ? '…' : ''))
+      : '（无命中条目）';
+    const user = String(l.userText || '').replace(/\s+/g, ' ').trim();
+    const userShort = user ? (user.slice(0, 120) + (user.length > 120 ? '…' : '')) : '';
+    const kws = Array.isArray(l.injectedKeywords) ? l.injectedKeywords : [];
+    const kwsShort = kws.length ? (kws.slice(0, 20).join('、') + (kws.length > 20 ? '…' : '')) : '';
+
+    if (skipped) {
+      const assistantFloors = Number(l.assistantFloors || 0);
+      const startAfter = Number(l.startAfter || 0);
+      const reasonKey = String(l.skippedReason || '').trim();
+      const reasonText = reasonKey === 'minAssistantFloors'
+        ? `AI 回复楼层不足（${assistantFloors}/${startAfter}）`
+        : (reasonKey || '跳过');
+      const detailsLines = [];
+      if (userShort) detailsLines.push(`<div><b>用户输入</b>：${escapeHtml(userShort)}</div>`);
+      detailsLines.push(`<div><b>未触发</b>：${escapeHtml(reasonText)}</div>`);
+      return `
+      <details>
+        <summary>${escapeHtml(`${ts}｜未触发：${reasonText}`)}</summary>
+        <div class="sg-log-body">${detailsLines.join('')}</div>
+      </details>
+    `;
+    }
+
+    const detailsLines = [];
+    if (userShort) detailsLines.push(`<div><b>用户输入</b>：${escapeHtml(userShort)}</div>`);
+    detailsLines.push(`<div><b>将触发绿灯条目</b>：${escapeHtml(titles.join('；') || '（无）')}</div>`);
+    detailsLines.push(`<div><b>注入触发词</b>：${escapeHtml(kwsShort || '（无）')}</div>`);
+    if (picked.length) {
+      const scored = picked.map(x => `${String(x.title || '').trim()}（${Number(x.score || 0).toFixed(2)}）`).join('；');
+      detailsLines.push(`<div class="sg-hint">相似度：${escapeHtml(scored)}</div>`);
+    }
+    return `
+      <details>
+        <summary>${escapeHtml(`${ts}｜命中${titles.length}条：${titleShort}`)}</summary>
+        <div class="sg-log-body">${detailsLines.join('')}</div>
+      </details>
+    `;
+  }).join('');
+
+  $box.html(html);
+}
+
+function appendWiTriggerLog(log) {
+  try {
+    const meta = getSummaryMeta();
+    const arr = Array.isArray(meta.wiTriggerLogs) ? meta.wiTriggerLogs : [];
+    arr.unshift(log);
+    meta.wiTriggerLogs = arr.slice(0, 50);
+    // 不 await：避免阻塞 MESSAGE_SENT
+    setSummaryMeta(meta).catch(() => void 0);
+    if ($('#sg_modal_backdrop').is(':visible')) renderWiTriggerLogs(meta);
+  } catch { /* ignore */ }
 }
 
 function updateWorldbookInfoLabel() {
@@ -2303,6 +5022,104 @@ function updateWorldbookInfoLabel() {
   } catch {
     $info.text('（世界书信息解析失败）');
   }
+}
+
+function formatSummaryMetaHint(meta) {
+  const last = Number(meta?.lastFloor || 0);
+  const count = Array.isArray(meta?.history) ? meta.history.length : 0;
+  if (!last && !count) return '（未生成）';
+  return `已生成 ${count} 次｜上次触发层：${last}`;
+}
+
+function updateSummaryInfoLabel() {
+  const $info = $('#sg_summaryInfo');
+  if (!$info.length) return;
+  try {
+    const meta = getSummaryMeta();
+    $info.text(formatSummaryMetaHint(meta));
+  } catch {
+    $info.text('（总结状态解析失败）');
+  }
+}
+
+
+function updateSummaryManualRangeHint(setDefaults = false) {
+  const $hint = $('#sg_summaryManualHint');
+  if (!$hint.length) return;
+
+  try {
+    const s = ensureSettings();
+    const ctx = SillyTavern.getContext();
+    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+    const mode = String(s.summaryCountMode || 'assistant');
+    const floorNow = computeFloorCount(chat, mode);
+    const every = clampInt(s.summaryEvery, 1, 200, 20);
+
+    // Optional: show how many entries would be generated when manual split is enabled.
+    const $from = $('#sg_summaryManualFrom');
+    const $to = $('#sg_summaryManualTo');
+    let extra = '';
+    if (s.summaryManualSplit) {
+      const fromVal0 = String($from.val() ?? '').trim();
+      const toVal0 = String($to.val() ?? '').trim();
+      const fromN = Number(fromVal0);
+      const toN = Number(toVal0);
+      if (Number.isFinite(fromN) && Number.isFinite(toN) && fromN > 0 && toN > 0 && floorNow > 0) {
+        const a = clampInt(fromN, 1, floorNow, 1);
+        const b = clampInt(toN, 1, floorNow, floorNow);
+        const len = Math.abs(b - a) + 1;
+        const pieces = Math.max(1, Math.ceil(len / every));
+        extra = `｜分段：${pieces} 条（每${every}层）`;
+      } else {
+        extra = `｜分段：每${every}层一条`;
+      }
+    }
+
+    $hint.text(`（可选范围：1-${floorNow || 0}${extra}）`);
+    if (!$from.length || !$to.length) return;
+
+    const fromVal = String($from.val() ?? '').trim();
+    const toVal = String($to.val() ?? '').trim();
+
+    if (setDefaults && floorNow > 0 && (!fromVal || !toVal)) {
+      const a = Math.max(1, floorNow - every + 1);
+      $from.val(a);
+      $to.val(floorNow);
+    }
+  } catch {
+    $hint.text('（可选范围：?）');
+  }
+}
+
+function renderSummaryPaneFromMeta() {
+  const $el = $('#sg_sum');
+  if (!$el.length) return;
+
+  const meta = getSummaryMeta();
+  const hist = Array.isArray(meta.history) ? meta.history : [];
+
+  if (!hist.length) {
+    lastSummary = null;
+    lastSummaryText = '';
+    $el.html('(尚未生成)');
+    updateButtonsEnabled();
+    return;
+  }
+
+  const last = hist[hist.length - 1];
+  lastSummary = last;
+  lastSummaryText = String(last?.summary || '');
+
+  const md = hist.slice(-12).reverse().map((h, idx) => {
+    const title = String(h.title || `${ensureSettings().summaryWorldInfoCommentPrefix || '剧情总结'} #${hist.length - idx}`);
+    const kws = Array.isArray(h.keywords) ? h.keywords : [];
+    const when = h.createdAt ? new Date(h.createdAt).toLocaleString() : '';
+    const range = h?.range ? `（${h.range.fromFloor}-${h.range.toFloor}）` : '';
+    return `### ${title} ${range}\n\n- 时间：${when}\n- 关键词：${kws.join('、') || '（无）'}\n\n${h.summary || ''}`;
+  }).join('\n\n---\n\n');
+
+  renderMarkdownInto($el, md);
+  updateButtonsEnabled();
 }
 
 
@@ -2347,12 +5164,70 @@ function pullUiToSettings() {
   s.worldbookMode = String($('#sg_worldbookMode').val() || 'active');
   s.worldbookMaxChars = clampInt($('#sg_worldbookMaxChars').val(), 500, 50000, s.worldbookMaxChars || 6000);
   s.worldbookWindowMessages = clampInt($('#sg_worldbookWindowMessages').val(), 5, 80, s.worldbookWindowMessages || 18);
+
+  // summary
+  s.summaryEnabled = $('#sg_summaryEnabled').is(':checked');
+  s.summaryEvery = clampInt($('#sg_summaryEvery').val(), 1, 200, s.summaryEvery || 20);
+  s.summaryManualSplit = $('#sg_summaryManualSplit').is(':checked');
+  s.summaryCountMode = String($('#sg_summaryCountMode').val() || 'assistant');
+  s.summaryProvider = String($('#sg_summaryProvider').val() || 'st');
+  s.summaryTemperature = clampFloat($('#sg_summaryTemperature').val(), 0, 2, s.summaryTemperature || 0.4);
+  s.summarySystemPrompt = String($('#sg_summarySystemPrompt').val() || '').trim() || DEFAULT_SUMMARY_SYSTEM_PROMPT;
+  s.summaryUserTemplate = String($('#sg_summaryUserTemplate').val() || '').trim() || DEFAULT_SUMMARY_USER_TEMPLATE;
+  s.summaryCustomEndpoint = String($('#sg_summaryCustomEndpoint').val() || '').trim();
+  s.summaryCustomApiKey = String($('#sg_summaryCustomApiKey').val() || '');
+  s.summaryCustomModel = String($('#sg_summaryCustomModel').val() || '').trim() || 'gpt-4o-mini';
+  s.summaryCustomMaxTokens = clampInt($('#sg_summaryCustomMaxTokens').val(), 128, 200000, s.summaryCustomMaxTokens || 2048);
+  s.summaryCustomStream = $('#sg_summaryCustomStream').is(':checked');
+  s.summaryToWorldInfo = $('#sg_summaryToWorldInfo').is(':checked');
+  s.summaryWorldInfoTarget = String($('#sg_summaryWorldInfoTarget').val() || 'chatbook');
+  s.summaryWorldInfoFile = String($('#sg_summaryWorldInfoFile').val() || '').trim();
+  s.summaryWorldInfoCommentPrefix = String($('#sg_summaryWorldInfoCommentPrefix').val() || '剧情总结').trim() || '剧情总结';
+  s.summaryWorldInfoKeyMode = String($('#sg_summaryWorldInfoKeyMode').val() || 'keywords');
+  s.summaryIndexPrefix = String($('#sg_summaryIndexPrefix').val() || 'A-').trim() || 'A-';
+  s.summaryIndexPad = clampInt($('#sg_summaryIndexPad').val(), 1, 12, s.summaryIndexPad ?? 3);
+  s.summaryIndexStart = clampInt($('#sg_summaryIndexStart').val(), 1, 1000000, s.summaryIndexStart ?? 1);
+  s.summaryIndexInComment = $('#sg_summaryIndexInComment').is(':checked');
+  s.summaryToBlueWorldInfo = $('#sg_summaryToBlueWorldInfo').is(':checked');
+  s.summaryBlueWorldInfoFile = String($('#sg_summaryBlueWorldInfoFile').val() || '').trim();
+
+  s.wiTriggerEnabled = $('#sg_wiTriggerEnabled').is(':checked');
+  s.wiTriggerLookbackMessages = clampInt($('#sg_wiTriggerLookbackMessages').val(), 5, 120, s.wiTriggerLookbackMessages || 20);
+  s.wiTriggerIncludeUserMessage = $('#sg_wiTriggerIncludeUserMessage').is(':checked');
+  s.wiTriggerUserMessageWeight = clampFloat($('#sg_wiTriggerUserMessageWeight').val(), 0, 10, s.wiTriggerUserMessageWeight ?? 1.6);
+  s.wiTriggerStartAfterAssistantMessages = clampInt($('#sg_wiTriggerStartAfterAssistantMessages').val(), 0, 200000, s.wiTriggerStartAfterAssistantMessages || 0);
+  s.wiTriggerMaxEntries = clampInt($('#sg_wiTriggerMaxEntries').val(), 1, 20, s.wiTriggerMaxEntries || 4);
+  s.wiTriggerMinScore = clampFloat($('#sg_wiTriggerMinScore').val(), 0, 1, (s.wiTriggerMinScore ?? 0.08));
+  s.wiTriggerMaxKeywords = clampInt($('#sg_wiTriggerMaxKeywords').val(), 1, 200, s.wiTriggerMaxKeywords || 24);
+  s.wiTriggerInjectStyle = String($('#sg_wiTriggerInjectStyle').val() || s.wiTriggerInjectStyle || 'hidden');
+  s.wiTriggerDebugLog = $('#sg_wiTriggerDebugLog').is(':checked');
+
+s.wiTriggerMatchMode = String($('#sg_wiTriggerMatchMode').val() || s.wiTriggerMatchMode || 'local');
+s.wiIndexPrefilterTopK = clampInt($('#sg_wiIndexPrefilterTopK').val(), 5, 80, s.wiIndexPrefilterTopK ?? 24);
+s.wiIndexProvider = String($('#sg_wiIndexProvider').val() || s.wiIndexProvider || 'st');
+s.wiIndexTemperature = clampFloat($('#sg_wiIndexTemperature').val(), 0, 2, s.wiIndexTemperature ?? 0.2);
+s.wiIndexSystemPrompt = String($('#sg_wiIndexSystemPrompt').val() || s.wiIndexSystemPrompt || DEFAULT_INDEX_SYSTEM_PROMPT);
+s.wiIndexUserTemplate = String($('#sg_wiIndexUserTemplate').val() || s.wiIndexUserTemplate || DEFAULT_INDEX_USER_TEMPLATE);
+s.wiIndexCustomEndpoint = String($('#sg_wiIndexCustomEndpoint').val() || s.wiIndexCustomEndpoint || '');
+s.wiIndexCustomApiKey = String($('#sg_wiIndexCustomApiKey').val() || s.wiIndexCustomApiKey || '');
+s.wiIndexCustomModel = String($('#sg_wiIndexCustomModel').val() || s.wiIndexCustomModel || 'gpt-4o-mini');
+s.wiIndexCustomMaxTokens = clampInt($('#sg_wiIndexCustomMaxTokens').val(), 128, 200000, s.wiIndexCustomMaxTokens || 1024);
+s.wiIndexTopP = clampFloat($('#sg_wiIndexTopP').val(), 0, 1, s.wiIndexTopP ?? 0.95);
+s.wiIndexCustomStream = $('#sg_wiIndexCustomStream').is(':checked');
+
+  s.wiBlueIndexMode = String($('#sg_wiBlueIndexMode').val() || s.wiBlueIndexMode || 'live');
+  s.wiBlueIndexFile = String($('#sg_wiBlueIndexFile').val() || '').trim();
+  s.summaryMaxCharsPerMessage = clampInt($('#sg_summaryMaxChars').val(), 200, 8000, s.summaryMaxCharsPerMessage || 4000);
+  s.summaryMaxTotalChars = clampInt($('#sg_summaryMaxTotalChars').val(), 2000, 80000, s.summaryMaxTotalChars || 24000);
 }
 
 function openModal() {
   ensureModal();
   pullSettingsToUi();
   updateWorldbookInfoLabel();
+  updateSummaryManualRangeHint(true);
+  // 打开面板时尝试刷新一次蓝灯索引（不阻塞 UI）
+  ensureBlueIndexLive(false).catch(() => void 0);
   setStatus('', '');
   $('#sg_modal_backdrop').show();
   showPane('md');
@@ -2367,7 +5242,7 @@ function injectMinimalSettingsPanel() {
   $root.append(`
     <div class="sg-panel-min" id="sg_settings_panel_min">
       <div class="sg-min-row">
-        <div class="sg-min-title">剧情指导 StoryGuide</div>
+        <div class="sg-min-title">剧情指导 StoryGuide <span class="sg-sub">v${SG_VERSION}</span></div>
         <button class="menu_button sg-btn" id="sg_open_from_settings">打开面板</button>
       </div>
       <div class="sg-min-hint">支持自定义输出模块（JSON），并且自动追加框会缓存+监听重渲染，尽量不被变量更新覆盖。</div>
@@ -2453,10 +5328,14 @@ function setupEventListeners() {
   eventSource.on(event_types.APP_READY, () => {
     startObservers();
 
+    // 预热蓝灯索引（实时读取模式下），尽量避免第一次发送消息时还没索引
+    ensureBlueIndexLive(true).catch(() => void 0);
+
     eventSource.on(event_types.CHAT_CHANGED, () => {
       inlineCache.clear();
       scheduleReapplyAll('chat_changed');
       ensureChatActionButtons();
+      ensureBlueIndexLive(true).catch(() => void 0);
       if (document.getElementById('sg_modal_backdrop') && $('#sg_modal_backdrop').is(':visible')) {
         pullSettingsToUi();
         setStatus('已切换聊天：已同步本聊天字段', 'ok');
@@ -2466,10 +5345,15 @@ function setupEventListeners() {
     eventSource.on(event_types.MESSAGE_RECEIVED, () => {
       // 禁止自动生成：不在收到消息时自动分析/追加
       scheduleReapplyAll('msg_received');
+      // 自动总结（独立功能）
+      scheduleAutoSummary('msg_received');
     });
 
     eventSource.on(event_types.MESSAGE_SENT, () => {
       // 禁止自动生成：不在发送消息时自动刷新面板
+      // 蓝灯索引 → 绿灯触发（尽量在生成前完成）
+      maybeInjectWorldInfoTriggers('msg_sent').catch(() => void 0);
+      scheduleAutoSummary('msg_sent');
     });
   });
 }
@@ -2497,6 +5381,7 @@ function init() {
     open: openModal,
     close: closeModal,
     runAnalysis,
+    runSummary,
     runInlineAppendForLastMessage,
     reapplyAllInlineBoxes,
     buildSnapshot: () => buildSnapshot(),
