@@ -48,12 +48,13 @@ const MODULE_NAME = 'storyguide';
  */
 
 const DEFAULT_MODULES = Object.freeze([
-  { key: 'world_summary', title: '世界简介', type: 'text', prompt: '1~3句概括世界与局势', required: true, panel: true, inline: true },
-  { key: 'key_plot_points', title: '重要剧情点', type: 'list', prompt: '3~8条关键剧情点（短句）', maxItems: 8, required: true, panel: true, inline: false },
+  { key: 'world_summary', title: '世界简介', type: 'text', prompt: '1~3句概括世界与局势', required: true, panel: true, inline: true, static: true },
+  { key: 'key_plot_points', title: '重要剧情点', type: 'list', prompt: '3~8条关键剧情点（短句）', maxItems: 8, required: true, panel: true, inline: false, static: true },
   { key: 'current_scene', title: '当前时间点 · 具体剧情', type: 'text', prompt: '描述当前发生了什么（地点/人物动机/冲突/悬念）', required: true, panel: true, inline: true },
   { key: 'next_events', title: '后续将会发生的事', type: 'list', prompt: '接下来最可能发生的事（条目）', maxItems: 6, required: true, panel: true, inline: true },
   { key: 'protagonist_impact', title: '主角行为造成的影响', type: 'text', prompt: '主角行为对剧情/关系/风险造成的改变', required: true, panel: true, inline: false },
   { key: 'tips', title: '给主角的提示（基于原著后续/大纲）', type: 'list', prompt: '给出可执行提示（尽量具体）', maxItems: 4, required: true, panel: true, inline: true },
+  { key: 'quick_actions', title: '快捷选项', type: 'list', prompt: '根据当前剧情走向，给出4~6个玩家可以发送的具体行动选项（每项15~40字，可直接作为对话输入发送）', maxItems: 6, required: true, panel: true, inline: true },
 ]);
 
 // ===== 总结提示词默认值（可在面板中自定义） =====
@@ -177,28 +178,28 @@ const DEFAULT_SETTINGS = Object.freeze({
   // —— 蓝灯索引 → 绿灯触发 ——
   wiTriggerEnabled: false,
 
-// 匹配方式：local=本地相似度；llm=LLM 综合判断（可自定义提示词 & 独立 API）
-wiTriggerMatchMode: 'local',
+  // 匹配方式：local=本地相似度；llm=LLM 综合判断（可自定义提示词 & 独立 API）
+  wiTriggerMatchMode: 'local',
 
-// —— 索引 LLM（独立于总结 API 的第二套配置）——
-wiIndexProvider: 'st',         // st | custom
-wiIndexTemperature: 0.2,
-wiIndexTopP: 0.95,
-wiIndexSystemPrompt: DEFAULT_INDEX_SYSTEM_PROMPT,
-wiIndexUserTemplate: DEFAULT_INDEX_USER_TEMPLATE,
+  // —— 索引 LLM（独立于总结 API 的第二套配置）——
+  wiIndexProvider: 'st',         // st | custom
+  wiIndexTemperature: 0.2,
+  wiIndexTopP: 0.95,
+  wiIndexSystemPrompt: DEFAULT_INDEX_SYSTEM_PROMPT,
+  wiIndexUserTemplate: DEFAULT_INDEX_USER_TEMPLATE,
 
-// LLM 模式：先用本地相似度预筛选 TopK，再交给模型综合判断（更省 tokens）
-wiIndexPrefilterTopK: 24,
-// 每条候选摘要截断字符（控制 tokens）
-wiIndexCandidateMaxChars: 420,
+  // LLM 模式：先用本地相似度预筛选 TopK，再交给模型综合判断（更省 tokens）
+  wiIndexPrefilterTopK: 24,
+  // 每条候选摘要截断字符（控制 tokens）
+  wiIndexCandidateMaxChars: 420,
 
-// 索引独立 OpenAI 兼容 API
-wiIndexCustomEndpoint: '',
-wiIndexCustomApiKey: '',
-wiIndexCustomModel: 'gpt-4o-mini',
-wiIndexCustomModelsCache: [],
-wiIndexCustomMaxTokens: 1024,
-wiIndexCustomStream: false,
+  // 索引独立 OpenAI 兼容 API
+  wiIndexCustomEndpoint: '',
+  wiIndexCustomApiKey: '',
+  wiIndexCustomModel: 'gpt-4o-mini',
+  wiIndexCustomModelsCache: [],
+  wiIndexCustomMaxTokens: 1024,
+  wiIndexCustomStream: false,
 
   // 在用户发送消息前（MESSAGE_SENT）读取“最近 N 条消息正文”（不含当前条），从蓝灯索引里挑相关条目。
   wiTriggerLookbackMessages: 20,
@@ -238,12 +239,24 @@ wiIndexCustomStream: false,
   // 额外可自定义提示词“骨架”
   customSystemPreamble: '',     // 附加在默认 system 之后
   customConstraints: '',        // 附加在默认 constraints 之后
+
+  // ===== 快捷选项功能 =====
+  quickOptionsEnabled: true,
+  quickOptionsShowIn: 'inline', // inline | panel | both
+  // 预设默认选项（JSON 字符串）: [{label, prompt}]
+  quickOptionsJson: JSON.stringify([
+    { label: '继续', prompt: '继续当前剧情发展' },
+    { label: '详述', prompt: '请更详细地描述当前场景' },
+    { label: '对话', prompt: '让角色之间展开更多对话' },
+    { label: '行动', prompt: '描述接下来的具体行动' },
+  ], null, 2),
 });
 
 const META_KEYS = Object.freeze({
   canon: 'storyguide_canon_outline',
   world: 'storyguide_world_setup',
   summaryMeta: 'storyguide_summary_meta',
+  staticModulesCache: 'storyguide_static_modules_cache',
 });
 
 let lastReport = null;
@@ -368,6 +381,133 @@ function safeJsonParse(maybeJson) {
   try { return JSON.parse(t); } catch { return null; }
 }
 
+// ===== 快捷选项功能 =====
+
+function getQuickOptions() {
+  const s = ensureSettings();
+  if (!s.quickOptionsEnabled) return [];
+
+  const raw = String(s.quickOptionsJson || '').trim();
+  if (!raw) return [];
+
+  try {
+    let arr = JSON.parse(raw);
+    // 支持 [[label, prompt], ...] 和 [{label, prompt}, ...] 两种格式
+    if (!Array.isArray(arr)) return [];
+    return arr.map((item, i) => {
+      if (Array.isArray(item)) {
+        return { label: String(item[0] || `选项${i + 1}`), prompt: String(item[1] || '') };
+      }
+      if (item && typeof item === 'object') {
+        return { label: String(item.label || `选项${i + 1}`), prompt: String(item.prompt || '') };
+      }
+      return null;
+    }).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function injectToUserInput(text) {
+  // 尝试多种可能的输入框选择器
+  const selectors = ['#send_textarea', 'textarea#send_textarea', '.send_textarea', 'textarea.send_textarea'];
+  let textarea = null;
+
+  for (const sel of selectors) {
+    textarea = document.querySelector(sel);
+    if (textarea) break;
+  }
+
+  if (!textarea) {
+    console.warn('[StoryGuide] 未找到聊天输入框');
+    return false;
+  }
+
+  // 设置文本值
+  textarea.value = String(text || '');
+
+  // 触发 input 事件以通知 SillyTavern
+  textarea.dispatchEvent(new Event('input', { bubbles: true }));
+
+  // 聚焦输入框
+  textarea.focus();
+
+  // 将光标移到末尾
+  if (textarea.setSelectionRange) {
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+  }
+
+  return true;
+}
+
+function renderQuickOptionsHtml(context = 'inline') {
+  const s = ensureSettings();
+  if (!s.quickOptionsEnabled) return '';
+
+  const showIn = String(s.quickOptionsShowIn || 'inline');
+  // 检查当前上下文是否应该显示
+  if (showIn !== 'both' && showIn !== context) return '';
+
+  const options = getQuickOptions();
+  if (!options.length) return '';
+
+  const buttons = options.map((opt, i) => {
+    const label = escapeHtml(opt.label || `选项${i + 1}`);
+    const prompt = escapeHtml(opt.prompt || '');
+    return `<button class="sg-quick-option" data-sg-prompt="${prompt}" title="${prompt}">${label}</button>`;
+  }).join('');
+
+  return `<div class="sg-quick-options">${buttons}</div>`;
+}
+
+// 渲染AI生成的动态快捷选项（从分析结果的quick_actions数组生成按钮，直接显示选项内容）
+function renderDynamicQuickActionsHtml(quickActions, context = 'inline') {
+  const s = ensureSettings();
+
+  // 如果没有动态选项，返回空
+  if (!Array.isArray(quickActions) || !quickActions.length) {
+    return '';
+  }
+
+  const buttons = quickActions.map((action, i) => {
+    const text = String(action || '').trim();
+    if (!text) return '';
+
+    // 移除可能的编号前缀如 "【1】" 或 "1."
+    const cleaned = text.replace(/^【\d+】\s*/, '').replace(/^\d+[\.\)\:：]\s*/, '').trim();
+    if (!cleaned) return '';
+
+    const escapedText = escapeHtml(cleaned);
+    // 按钮直接显示完整选项内容，点击后输入到聊天框
+    return `<button class="sg-quick-option sg-dynamic-option" data-sg-prompt="${escapedText}" title="点击输入到聊天框">${escapedText}</button>`;
+  }).filter(Boolean).join('');
+
+  if (!buttons) return '';
+
+  return `<div class="sg-quick-options sg-dynamic-options">
+    <div class="sg-quick-options-title">💡 快捷选项（点击输入）</div>
+    ${buttons}
+  </div>`;
+}
+
+function installQuickOptionsClickHandler() {
+  if (window.__storyguide_quick_options_installed) return;
+  window.__storyguide_quick_options_installed = true;
+
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.sg-quick-option');
+    if (!btn) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    const prompt = btn.dataset.sgPrompt || '';
+    if (prompt) {
+      injectToUserInput(prompt);
+    }
+  }, true);
+}
+
 function renderMarkdownToHtml(markdown) {
   const { showdown, DOMPurify } = SillyTavern.libs;
   const converter = new showdown.Converter({ simplifiedAutoLink: true, strikethrough: true, tables: true });
@@ -420,6 +560,64 @@ async function setSummaryMeta(meta) {
   await setChatMetaValue(META_KEYS.summaryMeta, JSON.stringify(meta ?? getDefaultSummaryMeta()));
 }
 
+// ===== 静态模块缓存（只在首次或手动刷新时生成的模块结果）=====
+function getStaticModulesCache() {
+  const raw = String(getChatMetaValue(META_KEYS.staticModulesCache) || '').trim();
+  if (!raw) return {};
+  try {
+    const data = JSON.parse(raw);
+    return (data && typeof data === 'object') ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+async function setStaticModulesCache(cache) {
+  await setChatMetaValue(META_KEYS.staticModulesCache, JSON.stringify(cache ?? {}));
+}
+
+// 合并静态模块缓存到分析结果中
+function mergeStaticModulesIntoResult(parsedJson, modules) {
+  const cache = getStaticModulesCache();
+  const result = { ...parsedJson };
+
+  for (const m of modules) {
+    if (m.static && cache[m.key] !== undefined) {
+      // 使用缓存值替代（如果AI此次没生成或我们跳过了生成）
+      if (result[m.key] === undefined || result[m.key] === null || result[m.key] === '') {
+        result[m.key] = cache[m.key];
+      }
+    }
+  }
+
+  return result;
+}
+
+// 更新静态模块缓存
+async function updateStaticModulesCache(parsedJson, modules) {
+  const cache = getStaticModulesCache();
+  let changed = false;
+
+  for (const m of modules) {
+    if (m.static && parsedJson[m.key] !== undefined && parsedJson[m.key] !== null && parsedJson[m.key] !== '') {
+      // 只在首次生成或值有变化时更新缓存
+      if (cache[m.key] === undefined || JSON.stringify(cache[m.key]) !== JSON.stringify(parsedJson[m.key])) {
+        cache[m.key] = parsedJson[m.key];
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    await setStaticModulesCache(cache);
+  }
+}
+
+// 清除静态模块缓存（手动刷新时使用）
+async function clearStaticModulesCache() {
+  await setStaticModulesCache({});
+}
+
 function setStatus(text, kind = '') {
   const $s = $('#sg_status');
   $s.removeClass('ok err warn').addClass(kind || '');
@@ -466,10 +664,11 @@ function validateAndNormalizeModules(raw) {
     const required = m.required !== false; // default true
     const panel = m.panel !== false;       // default true
     const inline = m.inline === true;      // default false unless explicitly true
+    const isStatic = m.static === true;    // default false: 静态模块只在首次或手动刷新时生成
 
     const maxItems = (type === 'list' && Number.isFinite(Number(m.maxItems))) ? clampInt(m.maxItems, 1, 50, 8) : undefined;
 
-    normalized.push({ key, title, type, prompt, required, panel, inline, ...(maxItems ? { maxItems } : {}) });
+    normalized.push({ key, title, type, prompt, required, panel, inline, static: isStatic, ...(maxItems ? { maxItems } : {}) });
   }
 
   if (!normalized.length) return { ok: false, error: '模块配置为空：至少需要 1 个模块。', modules: null };
@@ -480,7 +679,7 @@ function validateAndNormalizeModules(raw) {
 
 // -------------------- presets & worldbook --------------------
 
-function downloadTextFile(filename, text, mime='application/json') {
+function downloadTextFile(filename, text, mime = 'application/json') {
   const blob = new Blob([text], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -905,7 +1104,7 @@ function computeWorldbookInjection() {
   let used = 0;
 
   for (const e of use) {
-    const head = `- 【${e.title}】${(e.keys && e.keys.length) ? `（触发：${e.keys.slice(0,6).join(' / ')}）` : ''}\n`;
+    const head = `- 【${e.title}】${(e.keys && e.keys.length) ? `（触发：${e.keys.slice(0, 6).join(' / ')}）` : ''}\n`;
     const body = e.content.trim() + '\n';
     const chunk = head + body + '\n';
     if ((acc.length + chunk.length) > maxChars) break;
@@ -2589,19 +2788,19 @@ async function maybeInjectWorldInfoTriggers(reason = 'msg_sent') {
   const minScore = clampFloat(s.wiTriggerMinScore, 0, 1, 0.08);
   const includeUser = !!s.wiTriggerIncludeUserMessage;
   const userWeight = clampFloat(s.wiTriggerUserMessageWeight, 0, 10, 1.6);
-const matchMode = String(s.wiTriggerMatchMode || 'local');
-let picked = [];
-if (matchMode === 'llm') {
-  try {
-    picked = await pickRelevantIndexEntriesLLM(recentText, lastText, candidates, maxEntries, includeUser, userWeight);
-  } catch (e) {
-    console.warn('[StoryGuide] index LLM failed; fallback to local similarity', e);
+  const matchMode = String(s.wiTriggerMatchMode || 'local');
+  let picked = [];
+  if (matchMode === 'llm') {
+    try {
+      picked = await pickRelevantIndexEntriesLLM(recentText, lastText, candidates, maxEntries, includeUser, userWeight);
+    } catch (e) {
+      console.warn('[StoryGuide] index LLM failed; fallback to local similarity', e);
+      picked = pickRelevantIndexEntries(recentText, lastText, candidates, maxEntries, minScore, includeUser, userWeight);
+    }
+  } else {
     picked = pickRelevantIndexEntries(recentText, lastText, candidates, maxEntries, minScore, includeUser, userWeight);
   }
-} else {
-  picked = pickRelevantIndexEntries(recentText, lastText, candidates, maxEntries, minScore, includeUser, userWeight);
-}
-if (!picked.length) return;
+  if (!picked.length) return;
 
   const maxKeywords = clampInt(s.wiTriggerMaxKeywords, 1, 200, 24);
   const kwSet = new Set();
@@ -2655,7 +2854,7 @@ if (!picked.length) return;
   // debug status (only when pane open or explicitly enabled)
   const modalOpen = $('#sg_modal_backdrop').is(':visible');
   if (modalOpen || s.wiTriggerDebugLog) {
-    setStatus(`已注入触发词：${keywords.slice(0, 12).join('、')}${keywords.length > 12 ? '…' : ''}${s.wiTriggerDebugLog ? `｜命中：${pickedTitles.join('；')}` : `｜将触发：${pickedNames.slice(0,4).join('；')}${pickedNames.length>4?'…':''}`}`, 'ok');
+    setStatus(`已注入触发词：${keywords.slice(0, 12).join('、')}${keywords.length > 12 ? '…' : ''}${s.wiTriggerDebugLog ? `｜命中：${pickedTitles.join('；')}` : `｜将触发：${pickedNames.slice(0, 4).join('；')}${pickedNames.length > 4 ? '…' : ''}`}`, 'ok');
   }
 }
 
@@ -2686,6 +2885,9 @@ function buildInlineMarkdownFromModules(parsedJson, modules, mode, showEmpty) {
   lines.push(`**剧情指导**`);
 
   for (const m of modules) {
+    // quick_actions 模块不在 Markdown 中渲染，而是单独渲染为可点击按钮
+    if (m.key === 'quick_actions') continue;
+
     const hasKey = parsedJson && Object.hasOwn(parsedJson, m.key);
     const val = hasKey ? parsedJson[m.key] : undefined;
     const title = m.title || m.key;
@@ -2766,32 +2968,52 @@ function setCollapsed(boxEl, collapsed) {
   boxEl.classList.toggle('collapsed', !!collapsed);
 }
 
+
 function attachToggleHandler(boxEl, mesKey) {
   if (!boxEl) return;
-  const head = boxEl.querySelector('.sg-inline-head');
-  if (!head) return;
-  if (head.dataset.sgBound === '1') return;
-  head.dataset.sgBound = '1';
 
-  head.addEventListener('click', (e) => {
-    if (e.target && (e.target.closest('a'))) return;
+  const bind = (el, isFooter = false) => {
+    if (!el) return;
+    const flag = isFooter ? 'sgBoundFoot' : 'sgBound';
+    if (el.dataset[flag] === '1') return;
+    el.dataset[flag] = '1';
 
-    const cur = boxEl.classList.contains('collapsed');
-    const next = !cur;
-    setCollapsed(boxEl, next);
+    el.addEventListener('click', (e) => {
+      if (e.target && (e.target.closest('a'))) return;
 
-    const cached = inlineCache.get(String(mesKey));
-    if (cached) {
-      cached.collapsed = next;
-      inlineCache.set(String(mesKey), cached);
-    }
-  });
+      const cur = boxEl.classList.contains('collapsed');
+      const next = !cur;
+      setCollapsed(boxEl, next);
+
+      const cached = inlineCache.get(String(mesKey));
+      if (cached) {
+        cached.collapsed = next;
+        inlineCache.set(String(mesKey), cached);
+      }
+
+      // Footer button: collapse then scroll back to the message正文
+      if (isFooter && next) {
+        const mesEl = boxEl.closest('.mes');
+        (mesEl || boxEl).scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    });
+  };
+
+  bind(boxEl.querySelector('.sg-inline-head'), false);
+  bind(boxEl.querySelector('.sg-inline-foot'), true);
 }
 
-function createInlineBoxElement(mesKey, htmlInner, collapsed) {
+
+function createInlineBoxElement(mesKey, htmlInner, collapsed, quickActions) {
   const box = document.createElement('div');
   box.className = 'sg-inline-box';
   box.dataset.sgMesKey = String(mesKey);
+
+  // 只渲染AI生成的动态选项（不再使用静态配置的选项）
+  let quickOptionsHtml = '';
+  if (Array.isArray(quickActions) && quickActions.length) {
+    quickOptionsHtml = renderDynamicQuickActionsHtml(quickActions, 'inline');
+  }
 
   box.innerHTML = `
     <div class="sg-inline-head" title="点击折叠/展开（不会自动生成）">
@@ -2801,7 +3023,12 @@ function createInlineBoxElement(mesKey, htmlInner, collapsed) {
       <span class="sg-inline-chevron">▾</span>
     </div>
     <div class="sg-inline-body">${htmlInner}</div>
-  `.trim();
+    ${quickOptionsHtml}
+    <div class="sg-inline-foot" title="点击折叠并回到正文">
+      <span class="sg-inline-foot-icon">▴</span>
+      <span class="sg-inline-foot-text">收起并回到正文</span>
+      <span class="sg-inline-foot-icon">▴</span>
+    </div>`.trim();
 
   setCollapsed(box, !!collapsed);
   attachToggleHandler(box, mesKey);
@@ -2809,32 +3036,48 @@ function createInlineBoxElement(mesKey, htmlInner, collapsed) {
 }
 
 
+
 function attachPanelToggleHandler(boxEl, mesKey) {
   if (!boxEl) return;
-  const head = boxEl.querySelector('.sg-panel-head');
-  if (!head) return;
-  if (head.dataset.sgBound === '1') return;
-  head.dataset.sgBound = '1';
 
-  head.addEventListener('click', (e) => {
-    if (e.target && (e.target.closest('a'))) return;
+  const bind = (el, isFooter = false) => {
+    if (!el) return;
+    const flag = isFooter ? 'sgBoundFoot' : 'sgBound';
+    if (el.dataset[flag] === '1') return;
+    el.dataset[flag] = '1';
 
-    const cur = boxEl.classList.contains('collapsed');
-    const next = !cur;
-    setCollapsed(boxEl, next);
+    el.addEventListener('click', (e) => {
+      if (e.target && (e.target.closest('a'))) return;
 
-    const cached = panelCache.get(String(mesKey));
-    if (cached) {
-      cached.collapsed = next;
-      panelCache.set(String(mesKey), cached);
-    }
-  });
+      const cur = boxEl.classList.contains('collapsed');
+      const next = !cur;
+      setCollapsed(boxEl, next);
+
+      const cached = panelCache.get(String(mesKey));
+      if (cached) {
+        cached.collapsed = next;
+        panelCache.set(String(mesKey), cached);
+      }
+
+      if (isFooter && next) {
+        const mesEl = boxEl.closest('.mes');
+        (mesEl || boxEl).scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    });
+  };
+
+  bind(boxEl.querySelector('.sg-panel-head'), false);
+  bind(boxEl.querySelector('.sg-panel-foot'), true);
 }
+
 
 function createPanelBoxElement(mesKey, htmlInner, collapsed) {
   const box = document.createElement('div');
   box.className = 'sg-panel-box';
   box.dataset.sgMesKey = String(mesKey);
+
+  // panel 模式暂不显示快捷选项（只在 inline 模式显示）
+  const quickOptionsHtml = '';
 
   box.innerHTML = `
     <div class="sg-panel-head" title="点击折叠/展开（面板分析结果）">
@@ -2844,7 +3087,12 @@ function createPanelBoxElement(mesKey, htmlInner, collapsed) {
       <span class="sg-inline-chevron">▾</span>
     </div>
     <div class="sg-panel-body">${htmlInner}</div>
-  `.trim();
+    ${quickOptionsHtml}
+    <div class="sg-panel-foot" title="点击折叠并回到正文">
+      <span class="sg-inline-foot-icon">▴</span>
+      <span class="sg-inline-foot-text">收起并回到正文</span>
+      <span class="sg-inline-foot-icon">▴</span>
+    </div>`.trim();
 
   setCollapsed(box, !!collapsed);
   attachPanelToggleHandler(box, mesKey);
@@ -2922,10 +3170,16 @@ function ensureInlineBoxPresent(mesKey) {
     // 更新 body（有时候被覆盖成空壳）
     const body = existing.querySelector('.sg-inline-body');
     if (body && cached.htmlInner && body.innerHTML !== cached.htmlInner) body.innerHTML = cached.htmlInner;
+    // 更新动态选项（如果有变化）
+    const optionsContainer = existing.querySelector('.sg-dynamic-options');
+    if (!optionsContainer && Array.isArray(cached.quickActions) && cached.quickActions.length) {
+      const newOptionsHtml = renderDynamicQuickActionsHtml(cached.quickActions, 'inline');
+      existing.querySelector('.sg-inline-body')?.insertAdjacentHTML('afterend', newOptionsHtml);
+    }
     return true;
   }
 
-  const box = createInlineBoxElement(mesKey, cached.htmlInner, cached.collapsed);
+  const box = createInlineBoxElement(mesKey, cached.htmlInner, cached.collapsed, cached.quickActions);
   textEl.appendChild(box);
   return true;
 }
@@ -3023,10 +3277,19 @@ async function runInlineAppendForLastMessage(opts = {}) {
       return;
     }
 
-    const md = buildInlineMarkdownFromModules(parsed, modules, s.appendMode, !!s.inlineShowEmpty);
+    // 合并静态模块缓存（使用之前缓存的静态模块值）
+    const mergedParsed = mergeStaticModulesIntoResult(parsed, modules);
+
+    // 更新静态模块缓存（首次生成的静态模块会被缓存）
+    updateStaticModulesCache(mergedParsed, modules).catch(() => void 0);
+
+    const md = buildInlineMarkdownFromModules(mergedParsed, modules, s.appendMode, !!s.inlineShowEmpty);
     const htmlInner = renderMarkdownToHtml(md);
 
-    inlineCache.set(String(mesKey), { htmlInner, collapsed: false, createdAt: Date.now() });
+    // 提取 quick_actions 用于动态渲染可点击按钮
+    const quickActions = Array.isArray(mergedParsed.quick_actions) ? mergedParsed.quick_actions : [];
+
+    inlineCache.set(String(mesKey), { htmlInner, collapsed: false, createdAt: Date.now(), quickActions });
 
     requestAnimationFrame(() => { ensureInlineBoxPresent(mesKey); });
 
@@ -3137,7 +3400,7 @@ async function refreshSummaryModels() {
     let ids = [];
     if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
 
-    ids = Array.from(new Set(ids)).sort((a,b) => String(a).localeCompare(String(b)));
+    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
 
     if (!ids.length) {
       setStatus('刷新成功，但未解析到模型列表（返回格式不兼容）', 'warn');
@@ -3182,7 +3445,7 @@ async function refreshSummaryModels() {
     let ids = [];
     if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
 
-    ids = Array.from(new Set(ids)).sort((a,b) => String(a).localeCompare(String(b)));
+    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
 
     if (!ids.length) { setStatus('直连刷新失败：未解析到模型列表', 'warn'); return; }
 
@@ -3235,7 +3498,7 @@ async function refreshIndexModels() {
     let ids = [];
     if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
 
-    ids = Array.from(new Set(ids)).sort((a,b) => String(a).localeCompare(String(b)));
+    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
 
     if (!ids.length) {
       setStatus('刷新成功，但未解析到模型列表（返回格式不兼容）', 'warn');
@@ -3279,7 +3542,7 @@ async function refreshIndexModels() {
     let ids = [];
     if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
 
-    ids = Array.from(new Set(ids)).sort((a,b) => String(a).localeCompare(String(b)));
+    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
 
     if (!ids.length) { setStatus('直连刷新失败：未解析到模型列表', 'warn'); return; }
 
@@ -3334,7 +3597,7 @@ async function refreshModels() {
     let ids = [];
     if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
 
-    ids = Array.from(new Set(ids)).sort((a,b) => String(a).localeCompare(String(b)));
+    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
 
     if (!ids.length) {
       setStatus('刷新成功，但未解析到模型列表（返回格式不兼容）', 'warn');
@@ -3379,7 +3642,7 @@ async function refreshModels() {
     let ids = [];
     if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
 
-    ids = Array.from(new Set(ids)).sort((a,b) => String(a).localeCompare(String(b)));
+    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
 
     if (!ids.length) { setStatus('直连刷新失败：未解析到模型列表', 'warn'); return; }
 
@@ -3490,6 +3753,37 @@ function clearPinnedChatPos() {
   } catch { /* ignore */ }
 }
 
+const SG_FLOATING_POS_KEY = 'storyguide_floating_panel_pos_v1';
+let sgFloatingPinnedLoaded = false;
+let sgFloatingPinnedPos = null;
+
+function loadFloatingPanelPos() {
+  if (sgFloatingPinnedLoaded) return;
+  sgFloatingPinnedLoaded = true;
+  try {
+    const raw = localStorage.getItem(SG_FLOATING_POS_KEY);
+    if (!raw) return;
+    const j = JSON.parse(raw);
+    if (j && typeof j.left === 'number' && typeof j.top === 'number') {
+      sgFloatingPinnedPos = { left: j.left, top: j.top };
+    }
+  } catch { /* ignore */ }
+}
+
+function saveFloatingPanelPos(left, top) {
+  try {
+    sgFloatingPinnedPos = { left: Number(left) || 0, top: Number(top) || 0 };
+    localStorage.setItem(SG_FLOATING_POS_KEY, JSON.stringify(sgFloatingPinnedPos));
+  } catch { /* ignore */ }
+}
+
+function clearFloatingPanelPos() {
+  try {
+    sgFloatingPinnedPos = null;
+    localStorage.removeItem(SG_FLOATING_POS_KEY);
+  } catch { /* ignore */ }
+}
+
 function clampToViewport(left, top, w, h) {
   const pad = 8;
   const L = Math.max(pad, Math.min(left, window.innerWidth - w - pad));
@@ -3551,148 +3845,17 @@ function schedulePositionChatButtons() {
   if (sgChatPosTimer) return;
   sgChatPosTimer = setTimeout(() => {
     sgChatPosTimer = null;
-    try { positionChatActionButtons(); } catch {}
+    try { positionChatActionButtons(); } catch { }
   }, 60);
 }
+
+// Removed: ensureChatActionButtons feature (Generate/Reroll buttons near input)
 function ensureChatActionButtons() {
-  if (document.getElementById('sg_chat_controls')) {
-    schedulePositionChatButtons();
-    return;
-  }
-
-  const sendAnchor = findChatInputAnchor();
-  if (!sendAnchor) return;
-
-  const wrap = document.createElement('div');
-  wrap.id = 'sg_chat_controls';
-
-  // draggable handle (drag to pin position; double click to reset)
-  const handle = document.createElement('div');
-  handle.className = 'sg-chat-drag-handle';
-  handle.title = '拖动按钮位置（双击复位为自动贴边）';
-  handle.textContent = '⋮⋮';
-  wrap.className = 'sg-chat-controls';
-
-  const gen = document.createElement('button');
-  gen.type = 'button';
-  gen.id = 'sg_chat_generate';
-  gen.className = 'menu_button sg-chat-btn';
-  gen.title = '手动生成剧情指导分析框（不会自动生成）';
-  gen.innerHTML = '📘 <span class="sg-chat-label">生成</span>';
-
-  const reroll = document.createElement('button');
-  reroll.type = 'button';
-  reroll.id = 'sg_chat_reroll';
-  reroll.className = 'menu_button sg-chat-btn';
-  reroll.title = '重Roll：重新生成剧情指导分析框';
-  reroll.innerHTML = '🎲 <span class="sg-chat-label">重Roll</span>';
-
-  const setBusy = (busy) => {
-    gen.disabled = busy;
-    reroll.disabled = busy;
-    wrap.classList.toggle('is-busy', !!busy);
-  };
-
-  gen.addEventListener('click', async () => {
-    try {
-      setBusy(true);
-      await runInlineAppendForLastMessage({ allowWhenDisabled: true, force: false });
-    } catch (e) {
-      console.warn('[StoryGuide] generate failed', e);
-    } finally {
-      setBusy(false);
-      schedulePositionChatButtons();
-    }
-  });
-
-  reroll.addEventListener('click', async () => {
-    try {
-      setBusy(true);
-      await runInlineAppendForLastMessage({ allowWhenDisabled: true, force: true });
-    } catch (e) {
-      console.warn('[StoryGuide] reroll failed', e);
-    } finally {
-      setBusy(false);
-      schedulePositionChatButtons();
-    }
-  });
-
-  wrap.appendChild(handle);
-
-  wrap.appendChild(gen);
-  wrap.appendChild(reroll);
-
-  // Use fixed positioning to avoid overlapping with send button / different themes.
-  
-  // drag to move (pin position)
-  let dragging = false;
-  let startX = 0, startY = 0, startLeft = 0, startTop = 0;
-  let moved = false;
-
-  const onMove = (ev) => {
-    if (!dragging) return;
-    const dx = ev.clientX - startX;
-    const dy = ev.clientY - startY;
-    if (!moved && (Math.abs(dx) + Math.abs(dy) > 4)) moved = true;
-
-    const { w, h } = measureWrap(wrap);
-    const clamped = clampToViewport(startLeft + dx, startTop + dy, w, h);
-    wrap.style.left = `${Math.round(clamped.left)}px`;
-    wrap.style.top = `${Math.round(clamped.top)}px`;
-  };
-
-  const onUp = (ev) => {
-    if (!dragging) return;
-    dragging = false;
-    wrap.classList.remove('is-dragging');
-    try { handle.releasePointerCapture(ev.pointerId); } catch {}
-    window.removeEventListener('pointermove', onMove, true);
-    window.removeEventListener('pointerup', onUp, true);
-    window.removeEventListener('pointercancel', onUp, true);
-
-    if (moved) {
-      const left = parseInt(wrap.style.left || '0', 10);
-      const top = parseInt(wrap.style.top || '0', 10);
-      savePinnedChatPos(left, top);
-    }
-  };
-
-  handle.addEventListener('pointerdown', (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
-    loadPinnedChatPos();
-    dragging = true;
-    moved = false;
-    wrap.classList.add('is-dragging');
-
-    const rect = wrap.getBoundingClientRect();
-    startX = ev.clientX;
-    startY = ev.clientY;
-    startLeft = rect.left;
-    startTop = rect.top;
-
-    try { handle.setPointerCapture(ev.pointerId); } catch {}
-    window.addEventListener('pointermove', onMove, true);
-    window.addEventListener('pointerup', onUp, true);
-    window.addEventListener('pointercancel', onUp, true);
-  });
-
-  handle.addEventListener('dblclick', (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
-    clearPinnedChatPos();
-    schedulePositionChatButtons();
-  });
-
-  document.body.appendChild(wrap);
-  loadPinnedChatPos();
-
-  // Keep it positioned correctly
-  window.addEventListener('resize', schedulePositionChatButtons, { passive: true });
-  window.addEventListener('scroll', schedulePositionChatButtons, { passive: true });
-
-  schedulePositionChatButtons();
+  // Feature disabled/removed as per user request.
+  const el = document.getElementById('sg_chat_controls');
+  if (el) el.remove();
 }
+
 
 // -------------------- card toggle (shrink/expand per module card) --------------------
 function clearLegacyZoomArtifacts() {
@@ -3705,7 +3868,6 @@ function clearLegacyZoomArtifacts() {
 }
 
 function installCardZoomDelegation() {
-  // keep old function name for compatibility, but behavior is now "click to shrink/expand"
   if (window.__storyguide_card_toggle_installed) return;
   window.__storyguide_card_toggle_installed = true;
 
@@ -3713,23 +3875,56 @@ function installCardZoomDelegation() {
 
   document.addEventListener('click', (e) => {
     const target = e.target;
-
     // don't hijack interactive elements
     if (target.closest('a, button, input, textarea, select, label')) return;
 
+    // Handle Title Click -> Collapse Section
+    // Target headers h1-h6 inside floating or inline body
+    // We strictly look for headers that are direct children or wrapped in simple divs of the body
+    const header = target.closest('.sg-floating-body h1, .sg-floating-body h2, .sg-floating-body h3, .sg-floating-body h4, .sg-floating-body h5, .sg-floating-body h6, .sg-inline-body h1, .sg-inline-body h2, .sg-inline-body h3, .sg-inline-body h4, .sg-inline-body h5, .sg-inline-body h6');
+
+    if (header) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Find the next sibling that is usually the content (ul, p, or div)
+      let next = header.nextElementSibling;
+      let handled = false;
+
+      // Toggle class on header for styling (arrow)
+      header.classList.toggle('sg-section-collapsed');
+
+      while (next) {
+        // Stop if we hit another header of same or higher level, or if end of container
+        const tag = next.tagName.toLowerCase();
+        if (/^h[1-6]$/.test(tag)) break;
+
+        // Toggle visibility
+        if (next.style.display === 'none') {
+          next.style.display = '';
+        } else {
+          next.style.display = 'none';
+        }
+
+        next = next.nextElementSibling;
+        handled = true;
+      }
+      return;
+    }
+
+    // Fallback: If inline cards still need collapsing (optional, keeping for compatibility if user wants inline msg boxes to toggle)
     const card = target.closest('.sg-inline-body > ul > li');
-    if (!card) return;
+    if (card) {
+      // Check selection
+      try {
+        const sel = window.getSelection();
+        if (sel && String(sel).trim().length > 0) return;
+      } catch { /* ignore */ }
 
-    // if user is selecting text, don't toggle
-    try {
-      const sel = window.getSelection();
-      if (sel && String(sel).trim().length > 0) return;
-    } catch { /* ignore */ }
-
-    e.preventDefault();
-    e.stopPropagation();
-
-    card.classList.toggle('sg-collapsed');
+      e.preventDefault();
+      e.stopPropagation();
+      card.classList.toggle('sg-collapsed');
+    }
   }, true);
 }
 
@@ -3882,15 +4077,40 @@ function buildModalHtml() {
           </div>
 
           <div class="sg-card">
+            <div class="sg-card-title">快捷选项</div>
+            <div class="sg-hint">点击选项可自动将提示词输入到聊天框。可自定义选项内容。</div>
+
+            <div class="sg-row sg-inline">
+              <label class="sg-check"><input type="checkbox" id="sg_quickOptionsEnabled">启用快捷选项</label>
+              <select id="sg_quickOptionsShowIn">
+                <option value="inline">仅分析框</option>
+                <option value="panel">仅面板</option>
+                <option value="both">两者都显示</option>
+              </select>
+            </div>
+
+            <div class="sg-field" style="margin-top:10px;">
+              <label>选项配置（JSON，格式：[{label, prompt}, ...]）</label>
+              <textarea id="sg_quickOptionsJson" rows="6" spellcheck="false" placeholder='[{"label": "继续", "prompt": "继续当前剧情发展"}]'></textarea>
+              <div class="sg-actions-row">
+                <button class="menu_button sg-btn" id="sg_resetQuickOptions">恢复默认选项</button>
+                <button class="menu_button sg-btn" id="sg_applyQuickOptions">应用选项</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="sg-card">
             <div class="sg-card-title">输出模块（JSON，可自定义字段/提示词）</div>
             <div class="sg-hint">你可以增删模块、改 key/title/type/prompt、控制 panel/inline。保存前可点“校验”。</div>
 
             <div class="sg-field">
               <textarea id="sg_modulesJson" rows="12" spellcheck="false"></textarea>
+              <div class="sg-hint" style="margin-top:4px;">💡 模块可添加 <code>static: true</code> 表示静态模块（只在首次生成或手动刷新时更新）</div>
               <div class="sg-actions-row">
                 <button class="menu_button sg-btn" id="sg_validateModules">校验</button>
                 <button class="menu_button sg-btn" id="sg_resetModules">恢复默认</button>
                 <button class="menu_button sg-btn" id="sg_applyModules">应用到设置</button>
+                <button class="menu_button sg-btn" id="sg_clearStaticCache">刷新静态模块</button>
               </div>
             </div>
 
@@ -4384,31 +4604,31 @@ function ensureModal() {
   });
 
 
-// wiTrigger match mode toggle
-$('#sg_wiTriggerMatchMode').on('change', () => {
-  const m = String($('#sg_wiTriggerMatchMode').val() || 'local');
-  $('#sg_index_llm_block').toggle(m === 'llm');
-  const p = String($('#sg_wiIndexProvider').val() || 'st');
-  $('#sg_index_custom_block').toggle(m === 'llm' && p === 'custom');
-  pullUiToSettings(); saveSettings();
-});
+  // wiTrigger match mode toggle
+  $('#sg_wiTriggerMatchMode').on('change', () => {
+    const m = String($('#sg_wiTriggerMatchMode').val() || 'local');
+    $('#sg_index_llm_block').toggle(m === 'llm');
+    const p = String($('#sg_wiIndexProvider').val() || 'st');
+    $('#sg_index_custom_block').toggle(m === 'llm' && p === 'custom');
+    pullUiToSettings(); saveSettings();
+  });
 
-// index provider toggle (only meaningful under LLM mode)
-$('#sg_wiIndexProvider').on('change', () => {
-  const m = String($('#sg_wiTriggerMatchMode').val() || 'local');
-  const p = String($('#sg_wiIndexProvider').val() || 'st');
-  $('#sg_index_custom_block').toggle(m === 'llm' && p === 'custom');
-  pullUiToSettings(); saveSettings();
-});
+  // index provider toggle (only meaningful under LLM mode)
+  $('#sg_wiIndexProvider').on('change', () => {
+    const m = String($('#sg_wiTriggerMatchMode').val() || 'local');
+    const p = String($('#sg_wiIndexProvider').val() || 'st');
+    $('#sg_index_custom_block').toggle(m === 'llm' && p === 'custom');
+    pullUiToSettings(); saveSettings();
+  });
 
-// index prompt reset
-$('#sg_wiIndexResetPrompt').on('click', () => {
-  $('#sg_wiIndexSystemPrompt').val(DEFAULT_INDEX_SYSTEM_PROMPT);
-  $('#sg_wiIndexUserTemplate').val(DEFAULT_INDEX_USER_TEMPLATE);
-  pullUiToSettings();
-  saveSettings();
-  setStatus('已恢复默认索引提示词 ✅', 'ok');
-});
+  // index prompt reset
+  $('#sg_wiIndexResetPrompt').on('click', () => {
+    $('#sg_wiIndexSystemPrompt').val(DEFAULT_INDEX_SYSTEM_PROMPT);
+    $('#sg_wiIndexUserTemplate').val(DEFAULT_INDEX_USER_TEMPLATE);
+    pullUiToSettings();
+    saveSettings();
+    setStatus('已恢复默认索引提示词 ✅', 'ok');
+  });
 
   $('#sg_summaryWorldInfoTarget').on('change', () => {
     const t = String($('#sg_summaryWorldInfoTarget').val() || 'chatbook');
@@ -4506,10 +4726,10 @@ $('#sg_wiIndexResetPrompt').on('click', () => {
   });
 
 
-$('#sg_refreshIndexModels').on('click', async () => {
-  pullUiToSettings(); saveSettings();
-  await refreshIndexModels();
-});
+  $('#sg_refreshIndexModels').on('click', async () => {
+    pullUiToSettings(); saveSettings();
+    await refreshIndexModels();
+  });
 
   $('#sg_modelSelect').on('change', () => {
     const id = String($('#sg_modelSelect').val() || '').trim();
@@ -4522,10 +4742,10 @@ $('#sg_refreshIndexModels').on('click', async () => {
   });
 
 
-$('#sg_wiIndexModelSelect').on('change', () => {
-  const id = String($('#sg_wiIndexModelSelect').val() || '').trim();
-  if (id) $('#sg_wiIndexCustomModel').val(id);
-});
+  $('#sg_wiIndexModelSelect').on('change', () => {
+    const id = String($('#sg_wiIndexModelSelect').val() || '').trim();
+    if (id) $('#sg_wiIndexCustomModel').val(id);
+  });
 
   // 蓝灯索引导入/清空
   $('#sg_refreshBlueIndexLive').on('click', async () => {
@@ -4592,7 +4812,7 @@ $('#sg_wiIndexModelSelect').on('change', () => {
     }
   });
 
-  
+
   // presets actions
   $('#sg_exportPreset').on('click', () => {
     try {
@@ -4690,7 +4910,7 @@ $('#sg_wiIndexModelSelect').on('change', () => {
     updateWorldbookInfoLabel();
   });
 
-// modules json actions
+  // modules json actions
   $('#sg_validateModules').on('click', () => {
     const txt = String($('#sg_modulesJson').val() || '').trim();
     let parsed = null;
@@ -4727,6 +4947,49 @@ $('#sg_wiIndexModelSelect').on('change', () => {
     $('#sg_modulesJson').val(s.modulesJson);
     setStatus('模块已应用并保存 ✅（注意：追加框展示的模块由“追加框展示模块”控制）', 'ok');
   });
+
+  // 刷新静态模块缓存
+  $('#sg_clearStaticCache').on('click', async () => {
+    try {
+      await clearStaticModulesCache();
+      setStatus('已清除静态模块缓存 ✅ 下次分析会重新生成静态模块（如"世界简介"）', 'ok');
+    } catch (e) {
+      setStatus(`清除静态模块缓存失败：${e?.message ?? e}`, 'err');
+    }
+  });
+
+  // 快捷选项按钮事件
+  $('#sg_resetQuickOptions').on('click', () => {
+    const defaultOptions = JSON.stringify([
+      { label: '继续', prompt: '继续当前剧情发展' },
+      { label: '详述', prompt: '请更详细地描述当前场景' },
+      { label: '对话', prompt: '让角色之间展开更多对话' },
+      { label: '行动', prompt: '描述接下来的具体行动' },
+    ], null, 2);
+    $('#sg_quickOptionsJson').val(defaultOptions);
+    const s = ensureSettings();
+    s.quickOptionsJson = defaultOptions;
+    saveSettings();
+    setStatus('已恢复默认快捷选项 ✅', 'ok');
+  });
+
+  $('#sg_applyQuickOptions').on('click', () => {
+    const txt = String($('#sg_quickOptionsJson').val() || '').trim();
+    try {
+      const arr = JSON.parse(txt || '[]');
+      if (!Array.isArray(arr)) {
+        setStatus('快捷选项格式错误：必须是 JSON 数组', 'err');
+        return;
+      }
+      const s = ensureSettings();
+      s.quickOptionsJson = JSON.stringify(arr, null, 2);
+      saveSettings();
+      $('#sg_quickOptionsJson').val(s.quickOptionsJson);
+      setStatus('快捷选项已应用并保存 ✅', 'ok');
+    } catch (e) {
+      setStatus(`快捷选项 JSON 解析失败：${e?.message ?? e}`, 'err');
+    }
+  });
 }
 
 function showSettingsPage(page) {
@@ -4746,7 +5009,7 @@ function showSettingsPage(page) {
   }
 
   // 切页后回到顶部，避免“看不到设置项”
-  try { $('.sg-left').scrollTop(0); } catch {}
+  try { $('.sg-left').scrollTop(0); } catch { }
 }
 
 function setupSettingsPages() {
@@ -4805,6 +5068,11 @@ function pullSettingsToUi() {
   $('#sg_customSystemPreamble').val(String(s.customSystemPreamble || ''));
   $('#sg_customConstraints').val(String(s.customConstraints || ''));
 
+  // 快捷选项
+  $('#sg_quickOptionsEnabled').prop('checked', !!s.quickOptionsEnabled);
+  $('#sg_quickOptionsShowIn').val(String(s.quickOptionsShowIn || 'inline'));
+  $('#sg_quickOptionsJson').val(String(s.quickOptionsJson || '[]'));
+
   $('#sg_presetIncludeApiKey').prop('checked', !!s.presetIncludeApiKey);
 
   $('#sg_worldbookEnabled').prop('checked', !!s.worldbookEnabled);
@@ -4860,23 +5128,23 @@ function pullSettingsToUi() {
   $('#sg_wiTriggerInjectStyle').val(String(s.wiTriggerInjectStyle || 'hidden'));
   $('#sg_wiTriggerDebugLog').prop('checked', !!s.wiTriggerDebugLog);
 
-$('#sg_wiTriggerMatchMode').val(String(s.wiTriggerMatchMode || 'local'));
-$('#sg_wiIndexPrefilterTopK').val(s.wiIndexPrefilterTopK ?? 24);
-$('#sg_wiIndexProvider').val(String(s.wiIndexProvider || 'st'));
-$('#sg_wiIndexTemperature').val(s.wiIndexTemperature ?? 0.2);
-$('#sg_wiIndexSystemPrompt').val(String(s.wiIndexSystemPrompt || DEFAULT_INDEX_SYSTEM_PROMPT));
-$('#sg_wiIndexUserTemplate').val(String(s.wiIndexUserTemplate || DEFAULT_INDEX_USER_TEMPLATE));
-$('#sg_wiIndexCustomEndpoint').val(String(s.wiIndexCustomEndpoint || ''));
-$('#sg_wiIndexCustomApiKey').val(String(s.wiIndexCustomApiKey || ''));
-$('#sg_wiIndexCustomModel').val(String(s.wiIndexCustomModel || 'gpt-4o-mini'));
-$('#sg_wiIndexCustomMaxTokens').val(s.wiIndexCustomMaxTokens || 1024);
-$('#sg_wiIndexTopP').val(s.wiIndexTopP ?? 0.95);
-$('#sg_wiIndexCustomStream').prop('checked', !!s.wiIndexCustomStream);
-fillIndexModelSelect(Array.isArray(s.wiIndexCustomModelsCache) ? s.wiIndexCustomModelsCache : [], s.wiIndexCustomModel);
+  $('#sg_wiTriggerMatchMode').val(String(s.wiTriggerMatchMode || 'local'));
+  $('#sg_wiIndexPrefilterTopK').val(s.wiIndexPrefilterTopK ?? 24);
+  $('#sg_wiIndexProvider').val(String(s.wiIndexProvider || 'st'));
+  $('#sg_wiIndexTemperature').val(s.wiIndexTemperature ?? 0.2);
+  $('#sg_wiIndexSystemPrompt').val(String(s.wiIndexSystemPrompt || DEFAULT_INDEX_SYSTEM_PROMPT));
+  $('#sg_wiIndexUserTemplate').val(String(s.wiIndexUserTemplate || DEFAULT_INDEX_USER_TEMPLATE));
+  $('#sg_wiIndexCustomEndpoint').val(String(s.wiIndexCustomEndpoint || ''));
+  $('#sg_wiIndexCustomApiKey').val(String(s.wiIndexCustomApiKey || ''));
+  $('#sg_wiIndexCustomModel').val(String(s.wiIndexCustomModel || 'gpt-4o-mini'));
+  $('#sg_wiIndexCustomMaxTokens').val(s.wiIndexCustomMaxTokens || 1024);
+  $('#sg_wiIndexTopP').val(s.wiIndexTopP ?? 0.95);
+  $('#sg_wiIndexCustomStream').prop('checked', !!s.wiIndexCustomStream);
+  fillIndexModelSelect(Array.isArray(s.wiIndexCustomModelsCache) ? s.wiIndexCustomModelsCache : [], s.wiIndexCustomModel);
 
-const mm = String(s.wiTriggerMatchMode || 'local');
-$('#sg_index_llm_block').toggle(mm === 'llm');
-$('#sg_index_custom_block').toggle(mm === 'llm' && String(s.wiIndexProvider || 'st') === 'custom');
+  const mm = String(s.wiTriggerMatchMode || 'local');
+  $('#sg_index_llm_block').toggle(mm === 'llm');
+  $('#sg_index_custom_block').toggle(mm === 'llm' && String(s.wiIndexProvider || 'st') === 'custom');
 
   $('#sg_wiBlueIndexMode').val(String(s.wiBlueIndexMode || 'live'));
   $('#sg_wiBlueIndexFile').val(String(s.wiBlueIndexFile || ''));
@@ -5158,6 +5426,11 @@ function pullUiToSettings() {
   s.customSystemPreamble = String($('#sg_customSystemPreamble').val() || '');
   s.customConstraints = String($('#sg_customConstraints').val() || '');
 
+  // 快捷选项写入
+  s.quickOptionsEnabled = $('#sg_quickOptionsEnabled').is(':checked');
+  s.quickOptionsShowIn = String($('#sg_quickOptionsShowIn').val() || 'inline');
+  s.quickOptionsJson = String($('#sg_quickOptionsJson').val() || '[]');
+
   s.presetIncludeApiKey = $('#sg_presetIncludeApiKey').is(':checked');
 
   s.worldbookEnabled = $('#sg_worldbookEnabled').is(':checked');
@@ -5202,18 +5475,18 @@ function pullUiToSettings() {
   s.wiTriggerInjectStyle = String($('#sg_wiTriggerInjectStyle').val() || s.wiTriggerInjectStyle || 'hidden');
   s.wiTriggerDebugLog = $('#sg_wiTriggerDebugLog').is(':checked');
 
-s.wiTriggerMatchMode = String($('#sg_wiTriggerMatchMode').val() || s.wiTriggerMatchMode || 'local');
-s.wiIndexPrefilterTopK = clampInt($('#sg_wiIndexPrefilterTopK').val(), 5, 80, s.wiIndexPrefilterTopK ?? 24);
-s.wiIndexProvider = String($('#sg_wiIndexProvider').val() || s.wiIndexProvider || 'st');
-s.wiIndexTemperature = clampFloat($('#sg_wiIndexTemperature').val(), 0, 2, s.wiIndexTemperature ?? 0.2);
-s.wiIndexSystemPrompt = String($('#sg_wiIndexSystemPrompt').val() || s.wiIndexSystemPrompt || DEFAULT_INDEX_SYSTEM_PROMPT);
-s.wiIndexUserTemplate = String($('#sg_wiIndexUserTemplate').val() || s.wiIndexUserTemplate || DEFAULT_INDEX_USER_TEMPLATE);
-s.wiIndexCustomEndpoint = String($('#sg_wiIndexCustomEndpoint').val() || s.wiIndexCustomEndpoint || '');
-s.wiIndexCustomApiKey = String($('#sg_wiIndexCustomApiKey').val() || s.wiIndexCustomApiKey || '');
-s.wiIndexCustomModel = String($('#sg_wiIndexCustomModel').val() || s.wiIndexCustomModel || 'gpt-4o-mini');
-s.wiIndexCustomMaxTokens = clampInt($('#sg_wiIndexCustomMaxTokens').val(), 128, 200000, s.wiIndexCustomMaxTokens || 1024);
-s.wiIndexTopP = clampFloat($('#sg_wiIndexTopP').val(), 0, 1, s.wiIndexTopP ?? 0.95);
-s.wiIndexCustomStream = $('#sg_wiIndexCustomStream').is(':checked');
+  s.wiTriggerMatchMode = String($('#sg_wiTriggerMatchMode').val() || s.wiTriggerMatchMode || 'local');
+  s.wiIndexPrefilterTopK = clampInt($('#sg_wiIndexPrefilterTopK').val(), 5, 80, s.wiIndexPrefilterTopK ?? 24);
+  s.wiIndexProvider = String($('#sg_wiIndexProvider').val() || s.wiIndexProvider || 'st');
+  s.wiIndexTemperature = clampFloat($('#sg_wiIndexTemperature').val(), 0, 2, s.wiIndexTemperature ?? 0.2);
+  s.wiIndexSystemPrompt = String($('#sg_wiIndexSystemPrompt').val() || s.wiIndexSystemPrompt || DEFAULT_INDEX_SYSTEM_PROMPT);
+  s.wiIndexUserTemplate = String($('#sg_wiIndexUserTemplate').val() || s.wiIndexUserTemplate || DEFAULT_INDEX_USER_TEMPLATE);
+  s.wiIndexCustomEndpoint = String($('#sg_wiIndexCustomEndpoint').val() || s.wiIndexCustomEndpoint || '');
+  s.wiIndexCustomApiKey = String($('#sg_wiIndexCustomApiKey').val() || s.wiIndexCustomApiKey || '');
+  s.wiIndexCustomModel = String($('#sg_wiIndexCustomModel').val() || s.wiIndexCustomModel || 'gpt-4o-mini');
+  s.wiIndexCustomMaxTokens = clampInt($('#sg_wiIndexCustomMaxTokens').val(), 128, 200000, s.wiIndexCustomMaxTokens || 1024);
+  s.wiIndexTopP = clampFloat($('#sg_wiIndexTopP').val(), 0, 1, s.wiIndexTopP ?? 0.95);
+  s.wiIndexCustomStream = $('#sg_wiIndexCustomStream').is(':checked');
 
   s.wiBlueIndexMode = String($('#sg_wiBlueIndexMode').val() || s.wiBlueIndexMode || 'live');
   s.wiBlueIndexFile = String($('#sg_wiBlueIndexFile').val() || '').trim();
@@ -5358,7 +5631,521 @@ function setupEventListeners() {
   });
 }
 
+// -------------------- 悬浮按钮和面板 --------------------
+
+let floatingPanelVisible = false;
+let lastFloatingContent = null;
+let sgFloatingResizeGuardBound = false;
+
+const SG_FLOATING_BTN_POS_KEY = 'storyguide_floating_btn_pos_v1';
+let sgBtnPos = null;
+
+function loadBtnPos() {
+  try {
+    const raw = localStorage.getItem(SG_FLOATING_BTN_POS_KEY);
+    if (raw) sgBtnPos = JSON.parse(raw);
+  } catch { }
+}
+
+function saveBtnPos(left, top) {
+  try {
+    sgBtnPos = { left, top };
+    localStorage.setItem(SG_FLOATING_BTN_POS_KEY, JSON.stringify(sgBtnPos));
+  } catch { }
+}
+
+function createFloatingButton() {
+  if (document.getElementById('sg_floating_btn')) return;
+
+  const btn = document.createElement('div');
+  btn.id = 'sg_floating_btn';
+  btn.className = 'sg-floating-btn';
+  btn.innerHTML = '📘';
+  btn.title = '剧情指导';
+  // Allow dragging but also clicking. We need to distinguish click from drag.
+  btn.style.touchAction = 'none';
+
+  document.body.appendChild(btn);
+
+  // Restore position
+  loadBtnPos();
+  if (sgBtnPos) {
+    const w = 50; // approx width
+    const h = 50;
+    const clamped = clampToViewport(sgBtnPos.left, sgBtnPos.top, w, h);
+    btn.style.left = `${Math.round(clamped.left)}px`;
+    btn.style.top = `${Math.round(clamped.top)}px`;
+    btn.style.bottom = 'auto';
+    btn.style.right = 'auto';
+  } else {
+    // Default safe position for mobile/desktop if never moved
+    // Use top positioning to avoid bottom bar interference on mobile/desktop
+    // Mobile browsers often have dynamic bottom bars, so "bottom" is risky.
+    btn.style.top = '150px';
+    btn.style.right = '16px';
+    btn.style.bottom = 'auto'; // override CSS
+    btn.style.left = 'auto';
+  }
+
+  // --- Unified Interaction Logic ---
+  const isMobile = window.innerWidth < 1200;
+
+  // Variables or drag
+  let dragging = false;
+  let startX = 0, startY = 0, startLeft = 0, startTop = 0;
+  let moved = false;
+  let longPressTimer = null; // Legacy
+
+  // Mobile: Simple Click Mode
+  if (isMobile) {
+    btn.style.cursor = 'pointer';
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      toggleFloatingPanel();
+    };
+    return; // SKIP desktop logic
+  }
+  // Desktop logic continues below...
+
+  const onDown = (ev) => {
+    dragging = true;
+    moved = false;
+    startX = ev.clientX;
+    startY = ev.clientY;
+
+    const rect = btn.getBoundingClientRect();
+    startLeft = rect.left;
+    startTop = rect.top;
+
+    btn.style.transition = 'none';
+    btn.setPointerCapture(ev.pointerId);
+
+    // If needed: Visual feedback for press
+  };
+
+  const onMove = (ev) => {
+    if (!dragging) return;
+    const dx = ev.clientX - startX;
+    const dy = ev.clientY - startY;
+
+    if (!moved && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) {
+      moved = true;
+      btn.style.bottom = 'auto';
+      btn.style.right = 'auto';
+    }
+
+    if (moved) {
+      const newLeft = startLeft + dx;
+      const newTop = startTop + dy;
+
+      const w = btn.offsetWidth;
+      const h = btn.offsetHeight;
+      const clamped = clampToViewport(newLeft, newTop, w, h);
+
+      btn.style.left = `${Math.round(clamped.left)}px`;
+      btn.style.top = `${Math.round(clamped.top)}px`;
+    }
+  };
+
+  const onUp = (ev) => {
+    if (!dragging) return;
+    dragging = false;
+    btn.releasePointerCapture(ev.pointerId);
+    btn.style.transition = '';
+
+    if (moved) {
+      const left = parseInt(btn.style.left || '0', 10);
+      const top = parseInt(btn.style.top || '0', 10);
+      saveBtnPos(left, top);
+    }
+  };
+
+  btn.addEventListener('pointerdown', onDown);
+  btn.addEventListener('pointermove', onMove);
+  btn.addEventListener('pointerup', onUp);
+  btn.addEventListener('pointercancel', onUp);
+
+  // Robust click handler
+  btn.addEventListener('click', (e) => {
+    // If we just dragged, 'moved' might still be true
+    if (moved) {
+      e.stopPropagation();
+      e.preventDefault();
+      return;
+    }
+    toggleFloatingPanel();
+  });
+}
+
+function createFloatingPanel() {
+  if (document.getElementById('sg_floating_panel')) return;
+
+  const panel = document.createElement('div');
+  panel.id = 'sg_floating_panel';
+  panel.className = 'sg-floating-panel';
+  panel.innerHTML = `
+    <div class="sg-floating-header" style="cursor: move; touch-action: none;">
+      <span class="sg-floating-title">📘 剧情指导</span>
+      <div class="sg-floating-actions">
+        <button class="sg-floating-action-btn" id="sg_floating_refresh" title="刷新分析">🔄</button>
+        <button class="sg-floating-action-btn" id="sg_floating_settings" title="打开设置">⚙️</button>
+        <button class="sg-floating-action-btn" id="sg_floating_close" title="关闭">✕</button>
+      </div>
+    </div>
+    <div class="sg-floating-body" id="sg_floating_body">
+      <div class="sg-floating-loading">点击 🔄 生成剧情分析</div>
+    </div>
+  `;
+
+  document.body.appendChild(panel);
+
+  // Restore position (Only on Desktop/Large screens)
+  // On mobile/tablets (< 1200px wide), we rely on CSS defaults (bottom sheet style) to ensure visibility
+  if (window.innerWidth >= 1200) {
+    loadFloatingPanelPos();
+    if (sgFloatingPinnedPos) {
+      const w = panel.offsetWidth || 300;
+      const h = panel.offsetHeight || 400;
+      // Use saved position but ensure it is on screen
+      const clamped = clampToViewport(sgFloatingPinnedPos.left, sgFloatingPinnedPos.top, w, h);
+      panel.style.left = `${Math.round(clamped.left)}px`;
+      panel.style.top = `${Math.round(clamped.top)}px`;
+      panel.style.bottom = 'auto';
+      panel.style.right = 'auto';
+    }
+  }
+
+  // 事件绑定
+  $('#sg_floating_close').on('click', () => {
+    hideFloatingPanel();
+  });
+
+  $('#sg_floating_refresh').on('click', async () => {
+    await refreshFloatingPanelContent();
+  });
+
+  $('#sg_floating_settings').on('click', () => {
+    openModal();
+    hideFloatingPanel();
+  });
+
+  // Drag logic
+  const header = panel.querySelector('.sg-floating-header');
+  let dragging = false;
+  let startX = 0, startY = 0, startLeft = 0, startTop = 0;
+  let moved = false;
+
+  const onDown = (ev) => {
+    if (ev.target.closest('button')) return; // ignore buttons
+    dragging = true;
+    startX = ev.clientX;
+    startY = ev.clientY;
+
+    const rect = panel.getBoundingClientRect();
+    startLeft = rect.left;
+    startTop = rect.top;
+    moved = false;
+
+    panel.style.bottom = 'auto';
+    panel.style.right = 'auto';
+    panel.style.transition = 'none'; // disable transition during drag
+
+    header.setPointerCapture(ev.pointerId);
+  };
+
+  const onMove = (ev) => {
+    if (!dragging) return;
+    const dx = ev.clientX - startX;
+    const dy = ev.clientY - startY;
+
+    if (!moved && (Math.abs(dx) > 2 || Math.abs(dy) > 2)) moved = true;
+
+    const newLeft = startLeft + dx;
+    const newTop = startTop + dy;
+
+    // Constrain to viewport
+    const w = panel.offsetWidth;
+    const h = panel.offsetHeight;
+    const clamped = clampToViewport(newLeft, newTop, w, h);
+
+    panel.style.left = `${Math.round(clamped.left)}px`;
+    panel.style.top = `${Math.round(clamped.top)}px`;
+  };
+
+  const onUp = (ev) => {
+    if (!dragging) return;
+    dragging = false;
+    header.releasePointerCapture(ev.pointerId);
+    panel.style.transition = ''; // restore transition
+
+    if (moved) {
+      const left = parseInt(panel.style.left || '0', 10);
+      const top = parseInt(panel.style.top || '0', 10);
+      saveFloatingPanelPos(left, top);
+    }
+  };
+
+  header.addEventListener('pointerdown', onDown);
+  header.addEventListener('pointermove', onMove);
+  header.addEventListener('pointerup', onUp);
+  header.addEventListener('pointercancel', onUp);
+
+  // Double click to reset
+  header.addEventListener('dblclick', (ev) => {
+    if (ev.target.closest('button')) return; // ignore buttons
+    clearFloatingPanelPos();
+    panel.style.left = '';
+    panel.style.top = '';
+    panel.style.bottom = ''; // restore CSS default
+    panel.style.right = '';  // restore CSS default
+  });
+}
+
+function toggleFloatingPanel() {
+  if (floatingPanelVisible) {
+    hideFloatingPanel();
+  } else {
+    showFloatingPanel();
+  }
+}
+
+
+function shouldGuardFloatingPanelViewport() {
+  // When the viewport is very small (mobile / narrow desktop window),
+  // the panel may be pushed off-screen by fixed bottom offsets.
+  return window.innerWidth < 560 || window.innerHeight < 520;
+}
+
+function ensureFloatingPanelInViewport(panel) {
+  try {
+    if (!panel || !panel.getBoundingClientRect) return;
+
+    if (!shouldGuardFloatingPanelViewport()) return;
+
+    const pad = 8;
+
+    // Ensure the panel itself never exceeds viewport bounds
+    // (helps when the browser height is tiny, e.g. mobile landscape).
+    panel.style.maxWidth = `calc(100vw - ${pad * 2}px)`;
+    panel.style.maxHeight = `calc(100dvh - ${pad * 2}px)`;
+
+    const rect = panel.getBoundingClientRect();
+    const w = rect.width || panel.offsetWidth || 300;
+    const h = rect.height || panel.offsetHeight || 400;
+
+    // Clamp current on-screen position into viewport.
+    const clamped = clampToViewport(rect.left, rect.top, w, h);
+
+    // If anything is out of bounds, switch to explicit top/left positioning.
+    if (rect.top < pad || rect.left < pad || rect.bottom > window.innerHeight - pad || rect.right > window.innerWidth - pad) {
+      panel.style.left = `${Math.round(clamped.left)}px`;
+      panel.style.top = `${Math.round(clamped.top)}px`;
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
+    }
+  } catch { /* ignore */ }
+}
+
+function bindFloatingPanelResizeGuard() {
+  if (sgFloatingResizeGuardBound) return;
+  sgFloatingResizeGuardBound = true;
+
+  window.addEventListener('resize', () => {
+    if (!floatingPanelVisible) return;
+    const panel = document.getElementById('sg_floating_panel');
+    if (!panel) return;
+    requestAnimationFrame(() => ensureFloatingPanelInViewport(panel));
+  });
+}
+
+function showFloatingPanel() {
+  createFloatingPanel();
+  const panel = document.getElementById('sg_floating_panel');
+  if (panel) {
+    panel.classList.add('visible');
+    floatingPanelVisible = true;
+
+    // Force safe positioning on mobile/tablet (<1200px) every time it opens
+    // This ensures it doesn't get stuck in weird places or off-screen
+    if (window.innerWidth < 1200) {
+      panel.style.left = '';
+      panel.style.top = '';
+      panel.style.bottom = ''; // Revert to CSS default (fixed bottom)
+      panel.style.right = '';
+      panel.style.transform = ''; // Clear strict transform if needed, though CSS handles transition
+    }
+
+    // 如果有缓存内容则显示
+    if (lastFloatingContent) {
+      updateFloatingPanelBody(lastFloatingContent);
+    }
+
+    bindFloatingPanelResizeGuard();
+    // Final guard: make sure the panel is actually within the viewport on tiny screens.
+    requestAnimationFrame(() => ensureFloatingPanelInViewport(panel));
+  }
+}
+
+function hideFloatingPanel() {
+  const panel = document.getElementById('sg_floating_panel');
+  if (panel) {
+    panel.classList.remove('visible');
+    floatingPanelVisible = false;
+  }
+}
+
+async function refreshFloatingPanelContent() {
+  const $body = $('#sg_floating_body');
+  if (!$body.length) return;
+
+  $body.html('<div class="sg-floating-loading">正在分析剧情...</div>');
+
+  try {
+    const s = ensureSettings();
+    const { snapshotText } = buildSnapshot();
+    const modules = getModules('panel');
+
+    if (!modules.length) {
+      $body.html('<div class="sg-floating-loading">没有配置模块</div>');
+      return;
+    }
+
+    const schema = buildSchemaFromModules(modules);
+    const messages = buildPromptMessages(snapshotText, s.spoilerLevel, modules, 'panel');
+
+    let jsonText = '';
+    if (s.provider === 'custom') {
+      jsonText = await callViaCustom(s.customEndpoint, s.customApiKey, s.customModel, messages, s.temperature, s.customMaxTokens, s.customTopP, s.customStream);
+    } else {
+      jsonText = await callViaSillyTavern(messages, schema, s.temperature);
+      if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
+    }
+
+    const parsed = safeJsonParse(jsonText);
+    if (!parsed) {
+      $body.html('<div class="sg-floating-loading">解析失败</div>');
+      return;
+    }
+
+    // 合并静态模块
+    const mergedParsed = mergeStaticModulesIntoResult(parsed, modules);
+    updateStaticModulesCache(mergedParsed, modules).catch(() => void 0);
+
+    // 渲染内容
+    // Filter out quick_actions from main Markdown body to avoid duplication
+    const bodyModules = modules.filter(m => m.key !== 'quick_actions');
+    const md = renderReportMarkdownFromModules(mergedParsed, bodyModules);
+    const html = renderMarkdownToHtml(md);
+
+    // 添加快捷选项
+    const quickActions = Array.isArray(mergedParsed.quick_actions) ? mergedParsed.quick_actions : [];
+    const optionsHtml = renderDynamicQuickActionsHtml(quickActions, 'panel');
+
+    const fullHtml = html + optionsHtml;
+    lastFloatingContent = fullHtml;
+    updateFloatingPanelBody(fullHtml);
+
+  } catch (e) {
+    console.warn('[StoryGuide] floating panel refresh failed:', e);
+    $body.html(`<div class="sg-floating-loading">分析失败: ${e?.message ?? e}</div>`);
+  }
+}
+
+function updateFloatingPanelBody(html) {
+  const $body = $('#sg_floating_body');
+  if ($body.length) {
+    $body.html(html);
+  }
+}
+
 // -------------------- init --------------------
+
+// -------------------- fixed input button --------------------
+// -------------------- fixed input button --------------------
+function injectFixedInputButton() {
+  if (document.getElementById('sg_fixed_input_btn')) return;
+
+  const tryInject = () => {
+    if (document.getElementById('sg_fixed_input_btn')) return true;
+
+    // 1. Try standard extension/audit buttons container (desktop/standard themes)
+    let container = document.getElementById('chat_input_audit_buttons');
+
+    // 2. Try Quick Reply container (often where "Roll" macros live)
+    if (!container) container = document.querySelector('.quick-reply-container');
+
+    // 3. Try finding the "Roll" button specifically and use its parent
+    if (!container) {
+      const buttons = Array.from(document.querySelectorAll('button, .menu_button'));
+      const rollBtn = buttons.find(b => b.textContent && (b.textContent.includes('ROLL') || b.textContent.includes('Roll')));
+      if (rollBtn) container = rollBtn.parentElement;
+    }
+
+    // 4. Fallback: Insert before the input box wrapper
+    if (!container) {
+      const wrapper = document.getElementById('chat_input_form');
+      if (wrapper) container = wrapper;
+    }
+
+    if (!container) return false;
+
+    const btn = document.createElement('div');
+    btn.id = 'sg_fixed_input_btn';
+    btn.className = 'menu_button';
+    btn.style.display = 'inline-block';
+    btn.style.cursor = 'pointer';
+    btn.style.marginRight = '5px';
+    btn.style.padding = '5px 10px';
+    btn.style.userSelect = 'none';
+    btn.innerHTML = '📘 剧情';
+    btn.title = '打开剧情指导悬浮窗';
+    // Ensure height consistency
+    btn.style.height = 'var(--input-height, auto)';
+
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      toggleFloatingPanel();
+    });
+
+    // Check if we found 'chat_input_form' which is huge, we don't want to just appendChild
+    if (container.id === 'chat_input_form') {
+      container.insertBefore(btn, container.firstChild);
+      return true;
+    }
+
+    // For button bars, prepend usually works best for visibility
+    if (container.firstChild) {
+      container.insertBefore(btn, container.firstChild);
+    } else {
+      container.appendChild(btn);
+    }
+    return true;
+  };
+
+  // Attempt immediately
+  tryInject();
+
+  // Watch for UI changes continuously (ST wipes DOM often)
+  // We do NOT disconnect, so if the button is removed, it comes back.
+  const observer = new MutationObserver((mutations) => {
+    // Check if relevant nodes were added or removed
+    let needsCheck = false;
+    for (const m of mutations) {
+      if (m.type === 'childList') {
+        needsCheck = true;
+        break;
+      }
+    }
+    if (needsCheck) tryInject();
+  });
+
+  // observe body for new nodes
+  if (document.body) {
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+}
 
 function init() {
   ensureSettings();
@@ -5375,6 +6162,9 @@ function init() {
     injectMinimalSettingsPanel();
     ensureChatActionButtons();
     installCardZoomDelegation();
+    installQuickOptionsClickHandler();
+    createFloatingButton();
+    injectFixedInputButton();
   });
 
   globalThis.StoryGuide = {
