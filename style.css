@@ -309,6 +309,47 @@
   flex: 1;
 }
 
+/* Page tabs (剧情指导/总结设置/索引设置/数据库) */
+.sg-pagetabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.sg-pgtab {
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  color: rgba(200, 210, 220, 0.85);
+}
+
+.sg-pgtab:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.sg-pgtab.active {
+  background: rgba(100, 160, 220, 0.25);
+  border-color: rgba(100, 160, 220, 0.4);
+  color: rgba(220, 230, 240, 1);
+}
+
+/* Settings pages */
+.sg-page {
+  display: none;
+}
+
+.sg-page.active {
+  display: block;
+}
+
+
 .sg-pane {
   display: none;
 }
@@ -1569,5 +1610,433 @@ body.sg-zoom-lock {
   .sg-floating-panel {
     bottom: 12px;
     max-height: calc(100dvh - 24px);
+  }
+}
+
+
+/* StoryGuide Toast */
+.sg-toast {
+  position: fixed;
+  left: 50%;
+  top: 14px;
+  transform: translateX(-50%) translateY(-10px);
+  opacity: 0;
+  z-index: 2147483646;
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.sg-toast.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.sg-toast-inner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.12));
+  background: var(--SmartThemeBodyColorInverse, #151515);
+  color: var(--SmartThemeBodyColor, #fff);
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.55);
+  max-width: min(92vw, 680px);
+}
+
+.sg-toast-text {
+  font-size: 14px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.sg-toast-spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: rgba(255, 255, 255, 0.9);
+  animation: sg_spin 0.9s linear infinite;
+  display: none;
+  flex: 0 0 auto;
+}
+
+.sg-toast.spinner .sg-toast-spinner {
+  display: block;
+}
+
+.sg-toast.ok .sg-toast-inner {
+  border-color: rgba(70, 200, 120, 0.45);
+}
+
+.sg-toast.warn .sg-toast-inner {
+  border-color: rgba(255, 200, 70, 0.45);
+}
+
+.sg-toast.err .sg-toast-inner {
+  border-color: rgba(255, 90, 90, 0.55);
+}
+
+@keyframes sg_spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 480px) {
+  .sg-toast {
+    top: 10px;
+  }
+
+  .sg-toast-inner {
+    padding: 9px 12px;
+  }
+}
+
+/* ===== 数据库视图样式 ===== */
+.sg-database-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  margin-bottom: 12px;
+}
+
+.sg-database-info {
+  font-size: 12px;
+  color: rgba(180, 190, 200, 0.7);
+}
+
+.sg-database-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.sg-database-update-btn,
+.sg-database-export-btn {
+  padding: 6px 12px !important;
+  font-size: 12px !important;
+  width: auto !important;
+}
+
+.sg-database-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sg-database-module {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+}
+
+.sg-database-module-title {
+  padding: 10px 14px;
+  font-weight: 700;
+  font-size: 13px;
+  color: rgba(220, 230, 240, 0.95);
+  background: rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.sg-database-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px 14px;
+}
+
+.sg-database-item {
+  padding: 6px 0;
+  font-size: 13px;
+  color: rgba(200, 210, 220, 0.9);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.sg-database-item:last-child {
+  border-bottom: none;
+}
+
+.sg-database-text {
+  padding: 10px 14px;
+  font-size: 13px;
+  color: rgba(200, 210, 220, 0.9);
+  line-height: 1.5;
+}
+
+.sg-database-empty {
+  padding: 10px 14px;
+  font-size: 13px;
+  color: rgba(150, 160, 170, 0.6);
+  font-style: italic;
+}
+
+/* 数据库视图滚动优化 */
+.sg-floating-body:has(.sg-database-view) {
+  padding: 12px 16px;
+}
+
+/* 数据库按钮高亮（当前在数据库视图时） */
+#sg_floating_database.active {
+  background: rgba(100, 160, 220, 0.25);
+  border-color: rgba(100, 160, 220, 0.4);
+}
+
+/* ===== 手机端竖屏优化 ===== */
+@media (max-width: 500px) and (orientation: portrait) {
+
+  /* 悬浮面板全屏底部弹出 */
+  .sg-floating-panel {
+    position: fixed !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    top: auto !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: 80dvh !important;
+    min-height: 200px;
+    border-radius: 16px 16px 0 0 !important;
+    z-index: 2147483641 !important;
+    resize: none !important;
+  }
+
+  .sg-floating-panel.visible {
+    transform: translateY(0) !important;
+  }
+
+  /* 面板头部 */
+  .sg-floating-header {
+    padding: 10px 12px;
+    border-radius: 16px 16px 0 0;
+  }
+
+  .sg-floating-title {
+    font-size: 14px;
+  }
+
+  .sg-floating-actions {
+    gap: 6px;
+  }
+
+  .sg-floating-action-btn {
+    width: 36px;
+    height: 36px;
+    font-size: 16px;
+  }
+
+  /* 面板内容 */
+  .sg-floating-body {
+    padding: 12px;
+    max-height: calc(80dvh - 60px);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* 悬浮按钮安全区 */
+  .sg-floating-btn {
+    bottom: max(90px, calc(env(safe-area-inset-bottom) + 80px)) !important;
+    right: 12px !important;
+    width: 52px;
+    height: 52px;
+    font-size: 24px;
+  }
+
+  /* 数据库视图头部 */
+  .sg-database-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+    padding-bottom: 12px;
+  }
+
+  .sg-database-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .sg-database-update-btn,
+  .sg-database-export-btn {
+    flex: 1;
+    min-width: 80px;
+  }
+
+  /* 数据库模块卡片 */
+  .sg-database-module {
+    border-radius: 10px;
+  }
+
+  .sg-database-module-title {
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+
+  .sg-database-list {
+    padding: 6px 12px;
+  }
+
+  .sg-database-item {
+    font-size: 12px;
+    padding: 5px 0;
+  }
+
+  .sg-database-text {
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+}
+
+/* 更小屏幕的额外优化 */
+@media (max-width: 380px) {
+  .sg-floating-panel {
+    max-height: 85dvh !important;
+  }
+
+  .sg-floating-header {
+    padding: 8px 10px;
+  }
+
+  .sg-floating-title {
+    font-size: 13px;
+  }
+
+  .sg-floating-action-btn {
+    width: 32px;
+    height: 32px;
+    font-size: 14px;
+  }
+
+  .sg-floating-body {
+    padding: 10px;
+  }
+
+  .sg-floating-btn {
+    width: 48px;
+    height: 48px;
+    right: 10px !important;
+  }
+}
+
+/* 设置页面手机优化 */
+@media (max-width: 500px) {
+
+  /* 页面标签换行 */
+  .sg-pagetabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+
+  .sg-pgtab {
+    flex: 1 1 auto;
+    min-width: 60px;
+    padding: 8px 10px;
+    font-size: 12px;
+    text-align: center;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .sg-pgtab.active {
+    background: rgba(100, 160, 220, 0.25);
+    border-color: rgba(100, 160, 220, 0.4);
+  }
+
+  /* 设置页面内容 */
+  .sg-page {
+    display: none;
+  }
+
+  .sg-page.active {
+    display: block;
+  }
+
+  /* 设置卡片 */
+  .sg-card {
+    padding: 10px;
+    margin-bottom: 10px;
+    border-radius: 10px;
+  }
+
+  .sg-card-title {
+    font-size: 13px;
+    margin-bottom: 8px;
+  }
+
+  /* 输入框和按钮 */
+  .sg-field label {
+    font-size: 12px;
+  }
+
+  .sg-field input,
+  .sg-field select,
+  .sg-field textarea {
+    font-size: 14px;
+    padding: 8px;
+  }
+
+  /* 按钮行 */
+  .sg-row.sg-inline {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .sg-row.sg-inline button {
+    width: 100%;
+  }
+
+  /* 状态栏 */
+  .sg-status {
+    font-size: 12px;
+    padding: 8px;
+  }
+
+  /* Textarea 优化 */
+  textarea#sg_databaseModulesJson,
+  textarea#sg_databaseSystemPrompt,
+  textarea#sg_databaseUserTemplate {
+    font-size: 12px;
+    min-height: 120px;
+  }
+}
+
+/* 横屏优化 */
+@media (max-height: 500px) and (orientation: landscape) {
+  .sg-floating-panel {
+    max-height: calc(100dvh - 20px) !important;
+    width: min(400px, 50vw) !important;
+    right: 10px !important;
+    left: auto !important;
+    bottom: 10px !important;
+  }
+
+  .sg-floating-btn {
+    bottom: 10px !important;
+    right: 10px !important;
+    width: 44px;
+    height: 44px;
+  }
+
+  .sg-modal {
+    height: calc(100dvh - 10px);
+    max-height: calc(100dvh - 10px);
+  }
+}
+
+/* 安全区域适配（刘海屏/圆角屏） */
+@supports (padding: env(safe-area-inset-bottom)) {
+  .sg-floating-panel {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .sg-floating-btn {
+    bottom: max(90px, calc(env(safe-area-inset-bottom) + 80px)) !important;
   }
 }

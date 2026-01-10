@@ -73,6 +73,50 @@ const DEFAULT_INDEX_USER_TEMPLATE = `【用户当前输入】\n{{userMessage}}\n
 
 const INDEX_JSON_REQUIREMENT = `输出要求：\n- 只输出严格 JSON，不要 Markdown、不要代码块、不要任何多余文字。\n- JSON 结构必须为：{"pickedIds": number[]}。\n- pickedIds 必须是候选列表里的 id（整数）。\n- 返回的 pickedIds 数量 <= maxPick。`;
 
+// ===== ROLL 判定默认配置 =====
+const DEFAULT_ROLL_ACTIONS = Object.freeze([
+  { key: 'combat', label: '战斗', keywords: ['战斗', '攻击', '出手', '挥剑', '射击', '格挡', '闪避', '搏斗', '砍', '杀', '打', 'fight', 'attack', 'strike'] },
+  { key: 'persuade', label: '劝说', keywords: ['劝说', '说服', '谈判', '交涉', '威胁', '恐吓', '欺骗', 'persuade', 'negotiate', 'intimidate', 'deceive'] },
+  { key: 'learn', label: '学习', keywords: ['学习', '修炼', '练习', '研究', '掌握', '学会', '技能', 'learn', 'train', 'practice'] },
+]);
+const DEFAULT_ROLL_FORMULAS = Object.freeze({
+  combat: '(PC.str + PC.dex + PC.atk + MOD.total + CTX.bonus + CTX.penalty) / 4',
+  persuade: '(PC.cha + PC.int + MOD.total) / 3',
+  learn: '(PC.int + PC.wis + MOD.total) / 3',
+  default: 'MOD.total',
+});
+const DEFAULT_ROLL_MODIFIER_SOURCES = Object.freeze(['skill', 'talent', 'trait', 'buff', 'equipment']);
+const DEFAULT_ROLL_SYSTEM_PROMPT = `你是“轮回乐园风格”的行动判定/ROLL 点计算器。\n\n核心规则：\n- 只使用 statDataJson（变量数据），不要参考剧情描述。\n- 难度模式 difficulty：simple/normal/hard/hellãhard/hell ç´æ¥æé« DC åºé´æéä½æååºé´ï¼normal=DC15~20ï¼hard=DC20~25ï¼hell=DC25~30ï¼æå°æååºé´æ¶ç¼© (margin>=8ææ®éæåï¼margin 0~7 ä¸ºåå¼ºæåï¼margin -7~-1 ä¸ºå¤±è´¥ä½ææ¶è·ï¼margin<=-8 ä¸ºå¤§å¤±è´¥)ã\n- 依据轮回乐园设定处理位阶压制与属性壁障；若 statDataJson 中存在压制/壁障相关字段，需体现在判定修正中。\n- 若提供生物强度/等级差/等阶差字段，必须作为关键修正项，显著影响阈值或 mods。\n- 数值映射建议：等级差每 1 级=±2 修正；等阶差每 1 阶=±10 修正；生物强度差每 1 档=±5 修正（可按情况转为阈值调整）。\n- 允许综合主角/装备/技能/天赋/特性Buff/环境/性格/角色当前状态 等数据进行修正汇总。\n- 上述每类数据需细读其子信息（如技能效果/熟练度/品级/层级/冷却/消耗，装备词缀/宝石/品质/特效，Buff层数/剩余时间/可叠加状态等），只要在 statDataJson 中存在就必须纳入修正或阈值调整。
+- 状态/Buff/Debuff 叠加规则：可叠加则按层数线性叠加；标注递增/递减则按描述；冷却中不生效；剩余时间不足可按比例折算。\n- 多目标对战：若存在多个敌人，需明确主要目标，并同时考虑群体压力/围攻/保护阵形等对判定的影响。如为范围/溅杀行动，目标数量可提升阈值或降低命中/稳定性。
+- 多目标权重：主目标修正与阈值权重 100%；次要目标影响最多 50%，多个次要目标递减（50%/30%/20%）。\n- 若存在队友/友军配合，必须读取其属性/技能/天赋/特性Buff/装备/状态/位置与配合手段（夹击、掩护、增益等），计入协同修正。\n\nD20 规则（D&D/PF 风格）：
+- 协同修正上限建议：团队协同总修正不超过 +15 或不超过基础修正的 50%（取较小）。\n- 基础判定：1d20 + 修正 >= DC。\n- randomRoll 是 1~100 时，将其映射为 d20 点数：d20 = ceil(randomRoll / 5)。\n- 优势/劣势：掷两次 d20 取高/取低（若 statDataJson 提供优势/劣势标记则 적용）。\n- 自然 20 视为大成功，自然 1 视为大失败（若无明确规则冲突则 적용）。\n- 若非自然20/1，则按 success 判定为“成功/失败”。自然20=大成功，自然1=大失败。\n- 结果等级：
+  - 大成功 / 暴击（critical）
+  - 普通成功
+  - 勉强成功 / 成功但有代价
+  - 失败但有收获（fail forward）
+  - 大失败 / 灾难（fumble）
+- 结果判定区间：定义 margin = final - threshold。自然20=大成功，自然1=大失败。其余情况：success 且 margin>=6 为普通成功；success 且 0~5 为勉强成功；失败且 margin 在 -5~-1 为失败但有收获；失败且 margin<=-6 为大失败。
+- 失败但有收获类型建议：情报/位置/士气/消耗减免/部分伤害或效果成立（二选一即可）。
+\n判定步骤：\n1) 判断是否需要判定（ROLL）。不需要则返回 needRoll=false。\n2) 需要判定时：\n   - 自行选择合理 action 名称。\n   - 以相关核心属性为主（如 力量/敏捷/体质/智力/幸运/魅力，或真实属性），必要时参考衍生属性（物理攻击/物理防御/法术攻击/法术防御）。\n   - 结合技能/天赋/特性Buff/装备/环境/性格/当前状态等修正，汇总为 mods。\n   - 计算 base，并按公式计算 final 与 success。\n\n公式规则：\n- base = 你采用的公式计算结果\n- final = base + base * randomWeight * ((randomRoll - 50) / 50)\n- success = final >= threshold\n
+- 成功阈值/DC 由你根据行动难度自行选择，需在输出中返回 threshold。\n\n输出要求：\n- 严格 JSON，不要任何额外文字。\n- 必须包含 outcomeTier 与 explanation（用于日志简述）。\n- explanation 控制在 1~2 句，避免过长影响日志可读性。\n- analysisSummary 可选，但若提供需包含“修正来源汇总/映射应用”两段（可简短）。\n`;
+const DEFAULT_ROLL_USER_TEMPLATE = `动作={{action}}\n公式={{formula}}\nrandomWeight={{randomWeight}}\ndifficulty={{difficulty}}\nrandomRoll={{randomRoll}}\nmodifierSources={{modifierSourcesJson}}\nstatDataJson={{statDataJson}}`;
+const ROLL_JSON_REQUIREMENT = `输出要求（严格 JSON）：\n{"action": string, "formula": string, "base": number, "mods": [{"source": string, "value": number}], "random": {"roll": number, "weight": number}, "final": number, "threshold": number, "success": boolean, "outcomeTier": string, "explanation": string, "analysisSummary"?: string}\n- analysisSummary 可选，用于日志显示，建议包含“修正来源汇总/映射应用”两段；explanation 建议 1~2 句。`;
+const ROLL_DECISION_JSON_REQUIREMENT = `输出要求（严格 JSON）：\n- 若无需判定：只输出 {"needRoll": false}。\n- 若需要判定：输出 {"needRoll": true, "result": {action, formula, base, mods, random, final, threshold, success, outcomeTier, explanation, analysisSummary?}}。\n- 不要 Markdown、不要代码块、不要任何多余文字。`;
+
+const DEFAULT_ROLL_DECISION_SYSTEM_PROMPT = `你是“轮回乐园风格”的行动判定/ROLL 点助手。\n\n任务：\n- 先判断用户输入是否需要进行行动判定（ROLL）。\n- 若需要，选择一个合适的 action，并基于给定数据计算结果。\n- 只使用 statDataJson 里的数据（属性/装备/技能/天赋/特性Buff/状态/环境/性格等）。\n- 难度模式 difficulty：simple/normal/hard/hellãhard/hell ç´æ¥æé« DC åºé´æéä½æååºé´ï¼normal=DC15~20ï¼hard=DC20~25ï¼hell=DC25~30ï¼æå°æååºé´æ¶ç¼© (margin>=8ææ®éæåï¼margin 0~7 ä¸ºåå¼ºæåï¼margin -7~-1 ä¸ºå¤±è´¥ä½ææ¶è·ï¼margin<=-8 ä¸ºå¤§å¤±è´¥)ã\n- 处理位阶压制与属性壁障规则：若 statDataJson 中存在相关字段，必须影响判定。\n- 输出严格 JSON，不要任何额外文字。\n- 必须包含 outcomeTier 与 explanation（用于日志简述）。\n- explanation 控制在 1~2 句，避免过长影响日志可读性。\n- analysisSummary 可选，但若提供需包含“修正来源汇总/映射应用”两段（可简短）。\n\nD20 规则（D&D/PF 风格）：\n- 基础判定：1d20 + 修正 >= DC。\n- randomRoll 是 1~100 时，将其映射为 d20 点数：d20 = ceil(randomRoll / 5)。\n- 优势/劣势：掷两次 d20 取高/取低（若 statDataJson 提供优势/劣势标记则 적용）。\n- 自然 20 视为大成功，自然 1 视为大失败（若无明确规则冲突则 적용）。\n- 若非自然20/1，则按 success 判定为“成功/失败”。自然20=大成功，自然1=大失败。\n- 结果等级：
+  - 大成功 / 暴击（critical）
+  - 普通成功
+  - 勉强成功 / 成功但有代价
+  - 失败但有收获（fail forward）
+  - 大失败 / 灾难（fumble）
+- 结果判定区间：定义 margin = final - threshold。自然20=大成功，自然1=大失败。其余情况：success 且 margin>=6 为普通成功；success 且 0~5 为勉强成功；失败且 margin 在 -5~-1 为失败但有收获；失败且 margin<=-6 为大失败。
+- 失败但有收获类型建议：情报/位置/士气/消耗减免/部分伤害或效果成立（二选一即可）。
+\n修正规则（必须考虑）：\n- 技能/天赋/特性Buff/装备提供的数值加成或减益，要汇总为 mods。\n- 修正来源可多项叠加，但需遵守“属性壁障/位阶压制”限制。\n- 若存在“真实属性/衍生属性”（如物理攻击/物理防御、法术攻击/法术防御），优先使用与行动类型最相关的一组。\n- 角色当前状态（伤势/虚弱/诅咒/疲劳/专注/兴奋等）必须体现在修正或阈值上。\n- 必须考虑各类数据的子信息：\n  - 技能/天赋/特性Buff：效果、熟练度/等级、品级、层级、冷却、消耗、可叠加与层数、剩余时间。\n  - 装备：品质、评分、词缀、宝石、特效、耐久/状态、武器类型匹配。\n  - 敌方同类条目也必须读取其子信息。\n\n环境因素（必须考虑）：\n- 若 statDataJson 提供环境字段（地形、视野、天气、光照、噪音、空间压制、结界、毒雾等），必须影响修正或阈值。\n- 环境优势/劣势需体现为正/负修正，或影响 success 判定阈值。\n\n性格因素（必须考虑）：
+- 环境反制优先级建议：先应用环境负面，再应用技能/装备加成；若有护具或抗性标记可部分抵消。\n- 若 statDataJson 提供性格/心态字段（如冷静/鲁莽/谨慎/嗜战/恐惧等），需对判定产生修正。\n- 性格修正应与行动类型一致（鲁莽提高进攻但降低防御或稳定性；谨慎提高防御/命中但降低爆发等）。\n\n对战判定（必须考虑敌方）：\n- 若为对战行动，需读取敌方属性与敌方技能/天赋/特性Buff/装备/状态的修正效果。\n- 若存在“位阶压制差值/属性壁障差值”，必须对结果产生明显影响。\n- 若提供生物强度/等级差/等阶差字段，必须作为关键修正项，显著影响阈值或 mods。\n- 数值映射建议：等级差每 1 级=±2 修正；等阶差每 1 阶=±10 修正；生物强度差每 1 档=±5 修正（可按情况转为阈值调整）。\n- 敌我属性或装备的相克/克制，若 statDataJson 有对应字段，需计入修正或阈值。
+- 相克/克制映射建议：轻度/中度/重度=+3/+6/+10（或等幅负修正）。\n- 多目标对战：若有多个敌人，需明确主要目标，并同时考虑群体压力/围攻/保护阵形等对判定的影响。若行动为范围/溅杀，将目标数量纳入阈值或命中/稳定性调整。\n- 若存在队友/友军配合，必须读取其属性/技能/天赋/特性Buff/装备/状态/位置与配合手段（夹击、掩护、增益等），计入协同修正。\n\n判定步骤：\n1) 判断是否需要判定（ROLL）。不需要则返回 needRoll=false。\n2) 需要判定时：\n   - 选择合理 action 名称（自定义即可）。\n   - 结合核心属性/衍生属性/技能/天赋/特性Buff/装备/环境/性格/当前状态，汇总为 mods。\n   - 计算 base，并按公式计算 final 与 success。\n\n公式规则：\n- base = 你采用的公式计算结果\n- final = base + base * randomWeight * ((randomRoll - 50) / 50)\n- success = final >= threshold\n
+- 成功阈值/DC 由你根据行动难度自行选择，需在输出中返回 threshold。\n`;
+const DEFAULT_ROLL_DECISION_USER_TEMPLATE = `用户输入={{userText}}\nrandomWeight={{randomWeight}}\ndifficulty={{difficulty}}\nrandomRoll={{randomRoll}}\nstatDataJson={{statDataJson}}`;
+
 const DEFAULT_SETTINGS = Object.freeze({
   enabled: true,
 
@@ -222,6 +266,26 @@ const DEFAULT_SETTINGS = Object.freeze({
   wiTriggerTag: 'SG_WI_TRIGGERS',
   wiTriggerDebugLog: false,
 
+  // ROLL 判定（本回合行动判定）
+  wiRollEnabled: false,
+  wiRollStatSource: 'variable', // variable | template | latest
+  wiRollStatVarName: 'stat_data',
+  wiRollRandomWeight: 0.3,
+  wiRollDifficulty: 'normal',
+  wiRollInjectStyle: 'hidden',
+  wiRollTag: 'SG_ROLL',
+  wiRollDebugLog: false,
+  wiRollStatParseMode: 'json', // json | kv
+  wiRollProvider: 'custom', // custom | local
+  wiRollSystemPrompt: DEFAULT_ROLL_SYSTEM_PROMPT,
+  wiRollCustomEndpoint: '',
+  wiRollCustomApiKey: '',
+  wiRollCustomModel: 'gpt-4o-mini',
+  wiRollCustomMaxTokens: 512,
+  wiRollCustomTopP: 0.95,
+  wiRollCustomTemperature: 0.2,
+  wiRollCustomStream: false,
+
   // 蓝灯索引读取方式：默认“实时读取蓝灯世界书文件”
   // - live：每次触发前会按需拉取蓝灯世界书（带缓存/节流）
   // - cache：只使用导入/缓存的 summaryBlueIndex
@@ -267,6 +331,7 @@ let refreshTimer = null;
 let appendTimer = null;
 let summaryTimer = null;
 let isSummarizing = false;
+let sgToastTimer = null;
 
 // 蓝灯索引“实时读取”缓存（防止每条消息都请求一次）
 let blueIndexLiveCache = { file: '', loadedAt: 0, entries: [], lastError: '' };
@@ -328,6 +393,24 @@ function ensureSettings() {
     // 兼容旧版：若 modulesJson 为空，补默认
     if (!extensionSettings[MODULE_NAME].modulesJson) {
       extensionSettings[MODULE_NAME].modulesJson = JSON.stringify(DEFAULT_MODULES, null, 2);
+    }
+  }
+  if (typeof extensionSettings[MODULE_NAME].wiRollSystemPrompt === 'string') {
+    const cur = extensionSettings[MODULE_NAME].wiRollSystemPrompt;
+    const needsRefresh = !cur.includes('outcomeTier')
+      || !cur.includes('explanation')
+      || !cur.includes('\u96be\u5ea6\u6a21\u5f0f difficulty')
+      || !cur.includes('\u6210\u529f\u9608\u503c/DC');
+    if (needsRefresh) {
+      extensionSettings[MODULE_NAME].wiRollSystemPrompt = DEFAULT_ROLL_SYSTEM_PROMPT;
+      saveSettingsDebounced();
+    }
+  }
+  if (typeof extensionSettings[MODULE_NAME].wiRollUserTemplate === 'string') {
+    const curTpl = extensionSettings[MODULE_NAME].wiRollUserTemplate;
+    if (curTpl.includes('{{threshold}}')) {
+      extensionSettings[MODULE_NAME].wiRollUserTemplate = DEFAULT_ROLL_USER_TEMPLATE;
+      saveSettingsDebounced();
     }
   }
   return extensionSettings[MODULE_NAME];
@@ -536,6 +619,7 @@ function getDefaultSummaryMeta() {
     nextIndex: 1,
     history: [], // [{title, summary, keywords, createdAt, range:{fromFloor,toFloor,fromIdx,toIdx}, worldInfo:{file,uid}}]
     wiTriggerLogs: [], // [{ts,userText,picked:[{title,score,keywordsPreview}], injectedKeywords, lookback, style, tag}]
+    rollLogs: [], // [{ts, action, summary, final, success, userText}]
   };
 }
 
@@ -550,6 +634,7 @@ function getSummaryMeta() {
       ...data,
       history: Array.isArray(data.history) ? data.history : [],
       wiTriggerLogs: Array.isArray(data.wiTriggerLogs) ? data.wiTriggerLogs : [],
+      rollLogs: Array.isArray(data.rollLogs) ? data.rollLogs : [],
     };
   } catch {
     return getDefaultSummaryMeta();
@@ -623,6 +708,45 @@ function setStatus(text, kind = '') {
   $s.removeClass('ok err warn').addClass(kind || '');
   $s.text(text || '');
 }
+
+
+function ensureToast() {
+  if ($('#sg_toast').length) return;
+  $('body').append(`
+    <div id="sg_toast" class="sg-toast info" style="display:none" role="status" aria-live="polite">
+      <div class="sg-toast-inner">
+        <div class="sg-toast-spinner" aria-hidden="true"></div>
+        <div class="sg-toast-text" id="sg_toast_text"></div>
+      </div>
+    </div>
+  `);
+}
+
+function hideToast() {
+  const $t = $('#sg_toast');
+  if (!$t.length) return;
+  $t.removeClass('visible spinner');
+  // delay hide for transition
+  setTimeout(() => { $t.hide(); }, 180);
+}
+
+function showToast(text, { kind = 'info', spinner = false, sticky = false, duration = 1700 } = {}) {
+  ensureToast();
+  const $t = $('#sg_toast');
+  const $txt = $('#sg_toast_text');
+  $txt.text(text || '');
+  $t.removeClass('ok warn err info').addClass(kind || 'info');
+  $t.toggleClass('spinner', !!spinner);
+  $t.show(0);
+  // trigger transition
+  requestAnimationFrame(() => { $t.addClass('visible'); });
+
+  if (sgToastTimer) { clearTimeout(sgToastTimer); sgToastTimer = null; }
+  if (!sticky) {
+    sgToastTimer = setTimeout(() => { hideToast(); }, clampInt(duration, 500, 10000, 1700));
+  }
+}
+
 
 function updateButtonsEnabled() {
   const ok = Boolean(lastReport?.markdown);
@@ -2183,6 +2307,7 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
   if (isSummarizing) return;
   isSummarizing = true;
   setStatus('总结中…', 'warn');
+  showToast('正在总结…', { kind: 'warn', spinner: true, sticky: true });
 
   try {
     const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
@@ -2199,6 +2324,7 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
       const resolved0 = resolveChatRangeByFloors(chat, mode, manualFromFloor, manualToFloor);
       if (!resolved0) {
         setStatus('手动楼层范围无效（请检查起止层号）', 'warn');
+        showToast('手动楼层范围无效（请检查起止层号）', { kind: 'warn', spinner: false, sticky: false, duration: 2200 });
         return;
       }
 
@@ -2235,6 +2361,7 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
     const totalSeg = segments.length;
     if (!totalSeg) {
       setStatus('没有可总结的内容（范围为空）', 'warn');
+      showToast('没有可总结的内容（范围为空）', { kind: 'warn', spinner: false, sticky: false, duration: 2200 });
       return;
     }
 
@@ -2388,6 +2515,7 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
 
     if (created <= 0) {
       setStatus(`总结未生成（${runErrs.length ? runErrs[0] : '未知原因'}）`, 'warn');
+      showToast(`总结未生成（${runErrs.length ? runErrs[0] : '未知原因'}）`, { kind: 'warn', spinner: false, sticky: false, duration: 2600 });
       return;
     }
 
@@ -2426,9 +2554,30 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
         setStatus('总结完成 ✅', 'ok');
       }
     }
+
+    // toast notify (non-blocking)
+    try {
+      const errCount = (writeErrs?.length || 0) + (runErrs?.length || 0);
+      const kind = errCount ? 'warn' : 'ok';
+      const text = (totalSeg > 1)
+        ? (errCount ? '分段总结完成 ⚠️' : '分段总结完成 ✅')
+        : (errCount ? '总结完成 ⚠️' : '总结完成 ✅');
+      showToast(text, { kind, spinner: false, sticky: false, duration: errCount ? 2600 : 1700 });
+    } catch { /* ignore toast errors */ }
+
+
+
+  } catch (e) {
+    console.error('[StoryGuide] Summary failed:', e);
+    const msg = (e && (e.message || String(e))) ? (e.message || String(e)) : '未知错误';
+    setStatus(`总结失败 ❌（${msg}）`, 'err');
+    showToast(`总结失败 ❌（${msg}）`, { kind: 'err', spinner: false, sticky: false, duration: 3200 });
   } finally {
+
     isSummarizing = false;
     updateButtonsEnabled();
+    // avoid stuck "正在总结" toast on unexpected exits
+    try { if ($('#sg_toast').hasClass('spinner')) hideToast(); } catch { /* ignore */ }
   }
 }
 
@@ -2492,6 +2641,865 @@ function buildTriggerInjection(keywords, tag = 'SG_WI_TRIGGERS', style = 'hidden
   return `\n\n<!--${tag}\n${body}\n-->`;
 }
 
+// -------------------- ROLL 判定 --------------------
+function rollDice(sides = 100) {
+  const s = Math.max(2, Number(sides) || 100);
+  return Math.floor(Math.random() * s) + 1;
+}
+
+function makeNumericProxy(obj) {
+  const src = (obj && typeof obj === 'object') ? obj : {};
+  return new Proxy(src, {
+    get(target, prop) {
+      if (prop === Symbol.toStringTag) return 'NumericProxy';
+      if (prop in target) {
+        const v = target[prop];
+        if (v && typeof v === 'object') return makeNumericProxy(v);
+        const n = Number(v);
+        return Number.isFinite(n) ? n : 0;
+      }
+      return 0;
+    },
+  });
+}
+
+function detectRollAction(text, actions) {
+  const t = String(text || '').toLowerCase();
+  if (!t) return null;
+  const list = Array.isArray(actions) ? actions : DEFAULT_ROLL_ACTIONS;
+  for (const a of list) {
+    const kws = Array.isArray(a?.keywords) ? a.keywords : [];
+    for (const kw of kws) {
+      const k = String(kw || '').toLowerCase();
+      if (k && t.includes(k)) return { key: String(a.key || ''), label: String(a.label || a.key || '') };
+    }
+  }
+  return null;
+}
+
+function extractStatusBlock(text, tagName = 'status_current_variable') {
+  const t = String(text || '');
+  if (!t) return '';
+  const re = new RegExp(`<${tagName}>([\\s\\S]*?)<\\/${tagName}>`, 'gi');
+  let m = null;
+  let last = '';
+  while ((m = re.exec(t))) {
+    if (m && m[1]) last = m[1];
+  }
+  return String(last || '').trim();
+}
+
+function parseStatData(text, mode = 'json') {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+
+  if (String(mode || 'json') === 'kv') {
+    const out = { pc: {}, mods: {}, context: {} };
+    const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    for (const line of lines) {
+      const m = line.match(/^([a-zA-Z0-9_.\[\]-]+)\s*[:=]\s*([+-]?\d+(?:\.\d+)?)\s*$/);
+      if (!m) continue;
+      const path = m[1];
+      const val = Number(m[2]);
+      if (!Number.isFinite(val)) continue;
+      if (path.startsWith('pc.')) {
+        const k = path.slice(3);
+        out.pc[k] = val;
+      } else if (path.startsWith('mods.')) {
+        const k = path.slice(5);
+        out.mods[k] = val;
+      } else if (path.startsWith('context.')) {
+        const k = path.slice(8);
+        out.context[k] = val;
+      }
+    }
+    return out;
+  }
+
+  const parsed = safeJsonParse(raw);
+  if (!parsed || typeof parsed !== 'object') return null;
+  return parsed;
+}
+
+function normalizeStatData(data) {
+  const obj = (data && typeof data === 'object') ? data : {};
+  const pc = (obj.pc && typeof obj.pc === 'object') ? obj.pc : {};
+  const mods = (obj.mods && typeof obj.mods === 'object') ? obj.mods : {};
+  const context = (obj.context && typeof obj.context === 'object') ? obj.context : {};
+  return { pc, mods, context };
+}
+
+function buildModifierBreakdown(mods, sources) {
+  const srcList = Array.isArray(sources) && sources.length
+    ? sources
+    : DEFAULT_ROLL_MODIFIER_SOURCES;
+  const out = [];
+  for (const key of srcList) {
+    const raw = mods?.[key];
+    let v = 0;
+    if (Number.isFinite(Number(raw))) {
+      v = Number(raw);
+    } else if (raw && typeof raw === 'object') {
+      for (const val of Object.values(raw)) {
+        const n = Number(val);
+        if (Number.isFinite(n)) v += n;
+      }
+    }
+    out.push({ source: String(key), value: Number.isFinite(v) ? v : 0 });
+  }
+  const total = out.reduce((acc, x) => acc + (Number.isFinite(x.value) ? x.value : 0), 0);
+  return { list: out, total };
+}
+
+function evaluateRollFormula(formula, ctx) {
+  const expr = String(formula || '').trim();
+  if (!expr) return 0;
+  try {
+    const fn = new Function('ctx', 'with(ctx){ return (' + expr + '); }');
+    const v = fn(ctx);
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function computeRollLocal(actionKey, statData, settings) {
+  const s = settings || ensureSettings();
+  const { pc, mods, context } = normalizeStatData(statData);
+  const modBreakdown = buildModifierBreakdown(mods, safeJsonParse(s.wiRollModifierSourcesJson) || null);
+
+  const formulas = safeJsonParse(s.wiRollFormulaJson) || DEFAULT_ROLL_FORMULAS;
+  const formula = String(formulas?.[actionKey] || formulas?.default || DEFAULT_ROLL_FORMULAS.default);
+
+  const ctx = {
+    PC: makeNumericProxy(pc),
+    MOD: {
+      total: modBreakdown.total,
+      bySource: makeNumericProxy(modBreakdown.list.reduce((acc, x) => { acc[x.source] = x.value; return acc; }, {})),
+    },
+    CTX: makeNumericProxy(context),
+    ACTION: String(actionKey || ''),
+    CLAMP: (v, lo, hi) => clampFloat(v, lo, hi, v),
+  };
+
+  const base = evaluateRollFormula(formula, ctx);
+  const randWeight = clampFloat(s.wiRollRandomWeight, 0, 1, 0.3);
+  const roll = rollDice(100);
+  const randFactor = (roll - 50) / 50;
+  const final = base + base * randWeight * randFactor;
+  const threshold = 50;
+  const success = final >= threshold;
+
+  return {
+    action: String(actionKey || ''),
+    formula,
+    base,
+    mods: modBreakdown.list,
+    random: { roll, weight: randWeight },
+    final,
+    threshold,
+    success,
+  };
+}
+
+function normalizeRollMods(mods, sources) {
+  const srcList = Array.isArray(sources) && sources.length ? sources : DEFAULT_ROLL_MODIFIER_SOURCES;
+  const map = new Map();
+  for (const m of (Array.isArray(mods) ? mods : [])) {
+    const key = String(m?.source || '').trim();
+    if (!key) continue;
+    const v = Number(m?.value);
+    map.set(key, Number.isFinite(v) ? v : 0);
+  }
+  return srcList.map(s => ({ source: String(s), value: map.has(s) ? map.get(s) : 0 }));
+}
+
+function getRollAnalysisSummary(res) {
+  if (!res || typeof res !== 'object') return '';
+  const raw = res.analysisSummary ?? res.analysis_summary ?? res.explanation ?? res.reason ?? '';
+  if (raw && typeof raw === 'object') {
+    const pick = raw.summary ?? raw.text ?? raw.message;
+    if (pick != null) return String(pick).trim();
+    try { return JSON.stringify(raw); } catch { return String(raw); }
+  }
+  return String(raw || '').trim();
+}
+
+function buildRollPromptMessages(actionKey, statData, settings, formula, randomWeight, randomRoll) {
+  const s = settings || ensureSettings();
+  const sys = String(s.wiRollSystemPrompt || DEFAULT_ROLL_SYSTEM_PROMPT).trim() || DEFAULT_ROLL_SYSTEM_PROMPT;
+  const tmpl = String(s.wiRollUserTemplate || DEFAULT_ROLL_USER_TEMPLATE).trim() || DEFAULT_ROLL_USER_TEMPLATE;
+  const difficulty = String(s.wiRollDifficulty || 'normal');
+  const statDataJson = JSON.stringify(statData || {}, null, 0);
+  const modifierSourcesJson = String(s.wiRollModifierSourcesJson || JSON.stringify(DEFAULT_ROLL_MODIFIER_SOURCES));
+  const user = tmpl
+    .replaceAll('{{action}}', String(actionKey || ''))
+    .replaceAll('{{formula}}', String(formula || ''))
+    .replaceAll('{{randomWeight}}', String(randomWeight))
+    .replaceAll('{{difficulty}}', difficulty)
+    .replaceAll('{{randomRoll}}', String(randomRoll))
+    .replaceAll('{{modifierSourcesJson}}', modifierSourcesJson)
+    .replaceAll('{{statDataJson}}', statDataJson);
+
+  const enforced = user + `\n\n` + ROLL_JSON_REQUIREMENT;
+  return [
+    { role: 'system', content: sys },
+    { role: 'user', content: enforced },
+  ];
+}
+
+function buildRollDecisionPromptMessages(userText, statData, settings, randomRoll) {
+  const s = settings || ensureSettings();
+  const sys = DEFAULT_ROLL_DECISION_SYSTEM_PROMPT;
+  const randomWeight = clampFloat(s.wiRollRandomWeight, 0, 1, 0.3);
+  const difficulty = String(s.wiRollDifficulty || 'normal');
+  const statDataJson = JSON.stringify(statData || {}, null, 0);
+
+  const user = DEFAULT_ROLL_DECISION_USER_TEMPLATE
+    .replaceAll('{{userText}}', String(userText || ''))
+    .replaceAll('{{randomWeight}}', String(randomWeight))
+    .replaceAll('{{difficulty}}', difficulty)
+    .replaceAll('{{randomRoll}}', String(randomRoll))
+    .replaceAll('{{statDataJson}}', statDataJson);
+
+  const enforced = user + `\n\n` + ROLL_DECISION_JSON_REQUIREMENT;
+  return [
+    { role: 'system', content: sys },
+    { role: 'user', content: enforced },
+  ];
+}
+
+async function computeRollViaCustomProvider(actionKey, statData, settings, randomRoll) {
+  const s = settings || ensureSettings();
+  const formulas = safeJsonParse(s.wiRollFormulaJson) || DEFAULT_ROLL_FORMULAS;
+  const formula = String(formulas?.[actionKey] || formulas?.default || DEFAULT_ROLL_FORMULAS.default);
+  const randomWeight = clampFloat(s.wiRollRandomWeight, 0, 1, 0.3);
+  const messages = buildRollPromptMessages(actionKey, statData, s, formula, randomWeight, randomRoll);
+
+  const jsonText = await callViaCustom(
+    s.wiRollCustomEndpoint,
+    s.wiRollCustomApiKey,
+    s.wiRollCustomModel,
+    messages,
+    clampFloat(s.wiRollCustomTemperature, 0, 2, 0.2),
+    clampInt(s.wiRollCustomMaxTokens, 128, 200000, 512),
+    clampFloat(s.wiRollCustomTopP, 0, 1, 0.95),
+    !!s.wiRollCustomStream
+  );
+
+  const parsed = safeJsonParse(jsonText);
+  if (!parsed || typeof parsed !== 'object') return null;
+  if (!Array.isArray(parsed.mods)) return null;
+
+  if (!Array.isArray(parsed.mods)) parsed.mods = [];
+  parsed.action = String(parsed.action || actionKey || '');
+  parsed.formula = String(parsed.formula || formula || '');
+  return parsed;
+}
+
+async function computeRollDecisionViaCustom(userText, statData, settings, randomRoll) {
+  const s = settings || ensureSettings();
+  const messages = buildRollDecisionPromptMessages(userText, statData, s, randomRoll);
+
+  const jsonText = await callViaCustom(
+    s.wiRollCustomEndpoint,
+    s.wiRollCustomApiKey,
+    s.wiRollCustomModel,
+    messages,
+    clampFloat(s.wiRollCustomTemperature, 0, 2, 0.2),
+    clampInt(s.wiRollCustomMaxTokens, 128, 200000, 512),
+    clampFloat(s.wiRollCustomTopP, 0, 1, 0.95),
+    !!s.wiRollCustomStream
+  );
+
+  const parsed = safeJsonParse(jsonText);
+  if (!parsed || typeof parsed !== 'object') return null;
+  if (parsed.needRoll === false) return { noRoll: true };
+
+  const res = parsed.result && typeof parsed.result === 'object' ? parsed.result : parsed;
+  if (!res || typeof res !== 'object') return null;
+
+  return res;
+}
+
+function buildRollInjectionFromResult(res, tag = 'SG_ROLL', style = 'hidden') {
+  if (!res) return '';
+  const action = String(res.actionLabel || res.action || '').trim();
+  const formula = String(res.formula || '').trim();
+  const base = Number.isFinite(Number(res.base)) ? Number(res.base) : 0;
+  const final = Number.isFinite(Number(res.final)) ? Number(res.final) : 0;
+  const threshold = Number.isFinite(Number(res.threshold)) ? Number(res.threshold) : null;
+  const success = res.success == null ? null : !!res.success;
+  const roll = Number.isFinite(Number(res.random?.roll)) ? Number(res.random?.roll) : 0;
+  const weight = Number.isFinite(Number(res.random?.weight)) ? Number(res.random?.weight) : 0;
+  const mods = Array.isArray(res.mods) ? res.mods : [];
+  const modLine = mods.map(m => `${m.source}:${Number(m.value) >= 0 ? '+' : ''}${Number(m.value) || 0}`).join(' | ');
+  const outcome = String(res.outcomeTier || '').trim() || (success == null ? 'N/A' : (success ? '成功' : '失败')) ;
+
+  if (String(style || 'hidden') === 'plain') {
+    return `\n\n[${tag}] 动作=${action} | 结果=${outcome} | 最终=${final.toFixed(2)} | 阈值>=${threshold == null ? 'N/A' : threshold} | 基础=${base.toFixed(2)} | 随机=1d100:${roll}*${weight} | 修正=${modLine} | 公式=${formula}\n`;
+  }
+
+  return `\n\n<!--${tag}\n动作=${action}\n结果=${outcome}\n最终=${final.toFixed(2)}\n阈值>=${threshold == null ? 'N/A' : threshold}\n基础=${base.toFixed(2)}\n随机=1d100:${roll}*${weight}\n修正=${modLine}\n公式=${formula}\n-->`;
+}
+
+function getLatestAssistantText(chat, strip = true) {
+  const arr = Array.isArray(chat) ? chat : [];
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const m = arr[i];
+    if (!m) continue;
+    if (m.is_system === true) continue;
+    if (m.is_user === true) continue;
+    const raw = String(m.mes ?? m.message ?? '');
+    return strip ? stripHtml(raw) : raw;
+  }
+  return '';
+}
+
+function resolveStatDataFromLatestAssistant(chat, settings) {
+  const s = settings || ensureSettings();
+  const lastText = getLatestAssistantText(chat, false);
+  const block = extractStatusBlock(lastText);
+  const parsed = parseStatData(block, s.wiRollStatParseMode || 'json');
+  return { statData: parsed, rawText: block };
+}
+
+function resolveStatDataFromVariableStore(settings) {
+  const s = settings || ensureSettings();
+  const key = String(s.wiRollStatVarName || 'stat_data').trim();
+  if (!key) return { statData: null, rawText: '' };
+  const ctx = SillyTavern.getContext?.() ?? {};
+  const sources = [
+    ctx?.variables,
+    ctx?.chatMetadata?.variables,
+    ctx?.chatMetadata,
+    globalThis?.variables,
+  ].filter(Boolean);
+  let raw = null;
+  for (const src of sources) {
+    if (src && Object.prototype.hasOwnProperty.call(src, key)) {
+      raw = src[key];
+      break;
+    }
+  }
+  if (raw == null) return { statData: null, rawText: '' };
+  if (typeof raw === 'string') {
+    const parsed = parseStatData(raw, s.wiRollStatParseMode || 'json');
+    return { statData: parsed, rawText: raw };
+  }
+  if (typeof raw === 'object') {
+    return { statData: raw, rawText: JSON.stringify(raw) };
+  }
+  return { statData: null, rawText: '' };
+}
+
+async function resolveStatDataFromTemplate(settings) {
+  const s = settings || ensureSettings();
+  const tpl = `<status_current_variable>\n{{format_message_variable::stat_data}}\n</status_current_variable>`;
+  const ctx = SillyTavern.getContext?.() ?? {};
+  const fns = [
+    ctx?.renderTemplateAsync,
+    ctx?.renderTemplate,
+    ctx?.formatMessageVariables,
+    ctx?.replaceMacros,
+    globalThis?.renderTemplate,
+    globalThis?.formatMessageVariables,
+    globalThis?.replaceMacros,
+  ].filter(Boolean);
+  let rendered = '';
+  for (const fn of fns) {
+    try {
+      const out = await fn(tpl);
+      if (typeof out === 'string' && out.trim()) {
+        rendered = out;
+        break;
+      }
+    } catch { /* ignore */ }
+  }
+  if (!rendered || rendered.includes('{{format_message_variable::stat_data}}')) {
+    return { statData: null, rawText: '' };
+  }
+  const block = extractStatusBlock(rendered);
+  const parsed = parseStatData(block, s.wiRollStatParseMode || 'json');
+  return { statData: parsed, rawText: block };
+}
+
+async function maybeInjectRollResult(reason = 'msg_sent') {
+  const s = ensureSettings();
+  if (!s.wiRollEnabled) return;
+
+  const ctx = SillyTavern.getContext();
+  const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+  if (!chat.length) return;
+
+  const modalOpen = $('#sg_modal_backdrop').is(':visible');
+  const shouldLog = modalOpen || s.wiRollDebugLog;
+  const logStatus = (msg, kind = 'info') => {
+    if (!shouldLog) return;
+    if (modalOpen) setStatus(msg, kind);
+    else showToast(msg, { kind, spinner: false, sticky: false, duration: 2200 });
+  };
+
+  const last = chat[chat.length - 1];
+  if (!last || last.is_user !== true) return; // only on user send
+  let lastText = String(last.mes ?? last.message ?? '').trim();
+  if (!lastText || lastText.startsWith('/')) return;
+  const rollTag = String(s.wiRollTag || 'SG_ROLL').trim() || 'SG_ROLL';
+  if (lastText.includes(rollTag)) return;
+  lastText = stripTriggerInjection(lastText, rollTag);
+
+  const source = String(s.wiRollStatSource || 'variable');
+  let statData = null;
+  if (source === 'latest') {
+    ({ statData } = resolveStatDataFromLatestAssistant(chat, s));
+  } else if (source === 'template') {
+    ({ statData } = await resolveStatDataFromTemplate(s));
+    if (!statData) ({ statData } = resolveStatDataFromVariableStore(s));
+    if (!statData) ({ statData } = resolveStatDataFromLatestAssistant(chat, s));
+  } else {
+    ({ statData } = resolveStatDataFromVariableStore(s));
+    if (!statData) ({ statData } = await resolveStatDataFromTemplate(s));
+    if (!statData) ({ statData } = resolveStatDataFromLatestAssistant(chat, s));
+  }
+  if (!statData) {
+    const name = String(s.wiRollStatVarName || 'stat_data').trim() || 'stat_data';
+    logStatus(`ROLL 未触发：未读取到变量（${name}）`, 'warn');
+    return;
+  }
+
+  const randomRoll = rollDice(100);
+  let res = null;
+  const canUseCustom = String(s.wiRollProvider || 'custom') === 'custom' && String(s.wiRollCustomEndpoint || '').trim();
+  if (canUseCustom) {
+    try {
+      res = await computeRollDecisionViaCustom(lastText, statData, s, randomRoll);
+      if (res?.noRoll) {
+        logStatus('ROLL 未触发：AI 判定无需判定', 'info');
+        return;
+      }
+    } catch (e) {
+      console.warn('[StoryGuide] roll custom provider failed; fallback to local', e);
+    }
+  }
+  if (!res) {
+    logStatus('ROLL 未触发：AI 判定失败或无结果', 'warn');
+    return;
+  }
+
+  if (res) {
+    if (!Array.isArray(res.mods)) res.mods = [];
+    res.actionLabel = res.actionLabel || res.action || '';
+    res.formula = res.formula || '';
+    if (!res.random) res.random = { roll: randomRoll, weight: clampFloat(s.wiRollRandomWeight, 0, 1, 0.3) };
+    if (res.final == null && Number.isFinite(Number(res.base))) {
+      const randWeight = Number(res.random?.weight) || clampFloat(s.wiRollRandomWeight, 0, 1, 0.3);
+      const randRoll = Number(res.random?.roll) || randomRoll;
+      res.final = Number(res.base) + Number(res.base) * randWeight * ((randRoll - 50) / 50);
+    }
+    if (res.success == null && Number.isFinite(Number(res.final)) && Number.isFinite(Number(res.threshold))) {
+      res.success = Number(res.final) >= Number(res.threshold);
+    }
+    const summary = getRollAnalysisSummary(res);
+    if (summary) {
+      appendRollLog({
+        ts: Date.now(),
+        action: res.actionLabel || res.action,
+        outcomeTier: res.outcomeTier,
+        summary,
+        final: res.final,
+        success: res.success,
+        userText: lastText,
+      });
+    }
+    const style = String(s.wiRollInjectStyle || 'hidden').trim() || 'hidden';
+    const rollText = buildRollInjectionFromResult(res, rollTag, style);
+    if (rollText) {
+      const cleaned = stripTriggerInjection(last.mes ?? last.message ?? '', rollTag);
+      last.mes = cleaned + rollText;
+      logStatus('ROLL 已注入：判定完成', 'ok');
+    }
+  }
+
+  // try save
+  try {
+    if (typeof ctx.saveChatDebounced === 'function') ctx.saveChatDebounced();
+    else if (typeof ctx.saveChat === 'function') ctx.saveChat();
+  } catch { /* ignore */ }
+}
+
+async function buildRollInjectionForText(userText, chat, settings, logStatus) {
+  const s = settings || ensureSettings();
+  const rollTag = String(s.wiRollTag || 'SG_ROLL').trim() || 'SG_ROLL';
+  if (String(userText || '').includes(rollTag)) return null;
+  const source = String(s.wiRollStatSource || 'variable');
+  let statData = null;
+  if (source === 'latest') {
+    ({ statData } = resolveStatDataFromLatestAssistant(chat, s));
+  } else if (source === 'template') {
+    ({ statData } = await resolveStatDataFromTemplate(s));
+    if (!statData) ({ statData } = resolveStatDataFromVariableStore(s));
+    if (!statData) ({ statData } = resolveStatDataFromLatestAssistant(chat, s));
+  } else {
+    ({ statData } = resolveStatDataFromVariableStore(s));
+    if (!statData) ({ statData } = await resolveStatDataFromTemplate(s));
+    if (!statData) ({ statData } = resolveStatDataFromLatestAssistant(chat, s));
+  }
+  if (!statData) {
+    const name = String(s.wiRollStatVarName || 'stat_data').trim() || 'stat_data';
+    logStatus?.(`ROLL 未触发：未读取到变量（${name}）`, 'warn');
+    return null;
+  }
+
+  const randomRoll = rollDice(100);
+  let res = null;
+  const canUseCustom = String(s.wiRollProvider || 'custom') === 'custom' && String(s.wiRollCustomEndpoint || '').trim();
+  if (canUseCustom) {
+    try {
+      res = await computeRollDecisionViaCustom(userText, statData, s, randomRoll);
+      if (res?.noRoll) {
+        logStatus?.('ROLL 未触发：AI 判定无需判定', 'info');
+        return null;
+      }
+    } catch (e) {
+      console.warn('[StoryGuide] roll custom provider failed; fallback to local', e);
+    }
+  }
+  if (!res) {
+    logStatus?.('ROLL 未触发：AI 判定失败或无结果', 'warn');
+    return null;
+  }
+  if (!res) return null;
+
+  if (!Array.isArray(res.mods)) res.mods = [];
+  res.actionLabel = res.actionLabel || res.action || '';
+  res.formula = res.formula || '';
+  if (!res.random) res.random = { roll: randomRoll, weight: clampFloat(s.wiRollRandomWeight, 0, 1, 0.3) };
+  if (res.final == null && Number.isFinite(Number(res.base))) {
+    const randWeight = Number(res.random?.weight) || clampFloat(s.wiRollRandomWeight, 0, 1, 0.3);
+    const randRoll = Number(res.random?.roll) || randomRoll;
+    res.final = Number(res.base) + Number(res.base) * randWeight * ((randRoll - 50) / 50);
+  }
+  if (res.success == null && Number.isFinite(Number(res.final)) && Number.isFinite(Number(res.threshold))) {
+    res.success = Number(res.final) >= Number(res.threshold);
+  }
+  const summary = getRollAnalysisSummary(res);
+  if (summary) {
+    appendRollLog({
+      ts: Date.now(),
+      action: res.actionLabel || res.action,
+      outcomeTier: res.outcomeTier,
+      summary,
+      final: res.final,
+      success: res.success,
+      userText: String(userText || ''),
+    });
+  }
+  if (!res.random) res.random = { roll: randomRoll, weight: clampFloat(s.wiRollRandomWeight, 0, 1, 0.3) };
+  const style = String(s.wiRollInjectStyle || 'hidden').trim() || 'hidden';
+  const rollText = buildRollInjectionFromResult(res, rollTag, style);
+  if (rollText) logStatus?.('ROLL 已注入：判定完成', 'ok');
+  return rollText || null;
+}
+
+async function buildTriggerInjectionForText(userText, chat, settings, logStatus) {
+  const s = settings || ensureSettings();
+  if (!s.wiTriggerEnabled) return null;
+
+  const startAfter = clampInt(s.wiTriggerStartAfterAssistantMessages, 0, 200000, 0);
+  if (startAfter > 0) {
+    const assistantFloors = computeFloorCount(chat, 'assistant');
+    if (assistantFloors < startAfter) {
+      logStatus?.(`索引未触发：AI 楼层不足 ${assistantFloors}/${startAfter}`, 'info');
+      return null;
+    }
+  }
+
+  const lookback = clampInt(s.wiTriggerLookbackMessages, 5, 120, 20);
+  const tagForStrip = String(s.wiTriggerTag || 'SG_WI_TRIGGERS').trim() || 'SG_WI_TRIGGERS';
+  const rollTag = String(s.wiRollTag || 'SG_ROLL').trim() || 'SG_ROLL';
+  const recentText = buildRecentChatText(chat, lookback, true, [tagForStrip, rollTag]);
+  if (!recentText) return null;
+
+  const candidates = collectBlueIndexCandidates();
+  if (!candidates.length) return null;
+
+  const maxEntries = clampInt(s.wiTriggerMaxEntries, 1, 20, 4);
+  const minScore = clampFloat(s.wiTriggerMinScore, 0, 1, 0.08);
+  const includeUser = !!s.wiTriggerIncludeUserMessage;
+  const userWeight = clampFloat(s.wiTriggerUserMessageWeight, 0, 10, 1.6);
+  const matchMode = String(s.wiTriggerMatchMode || 'local');
+
+  let picked = [];
+  if (matchMode === 'llm') {
+    try {
+      picked = await pickRelevantIndexEntriesLLM(recentText, userText, candidates, maxEntries, includeUser, userWeight);
+    } catch (e) {
+      console.warn('[StoryGuide] index LLM failed; fallback to local similarity', e);
+      picked = pickRelevantIndexEntries(recentText, userText, candidates, maxEntries, minScore, includeUser, userWeight);
+    }
+  } else {
+    picked = pickRelevantIndexEntries(recentText, userText, candidates, maxEntries, minScore, includeUser, userWeight);
+  }
+  if (!picked.length) return null;
+
+  const maxKeywords = clampInt(s.wiTriggerMaxKeywords, 1, 200, 24);
+  const kwSet = new Set();
+  const pickedNames = [];
+  for (const { e } of picked) {
+    const name = String(e.title || '').trim() || '条目';
+    pickedNames.push(name);
+    for (const k of (Array.isArray(e.keywords) ? e.keywords : [])) {
+      const kk = String(k || '').trim();
+      if (!kk) continue;
+      kwSet.add(kk);
+      if (kwSet.size >= maxKeywords) break;
+    }
+    if (kwSet.size >= maxKeywords) break;
+  }
+  const keywords = Array.from(kwSet);
+  if (!keywords.length) return null;
+
+  const style = String(s.wiTriggerInjectStyle || 'hidden').trim() || 'hidden';
+  const injected = buildTriggerInjection(keywords, tagForStrip, style);
+  if (injected) logStatus?.(`索引已注入：${pickedNames.slice(0, 4).join('、')}${pickedNames.length > 4 ? '…' : ''}`, 'ok');
+  return injected || null;
+}
+
+function installRollPreSendHook() {
+  if (window.__storyguide_roll_presend_installed) return;
+  window.__storyguide_roll_presend_installed = true;
+  let guard = false;
+  let preSendPromise = null;
+
+  function findTextarea() {
+    return document.querySelector('#send_textarea, textarea#send_textarea, .send_textarea, textarea.send_textarea');
+  }
+
+  function findForm(textarea) {
+    if (textarea && textarea.closest) {
+      const f = textarea.closest('form');
+      if (f) return f;
+    }
+    return document.getElementById('chat_input_form') || null;
+  }
+
+  function findSendButton(form) {
+    if (form) {
+      const btn = form.querySelector('button[type="submit"]');
+      if (btn) return btn;
+    }
+    return document.querySelector('#send_button, #send_but, button.send_button, .send_button');
+  }
+
+  function buildPreSendLogger(s) {
+    const modalOpen = $('#sg_modal_backdrop').is(':visible');
+    const shouldLog = modalOpen || s.wiRollDebugLog || s.wiTriggerDebugLog;
+    if (!shouldLog) return null;
+    return (msg, kind = 'info') => {
+      if (modalOpen) setStatus(msg, kind);
+      else showToast(msg, { kind, spinner: false, sticky: false, duration: 2200 });
+    };
+  }
+
+  async function applyPreSendInjectionsToText(raw, chat, s, logStatus) {
+    const text = String(raw ?? '').trim();
+    if (!text || text.startsWith('/')) return null;
+
+    const rollText = s.wiRollEnabled ? await buildRollInjectionForText(text, chat, s, logStatus) : null;
+    const triggerText = s.wiTriggerEnabled ? await buildTriggerInjectionForText(text, chat, s, logStatus) : null;
+    if (!rollText && !triggerText) return null;
+
+    let cleaned = stripTriggerInjection(text, String(s.wiRollTag || 'SG_ROLL').trim() || 'SG_ROLL');
+    cleaned = stripTriggerInjection(cleaned, String(s.wiTriggerTag || 'SG_WI_TRIGGERS').trim() || 'SG_WI_TRIGGERS');
+    return cleaned + (rollText || '') + (triggerText || '');
+  }
+
+  function findMessageArg(args) {
+    if (!Array.isArray(args) || !args.length) return null;
+    if (typeof args[0] === 'string') return { type: 'string', index: 0 };
+    if (args[0] && typeof args[0] === 'object') {
+      if (typeof args[0].mes === 'string') return { type: 'object', index: 0, key: 'mes' };
+      if (typeof args[0].message === 'string') return { type: 'object', index: 0, key: 'message' };
+    }
+    if (typeof args[1] === 'string') return { type: 'string', index: 1 };
+    return null;
+  }
+
+  async function applyPreSendInjectionsToArgs(args, chat, s, logStatus) {
+    const msgArg = findMessageArg(args);
+    if (!msgArg) return false;
+    const raw = msgArg.type === 'string' ? args[msgArg.index] : args[msgArg.index]?.[msgArg.key];
+    const injected = await applyPreSendInjectionsToText(raw, chat, s, logStatus);
+    if (!injected) return false;
+    if (msgArg.type === 'string') args[msgArg.index] = injected;
+    else args[msgArg.index][msgArg.key] = injected;
+    return true;
+  }
+
+  async function runPreSendInjections(textarea) {
+    const s = ensureSettings();
+    if (!s.wiRollEnabled && !s.wiTriggerEnabled) return false;
+    const raw = String(textarea?.value ?? '');
+    const logStatus = buildPreSendLogger(s);
+    const ctx = SillyTavern.getContext();
+    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+    const injected = await applyPreSendInjectionsToText(raw, chat, s, logStatus);
+    if (injected && textarea) {
+      textarea.value = injected;
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    }
+    return false;
+  }
+
+  async function ensurePreSend(textarea) {
+    if (preSendPromise) return preSendPromise;
+    preSendPromise = (async () => {
+      await runPreSendInjections(textarea);
+    })();
+    try {
+      await preSendPromise;
+    } finally {
+      preSendPromise = null;
+    }
+  }
+
+  function triggerSend(form) {
+    const btn = findSendButton(form);
+    if (btn && typeof btn.click === 'function') {
+      btn.click();
+      return;
+    }
+    if (form && typeof form.requestSubmit === 'function') {
+      form.requestSubmit();
+      return;
+    }
+    if (form && typeof form.dispatchEvent === 'function') {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    }
+  }
+
+  document.addEventListener('submit', async (e) => {
+    const form = e.target;
+    const textarea = findTextarea();
+    if (!form || !textarea || !form.contains(textarea)) return;
+    if (guard) return;
+    const s = ensureSettings();
+    if (!s.wiRollEnabled && !s.wiTriggerEnabled) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    guard = true;
+
+    try {
+      await ensurePreSend(textarea);
+    } finally {
+      guard = false;
+      window.__storyguide_presend_guard = true;
+      try {
+        triggerSend(form);
+      } finally {
+        window.__storyguide_presend_guard = false;
+      }
+    }
+  }, true);
+
+  document.addEventListener('keydown', async (e) => {
+    const textarea = findTextarea();
+    if (!textarea || e.target !== textarea) return;
+    if (e.key !== 'Enter') return;
+    if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
+    const s = ensureSettings();
+    if (!s.wiRollEnabled && !s.wiTriggerEnabled) return;
+    if (guard) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    guard = true;
+
+    try {
+      await ensurePreSend(textarea);
+    } finally {
+      guard = false;
+      const form = findForm(textarea);
+      window.__storyguide_presend_guard = true;
+      try {
+        triggerSend(form);
+      } finally {
+        window.__storyguide_presend_guard = false;
+      }
+    }
+  }, true);
+
+  async function handleSendButtonEvent(e) {
+    const btn = e.target && e.target.closest
+      ? e.target.closest('#send_but, #send_button, button.send_button, .send_button')
+      : null;
+    if (!btn) return;
+    if (guard || window.__storyguide_presend_guard) return;
+    const s = ensureSettings();
+    if (!s.wiRollEnabled && !s.wiTriggerEnabled) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+    guard = true;
+
+    try {
+      const textarea = findTextarea();
+      if (textarea) await ensurePreSend(textarea);
+    } finally {
+      guard = false;
+      window.__storyguide_presend_guard = true;
+      try {
+        if (typeof btn.click === 'function') btn.click();
+      } finally {
+        window.__storyguide_presend_guard = false;
+      }
+    }
+  }
+
+  document.addEventListener('click', handleSendButtonEvent, true);
+
+  function wrapSendFunction(obj, key) {
+    if (!obj || typeof obj[key] !== 'function' || obj[key].__sg_wrapped) return;
+    const original = obj[key];
+    obj[key] = async function (...args) {
+      if (window.__storyguide_presend_guard) return original.apply(this, args);
+      const s = ensureSettings();
+      if (!s.wiRollEnabled && !s.wiTriggerEnabled) return original.apply(this, args);
+      const textarea = findTextarea();
+      if (textarea) {
+        await ensurePreSend(textarea);
+      } else {
+        const logStatus = buildPreSendLogger(s);
+        const ctx = SillyTavern.getContext?.() ?? {};
+        const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+        await applyPreSendInjectionsToArgs(args, chat, s, logStatus);
+      }
+      window.__storyguide_presend_guard = true;
+      try {
+        return await original.apply(this, args);
+      } finally {
+        window.__storyguide_presend_guard = false;
+      }
+    };
+    obj[key].__sg_wrapped = true;
+  }
+
+  function installSendWrappers() {
+    const ctx = SillyTavern.getContext?.() ?? {};
+    const candidates = ['sendMessage', 'sendUserMessage', 'sendUserMessageInChat', 'submitUserMessage'];
+    for (const k of candidates) wrapSendFunction(ctx, k);
+    for (const k of candidates) wrapSendFunction(SillyTavern, k);
+    for (const k of candidates) wrapSendFunction(globalThis, k);
+  }
+
+  installSendWrappers();
+  setInterval(installSendWrappers, 2000);
+}
+
 function tokenizeForSimilarity(text) {
   const s = String(text || '').toLowerCase();
   const tokens = new Map();
@@ -2538,7 +3546,8 @@ function cosineSimilarity(mapA, mapB) {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-function buildRecentChatText(chat, lookback, excludeLast = true, stripTag = '') {
+function buildRecentChatText(chat, lookback, excludeLast = true, stripTags = '') {
+  const tags = Array.isArray(stripTags) ? stripTags : (stripTags ? [stripTags] : []);
   const msgs = [];
   const arr = Array.isArray(chat) ? chat : [];
   let i = arr.length - 1;
@@ -2548,7 +3557,11 @@ function buildRecentChatText(chat, lookback, excludeLast = true, stripTag = '') 
     if (!m) continue;
     if (m.is_system === true) continue;
     let t = stripHtml(m.mes ?? m.message ?? '');
-    if (stripTag) t = stripTriggerInjection(t, stripTag);
+    if (tags.length) {
+      for (const tag of tags) {
+        if (tag) t = stripTriggerInjection(t, tag);
+      }
+    }
     if (t) msgs.push(t);
   }
   return msgs.reverse().join('\n');
@@ -2751,6 +3764,7 @@ async function maybeInjectWorldInfoTriggers(reason = 'msg_sent') {
   if (!last || last.is_user !== true) return; // only on user send
   const lastText = String(last.mes ?? last.message ?? '').trim();
   if (!lastText || lastText.startsWith('/')) return;
+  if (lastText.includes(String(s.wiTriggerTag || 'SG_WI_TRIGGERS'))) return;
 
   // 仅在达到指定 AI 楼层后才开始索引触发（避免前期噪声/浪费）
   const startAfter = clampInt(s.wiTriggerStartAfterAssistantMessages, 0, 200000, 0);
@@ -2778,7 +3792,8 @@ async function maybeInjectWorldInfoTriggers(reason = 'msg_sent') {
   const lookback = clampInt(s.wiTriggerLookbackMessages, 5, 120, 20);
   // 最近正文（不含本次用户输入）；为避免“触发词注入”污染相似度，先剔除同 tag 的注入片段。
   const tagForStrip = String(s.wiTriggerTag || 'SG_WI_TRIGGERS').trim() || 'SG_WI_TRIGGERS';
-  const recentText = buildRecentChatText(chat, lookback, true, tagForStrip);
+  lastText = stripTriggerInjection(lastText, tagForStrip);
+  const recentText = buildRecentChatText(chat, lookback, true, [tagForStrip, rollTag]);
   if (!recentText) return;
 
   const candidates = collectBlueIndexCandidates();
@@ -3950,6 +4965,7 @@ function buildModalHtml() {
             <button class="sg-pgtab active" id="sg_pgtab_guide">剧情指导</button>
             <button class="sg-pgtab" id="sg_pgtab_summary">总结设置</button>
             <button class="sg-pgtab" id="sg_pgtab_index">索引设置</button>
+            <button class="sg-pgtab" id="sg_pgtab_roll">ROLL 设置</button>
           </div>
 
           <div class="sg-page active" id="sg_page_guide">
@@ -4445,6 +5461,106 @@ function buildModalHtml() {
 
               <div class="sg-card sg-subcard" style="margin-top:10px;">
                 <div class="sg-row sg-inline" style="margin-top:0;">
+                  <div class="sg-card-title" style="margin:0;">ROLL 点（判定）</div>
+                </div>
+                <label class="sg-check"><input type="checkbox" id="sg_wiRollEnabled">启用 ROLL 点（战斗/劝说/学习等判定；与用户输入一起注入）</label>
+                <div class="sg-grid2">
+                  <div class="sg-field">
+                    <label>随机权重（0~1）</label>
+                    <input id="sg_wiRollRandomWeight" type="number" min="0" max="1" step="0.01" placeholder="0.3">
+                  </div>
+                  <div class="sg-field">
+                    <label>难度模式</label>
+                    <select id="sg_wiRollDifficulty">
+                      <option value="simple">简单</option>
+                      <option value="normal">普通</option>
+                      <option value="hard">困难</option>
+                      <option value="hell">地狱</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="sg-grid2">
+                  <div class="sg-field">
+                    <label>变量来源</label>
+                    <select id="sg_wiRollStatSource">
+                      <option value="variable">变量存储（推荐）</option>
+                      <option value="template">模板渲染（stat_data）</option>
+                      <option value="latest">最新正文末尾</option>
+                    </select>
+                  </div>
+                  <div class="sg-field">
+                    <label>变量解析模式</label>
+                    <select id="sg_wiRollStatParseMode">
+                      <option value="json">JSON</option>
+                      <option value="kv">键值行（pc.atk=10）</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="sg-field">
+                  <label>变量名（用于“变量存储”来源）</label>
+                  <input id="sg_wiRollStatVarName" type="text" placeholder="stat_data">
+                </div>
+                <div class="sg-row sg-inline">
+                  <label>注入方式</label>
+                  <select id="sg_wiRollInjectStyle">
+                    <option value="hidden">隐藏注释</option>
+                    <option value="plain">普通文本</option>
+                  </select>
+                </div>
+                <div class="sg-row sg-inline">
+                  <label class="sg-check" style="margin:0;"><input type="checkbox" id="sg_wiRollDebugLog">调试：状态栏显示判定细节/未触发原因</label>
+                </div>
+                <div class="sg-grid2">
+                  <div class="sg-field">
+                    <label>ROLL Provider</label>
+                    <select id="sg_wiRollProvider">
+                      <option value="custom">独立 API</option>
+                      <option value="local">本地计算</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="sg-card sg-subcard" id="sg_roll_custom_block" style="display:none; margin-top:8px;">
+                  <div class="sg-grid2">
+                    <div class="sg-field">
+                      <label>ROLL 独立 API 基础URL</label>
+                      <input id="sg_wiRollCustomEndpoint" type="text" placeholder="https://api.openai.com/v1">
+                    </div>
+                    <div class="sg-field">
+                      <label>API Key</label>
+                      <input id="sg_wiRollCustomApiKey" type="password" placeholder="sk-...">
+                    </div>
+                  </div>
+                  <div class="sg-grid2">
+                    <div class="sg-field">
+                      <label>模型ID</label>
+                      <input id="sg_wiRollCustomModel" type="text" placeholder="gpt-4o-mini">
+                    </div>
+                    <div class="sg-field">
+                      <label>Max Tokens</label>
+                      <input id="sg_wiRollCustomMaxTokens" type="number" min="128" max="200000">
+                    </div>
+                  </div>
+                  <div class="sg-grid2">
+                    <div class="sg-field">
+                      <label>Temperature</label>
+                      <input id="sg_wiRollCustomTemperature" type="number" min="0" max="2" step="0.1">
+                    </div>
+                    <div class="sg-field">
+                      <label>TopP</label>
+                      <input id="sg_wiRollCustomTopP" type="number" min="0" max="1" step="0.01">
+                    </div>
+                  </div>
+                  <label class="sg-check"><input type="checkbox" id="sg_wiRollCustomStream">stream（若支持）</label>
+                  <div class="sg-field" style="margin-top:8px;">
+                    <label>ROLL 系统提示词</label>
+                    <textarea id="sg_wiRollSystemPrompt" rows="5"></textarea>
+                  </div>
+                </div>
+                <div class="sg-hint">AI 会先判断是否需要判定，再计算并注入结果；变量来源可选模板渲染的 stat_data 或最新正文末尾的 status_current_variable 块。</div>
+              </div>
+
+              <div class="sg-card sg-subcard" style="margin-top:10px;">
+                <div class="sg-row sg-inline" style="margin-top:0;">
                   <div class="sg-card-title" style="margin:0;">索引日志</div>
                   <div class="sg-spacer"></div>
                   <button class="menu_button sg-btn" id="sg_clearWiLogs">清空</button>
@@ -4496,6 +5612,23 @@ function buildModalHtml() {
             </div>
           </div> <!-- sg_page_index -->
 
+          <div class="sg-page" id="sg_page_roll">
+            <div class="sg-card">
+              <div class="sg-card-title">ROLL 设置（判定）</div>
+              <div class="sg-hint" style="margin-bottom:10px;">用于行动判定的 ROLL 注入与计算规则。</div>
+              <div id="sg_roll_mount"></div>
+            </div>
+            <div class="sg-card sg-subcard" style="margin-top:10px;">
+              <div class="sg-row sg-inline" style="margin-top:0;">
+                <div class="sg-card-title" style="margin:0;">ROLL 日志</div>
+                <div class="sg-spacer"></div>
+                <button class="menu_button sg-btn" id="sg_clearRollLogs">清空</button>
+              </div>
+              <div class="sg-loglist" id="sg_rollLogs" style="margin-top:8px;">(暂无)</div>
+              <div class="sg-hint" style="margin-top:8px;">提示：仅记录由 ROLL API 返回的简要计算摘要。</div>
+            </div>
+          </div> <!-- sg_page_roll -->
+
           <div class="sg-status" id="sg_status"></div>
         </div>
 
@@ -4531,7 +5664,7 @@ function ensureModal() {
   if (document.getElementById('sg_modal_backdrop')) return;
   document.body.insertAdjacentHTML('beforeend', buildModalHtml());
 
-  // --- settings pages (剧情指导 / 总结设置 / 索引设置) ---
+  // --- settings pages (剧情指导 / 总结设置 / 索引设置 / ROLL 设置) ---
   setupSettingsPages();
 
   $('#sg_modal_backdrop').on('click', (e) => { if (e.target && e.target.id === 'sg_modal_backdrop') closeModal(); });
@@ -4600,6 +5733,13 @@ function ensureModal() {
   $('#sg_summaryProvider').on('change', () => {
     const p = String($('#sg_summaryProvider').val() || 'st');
     $('#sg_summary_custom_block').toggle(p === 'custom');
+    pullUiToSettings(); saveSettings();
+  });
+
+  // roll provider toggle
+  $('#sg_wiRollProvider').on('change', () => {
+    const p = String($('#sg_wiRollProvider').val() || 'custom');
+    $('#sg_roll_custom_block').toggle(p === 'custom');
     pullUiToSettings(); saveSettings();
   });
 
@@ -4707,7 +5847,7 @@ function ensureModal() {
   });
 
   // auto-save summary settings
-  $('#sg_summaryEnabled, #sg_summaryEvery, #sg_summaryCountMode, #sg_summaryTemperature, #sg_summarySystemPrompt, #sg_summaryUserTemplate, #sg_summaryCustomEndpoint, #sg_summaryCustomApiKey, #sg_summaryCustomModel, #sg_summaryCustomMaxTokens, #sg_summaryCustomStream, #sg_summaryToWorldInfo, #sg_summaryWorldInfoFile, #sg_summaryWorldInfoCommentPrefix, #sg_summaryWorldInfoKeyMode, #sg_summaryIndexPrefix, #sg_summaryIndexPad, #sg_summaryIndexStart, #sg_summaryIndexInComment, #sg_summaryToBlueWorldInfo, #sg_summaryBlueWorldInfoFile, #sg_wiTriggerEnabled, #sg_wiTriggerLookbackMessages, #sg_wiTriggerIncludeUserMessage, #sg_wiTriggerUserMessageWeight, #sg_wiTriggerStartAfterAssistantMessages, #sg_wiTriggerMaxEntries, #sg_wiTriggerMinScore, #sg_wiTriggerMaxKeywords, #sg_wiTriggerInjectStyle, #sg_wiTriggerDebugLog, #sg_wiBlueIndexMode, #sg_wiBlueIndexFile, #sg_summaryMaxChars, #sg_summaryMaxTotalChars, #sg_wiTriggerMatchMode, #sg_wiIndexPrefilterTopK, #sg_wiIndexProvider, #sg_wiIndexTemperature, #sg_wiIndexSystemPrompt, #sg_wiIndexUserTemplate, #sg_wiIndexCustomEndpoint, #sg_wiIndexCustomApiKey, #sg_wiIndexCustomModel, #sg_wiIndexCustomMaxTokens, #sg_wiIndexTopP, #sg_wiIndexCustomStream').on('change input', () => {
+  $('#sg_summaryEnabled, #sg_summaryEvery, #sg_summaryCountMode, #sg_summaryTemperature, #sg_summarySystemPrompt, #sg_summaryUserTemplate, #sg_summaryCustomEndpoint, #sg_summaryCustomApiKey, #sg_summaryCustomModel, #sg_summaryCustomMaxTokens, #sg_summaryCustomStream, #sg_summaryToWorldInfo, #sg_summaryWorldInfoFile, #sg_summaryWorldInfoCommentPrefix, #sg_summaryWorldInfoKeyMode, #sg_summaryIndexPrefix, #sg_summaryIndexPad, #sg_summaryIndexStart, #sg_summaryIndexInComment, #sg_summaryToBlueWorldInfo, #sg_summaryBlueWorldInfoFile, #sg_wiTriggerEnabled, #sg_wiTriggerLookbackMessages, #sg_wiTriggerIncludeUserMessage, #sg_wiTriggerUserMessageWeight, #sg_wiTriggerStartAfterAssistantMessages, #sg_wiTriggerMaxEntries, #sg_wiTriggerMinScore, #sg_wiTriggerMaxKeywords, #sg_wiTriggerInjectStyle, #sg_wiTriggerDebugLog, #sg_wiBlueIndexMode, #sg_wiBlueIndexFile, #sg_summaryMaxChars, #sg_summaryMaxTotalChars, #sg_wiTriggerMatchMode, #sg_wiIndexPrefilterTopK, #sg_wiIndexProvider, #sg_wiIndexTemperature, #sg_wiIndexSystemPrompt, #sg_wiIndexUserTemplate, #sg_wiIndexCustomEndpoint, #sg_wiIndexCustomApiKey, #sg_wiIndexCustomModel, #sg_wiIndexCustomMaxTokens, #sg_wiIndexTopP, #sg_wiIndexCustomStream, #sg_wiRollEnabled, #sg_wiRollStatSource, #sg_wiRollStatVarName, #sg_wiRollRandomWeight, #sg_wiRollDifficulty, #sg_wiRollInjectStyle, #sg_wiRollDebugLog, #sg_wiRollStatParseMode, #sg_wiRollProvider, #sg_wiRollCustomEndpoint, #sg_wiRollCustomApiKey, #sg_wiRollCustomModel, #sg_wiRollCustomMaxTokens, #sg_wiRollCustomTopP, #sg_wiRollCustomTemperature, #sg_wiRollCustomStream, #sg_wiRollSystemPrompt').on('change input', () => {
     pullUiToSettings();
     saveSettings();
     updateSummaryInfoLabel();
@@ -4809,6 +5949,18 @@ function ensureModal() {
       setStatus('已清空索引日志', 'ok');
     } catch (e) {
       setStatus(`清空索引日志失败：${e?.message ?? e}`, 'err');
+    }
+  });
+
+  $('#sg_clearRollLogs').on('click', async () => {
+    try {
+      const meta = getSummaryMeta();
+      meta.rollLogs = [];
+      await setSummaryMeta(meta);
+      renderRollLogs(meta);
+      setStatus('已清空 ROLL 日志', 'ok');
+    } catch (e) {
+      setStatus(`清空 ROLL 日志失败：${e?.message ?? e}`, 'err');
     }
   });
 
@@ -4994,8 +6146,8 @@ function ensureModal() {
 
 function showSettingsPage(page) {
   const p = String(page || 'guide');
-  $('#sg_pgtab_guide, #sg_pgtab_summary, #sg_pgtab_index').removeClass('active');
-  $('#sg_page_guide, #sg_page_summary, #sg_page_index').removeClass('active');
+  $('#sg_pgtab_guide, #sg_pgtab_summary, #sg_pgtab_index, #sg_pgtab_roll').removeClass('active');
+  $('#sg_page_guide, #sg_page_summary, #sg_page_index, #sg_page_roll').removeClass('active');
 
   if (p === 'summary') {
     $('#sg_pgtab_summary').addClass('active');
@@ -5003,6 +6155,9 @@ function showSettingsPage(page) {
   } else if (p === 'index') {
     $('#sg_pgtab_index').addClass('active');
     $('#sg_page_index').addClass('active');
+  } else if (p === 'roll') {
+    $('#sg_pgtab_roll').addClass('active');
+    $('#sg_page_roll').addClass('active');
   } else {
     $('#sg_pgtab_guide').addClass('active');
     $('#sg_page_guide').addClass('active');
@@ -5023,10 +6178,21 @@ function setupSettingsPages() {
     }
   } catch { /* ignore */ }
 
+  // 把“ROLL 设置块”移动到 ROLL 设置页
+  try {
+    const $mount = $('#sg_roll_mount');
+    const $rollWrapper = $('#sg_wiRollEnabled').closest('.sg-card.sg-subcard');
+    if ($mount.length && $rollWrapper.length) {
+      $mount.append($rollWrapper.children());
+      $rollWrapper.remove();
+    }
+  } catch { /* ignore */ }
+
   // tabs
   $('#sg_pgtab_guide').on('click', () => showSettingsPage('guide'));
   $('#sg_pgtab_summary').on('click', () => showSettingsPage('summary'));
   $('#sg_pgtab_index').on('click', () => showSettingsPage('index'));
+  $('#sg_pgtab_roll').on('click', () => showSettingsPage('roll'));
 
   // quick jump
   $('#sg_gotoIndexPage').on('click', () => showSettingsPage('index'));
@@ -5128,6 +6294,25 @@ function pullSettingsToUi() {
   $('#sg_wiTriggerInjectStyle').val(String(s.wiTriggerInjectStyle || 'hidden'));
   $('#sg_wiTriggerDebugLog').prop('checked', !!s.wiTriggerDebugLog);
 
+  $('#sg_wiRollEnabled').prop('checked', !!s.wiRollEnabled);
+  $('#sg_wiRollStatSource').val(String(s.wiRollStatSource || 'variable'));
+  $('#sg_wiRollStatVarName').val(String(s.wiRollStatVarName || 'stat_data'));
+  $('#sg_wiRollRandomWeight').val(s.wiRollRandomWeight ?? 0.3);
+  $('#sg_wiRollDifficulty').val(String(s.wiRollDifficulty || 'normal'));
+  $('#sg_wiRollInjectStyle').val(String(s.wiRollInjectStyle || 'hidden'));
+  $('#sg_wiRollDebugLog').prop('checked', !!s.wiRollDebugLog);
+  $('#sg_wiRollStatParseMode').val(String(s.wiRollStatParseMode || 'json'));
+  $('#sg_wiRollProvider').val(String(s.wiRollProvider || 'custom'));
+  $('#sg_wiRollCustomEndpoint').val(String(s.wiRollCustomEndpoint || ''));
+  $('#sg_wiRollCustomApiKey').val(String(s.wiRollCustomApiKey || ''));
+  $('#sg_wiRollCustomModel').val(String(s.wiRollCustomModel || 'gpt-4o-mini'));
+  $('#sg_wiRollCustomMaxTokens').val(s.wiRollCustomMaxTokens || 512);
+  $('#sg_wiRollCustomTopP').val(s.wiRollCustomTopP ?? 0.95);
+  $('#sg_wiRollCustomTemperature').val(s.wiRollCustomTemperature ?? 0.2);
+  $('#sg_wiRollCustomStream').prop('checked', !!s.wiRollCustomStream);
+  $('#sg_wiRollSystemPrompt').val(String(s.wiRollSystemPrompt || DEFAULT_ROLL_SYSTEM_PROMPT));
+  $('#sg_roll_custom_block').toggle(String(s.wiRollProvider || 'custom') === 'custom');
+
   $('#sg_wiTriggerMatchMode').val(String(s.wiTriggerMatchMode || 'local'));
   $('#sg_wiIndexPrefilterTopK').val(s.wiIndexPrefilterTopK ?? 24);
   $('#sg_wiIndexProvider').val(String(s.wiIndexProvider || 'st'));
@@ -5161,6 +6346,7 @@ function pullSettingsToUi() {
   updateSummaryInfoLabel();
   renderSummaryPaneFromMeta();
   renderWiTriggerLogs();
+  renderRollLogs();
 
   updateButtonsEnabled();
 }
@@ -5263,6 +6449,58 @@ function appendWiTriggerLog(log) {
     // 不 await：避免阻塞 MESSAGE_SENT
     setSummaryMeta(meta).catch(() => void 0);
     if ($('#sg_modal_backdrop').is(':visible')) renderWiTriggerLogs(meta);
+  } catch { /* ignore */ }
+}
+
+function renderRollLogs(metaOverride = null) {
+  const $box = $('#sg_rollLogs');
+  if (!$box.length) return;
+  const meta = metaOverride || getSummaryMeta();
+  const logs = Array.isArray(meta?.rollLogs) ? meta.rollLogs : [];
+  if (!logs.length) {
+    $box.html('(暂无)');
+    return;
+  }
+  const shown = logs.slice(0, 30);
+  const html = shown.map((l) => {
+    const ts = l?.ts ? new Date(l.ts).toLocaleString() : '';
+    const action = String(l?.action || '').trim();
+    const outcome = String(l?.outcomeTier || '').trim()
+      || (l?.success == null ? 'N/A' : (l.success ? '成功' : '失败'));
+    const finalVal = Number.isFinite(Number(l?.final)) ? Number(l.final).toFixed(2) : '';
+    let summary = '';
+    if (l?.summary && typeof l.summary === 'object') {
+      const pick = l.summary.summary ?? l.summary.text ?? l.summary.message;
+      summary = String(pick || '').trim();
+      if (!summary) {
+        try { summary = JSON.stringify(l.summary); } catch { summary = String(l.summary); }
+      }
+    } else {
+      summary = String(l?.summary || '').trim();
+    }
+    const userShort = String(l?.userText || '').trim().slice(0, 160);
+
+    const detailsLines = [];
+    if (userShort) detailsLines.push(`<div><b>用户输入</b>：${escapeHtml(userShort)}</div>`);
+    if (summary) detailsLines.push(`<div><b>摘要</b>：${escapeHtml(summary)}</div>`);
+    return `
+      <details>
+        <summary>${escapeHtml(`${ts}｜${action || 'ROLL'}｜${outcome}${finalVal ? `｜最终=${finalVal}` : ''}`)}</summary>
+        <div class="sg-log-body">${detailsLines.join('')}</div>
+      </details>
+    `;
+  }).join('');
+  $box.html(html);
+}
+
+function appendRollLog(log) {
+  try {
+    const meta = getSummaryMeta();
+    const arr = Array.isArray(meta.rollLogs) ? meta.rollLogs : [];
+    arr.unshift(log);
+    meta.rollLogs = arr.slice(0, 50);
+    setSummaryMeta(meta).catch(() => void 0);
+    if ($('#sg_modal_backdrop').is(':visible')) renderRollLogs(meta);
   } catch { /* ignore */ }
 }
 
@@ -5475,6 +6713,24 @@ function pullUiToSettings() {
   s.wiTriggerInjectStyle = String($('#sg_wiTriggerInjectStyle').val() || s.wiTriggerInjectStyle || 'hidden');
   s.wiTriggerDebugLog = $('#sg_wiTriggerDebugLog').is(':checked');
 
+  s.wiRollEnabled = $('#sg_wiRollEnabled').is(':checked');
+  s.wiRollStatSource = String($('#sg_wiRollStatSource').val() || s.wiRollStatSource || 'variable');
+  s.wiRollStatVarName = String($('#sg_wiRollStatVarName').val() || s.wiRollStatVarName || 'stat_data').trim();
+  s.wiRollRandomWeight = clampFloat($('#sg_wiRollRandomWeight').val(), 0, 1, s.wiRollRandomWeight ?? 0.3);
+  s.wiRollDifficulty = String($('#sg_wiRollDifficulty').val() || s.wiRollDifficulty || 'normal');
+  s.wiRollInjectStyle = String($('#sg_wiRollInjectStyle').val() || s.wiRollInjectStyle || 'hidden');
+  s.wiRollDebugLog = $('#sg_wiRollDebugLog').is(':checked');
+  s.wiRollStatParseMode = String($('#sg_wiRollStatParseMode').val() || s.wiRollStatParseMode || 'json');
+  s.wiRollProvider = String($('#sg_wiRollProvider').val() || s.wiRollProvider || 'custom');
+  s.wiRollCustomEndpoint = String($('#sg_wiRollCustomEndpoint').val() || s.wiRollCustomEndpoint || '').trim();
+  s.wiRollCustomApiKey = String($('#sg_wiRollCustomApiKey').val() || s.wiRollCustomApiKey || '');
+  s.wiRollCustomModel = String($('#sg_wiRollCustomModel').val() || s.wiRollCustomModel || 'gpt-4o-mini');
+  s.wiRollCustomMaxTokens = clampInt($('#sg_wiRollCustomMaxTokens').val(), 128, 200000, s.wiRollCustomMaxTokens || 512);
+  s.wiRollCustomTopP = clampFloat($('#sg_wiRollCustomTopP').val(), 0, 1, s.wiRollCustomTopP ?? 0.95);
+  s.wiRollCustomTemperature = clampFloat($('#sg_wiRollCustomTemperature').val(), 0, 2, s.wiRollCustomTemperature ?? 0.2);
+  s.wiRollCustomStream = $('#sg_wiRollCustomStream').is(':checked');
+  s.wiRollSystemPrompt = String($('#sg_wiRollSystemPrompt').val() || '').trim() || DEFAULT_ROLL_SYSTEM_PROMPT;
+
   s.wiTriggerMatchMode = String($('#sg_wiTriggerMatchMode').val() || s.wiTriggerMatchMode || 'local');
   s.wiIndexPrefilterTopK = clampInt($('#sg_wiIndexPrefilterTopK').val(), 5, 80, s.wiIndexPrefilterTopK ?? 24);
   s.wiIndexProvider = String($('#sg_wiIndexProvider').val() || s.wiIndexProvider || 'st');
@@ -5624,6 +6880,8 @@ function setupEventListeners() {
 
     eventSource.on(event_types.MESSAGE_SENT, () => {
       // 禁止自动生成：不在发送消息时自动刷新面板
+      // ROLL 判定（尽量在生成前完成）
+      maybeInjectRollResult('msg_sent').catch(() => void 0);
       // 蓝灯索引 → 绿灯触发（尽量在生成前完成）
       maybeInjectWorldInfoTriggers('msg_sent').catch(() => void 0);
       scheduleAutoSummary('msg_sent');
@@ -6165,6 +7423,7 @@ function init() {
     installQuickOptionsClickHandler();
     createFloatingButton();
     injectFixedInputButton();
+    installRollPreSendHook();
   });
 
   globalThis.StoryGuide = {
@@ -6182,3 +7441,4 @@ function init() {
 }
 
 init();
+
