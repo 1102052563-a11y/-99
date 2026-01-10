@@ -2996,7 +2996,8 @@ function resolveStatDataFromVariableStore(settings) {
 
 async function resolveStatDataFromTemplate(settings) {
   const s = settings || ensureSettings();
-  const tpl = `<status_current_variable>\n{{format_message_variable::stat_data}}\n</status_current_variable>`;
+  const key = String(s.wiRollStatVarName || 'stat_data').trim() || 'stat_data';
+  const tpl = `<status_current_variable>\n{{format_message_variable::${key}}}\n</status_current_variable>`;
   const ctx = SillyTavern.getContext?.() ?? {};
   const fns = [
     ctx?.renderTemplateAsync,
@@ -3017,7 +3018,7 @@ async function resolveStatDataFromTemplate(settings) {
       }
     } catch { /* ignore */ }
   }
-  if (!rendered || rendered.includes('{{format_message_variable::stat_data}}')) {
+  if (!rendered || rendered.includes(`{{format_message_variable::${key}}}`)) {
     return { statData: null, rawText: '' };
   }
   const block = extractStatusBlock(rendered);
