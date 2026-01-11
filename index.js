@@ -314,7 +314,7 @@ const DEFAULT_SETTINGS = Object.freeze({
 
   // ROLL 判定（本回合行动判定）
   wiRollEnabled: false,
-  wiRollStatSource: 'variable', // variable | template | latest
+  wiRollStatSource: 'variable', // variable (综合多来源) | template | latest
   wiRollStatVarName: 'stat_data',
   wiRollRandomWeight: 0.3,
   wiRollDifficulty: 'normal',
@@ -3016,12 +3016,25 @@ function resolveStatDataFromVariableStore(settings) {
   const key = String(s.wiRollStatVarName || 'stat_data').trim();
   if (!key) return { statData: null, rawText: '' };
   const ctx = SillyTavern.getContext?.() ?? {};
+
+  // 扩展所有可能的变量来源，按优先级排序
   const sources = [
+    // 优先从 context 获取（最新值）
     ctx?.variables,
     ctx?.chatMetadata?.variables,
     ctx?.chatMetadata,
+    // 全局变量存储
+    globalThis?.SillyTavern?.chatVariables,
+    globalThis?.SillyTavern?.variables,
     globalThis?.variables,
+    globalThis?.chatVariables,
+    // extension_settings 中可能存储的变量
+    ctx?.extensionSettings?.variables,
+    // window 对象上的变量
+    window?.variables,
+    window?.chatVariables,
   ].filter(Boolean);
+
   let raw = null;
   for (const src of sources) {
     if (src && Object.prototype.hasOwnProperty.call(src, key)) {
@@ -3029,6 +3042,22 @@ function resolveStatDataFromVariableStore(settings) {
       break;
     }
   }
+
+  // 如果上述来源都没找到，尝试从 chat 数组中的最后一条消息的 extra 字段读取
+  if (raw == null && Array.isArray(ctx?.chat)) {
+    for (let i = ctx.chat.length - 1; i >= Math.max(0, ctx.chat.length - 5); i--) {
+      const msg = ctx.chat[i];
+      if (msg?.extra?.variables && Object.prototype.hasOwnProperty.call(msg.extra.variables, key)) {
+        raw = msg.extra.variables[key];
+        break;
+      }
+      if (msg?.variables && Object.prototype.hasOwnProperty.call(msg.variables, key)) {
+        raw = msg.variables[key];
+        break;
+      }
+    }
+  }
+
   if (raw == null) return { statData: null, rawText: '' };
   if (typeof raw === 'string') {
     const parsed = parseStatData(raw, s.wiRollStatParseMode || 'json');
@@ -3071,6 +3100,152 @@ async function resolveStatDataFromTemplate(settings) {
   return { statData: parsed, rawText: block };
 }
 
+/**
+ * 最稳定的变量读取方式：通过 /getvar 斜杠命令读取变量
+ * 由于 SillyTavern 变量系统可能存在缓存或上下文不同步问题，
+ * 使用 slash command 可以确保读取到最新的变量值
+ */
+async function resolveStatDataViaSlashCommand(settings) {
+  const s = settings || ensureSettings();
+  const key = String(s.wiRollStatVarName || 'stat_data').trim();
+  if (!key) return { statData: null, rawText: '' };
+
+  try {
+    // 尝试使用 /getvar 命令读取变量（最稳定的方式）
+    const result = await execSlash(`/getvar ${key}`);
+    const raw = slashOutputToText(result);
+
+    if (!raw || raw.trim() === '' || raw.trim() === 'undefined' || raw.trim() === 'null') {
+      return { statData: null, rawText: '' };
+    }
+
+    // 解析变量内容
+    if (typeof raw === 'string') {
+      // 尝试 JSON 解析
+      const parsed = parseStatData(raw, s.wiRollStatParseMode || 'json');
+      if (parsed) {
+        return { statData: parsed, rawText: raw };
+      }
+    }
+
+    return { statData: null, rawText: raw };
+  } catch (e) {
+    // /getvar 命令失败时静默处理，回退到其他方法
+    console.debug('[StoryGuide] resolveStatDataViaSlashCommand failed:', e);
+    return { statData: null, rawText: '' };
+  }
+}
+
+/**
+ * 扩展的变量读取：尝试从 chat 数组中的最新消息读取变量（直接读取 DOM）
+ * 作为变量存储和模板方法的补充回退方案
+ */
+function resolveStatDataFromChatDOM(settings) {
+  const s = settings || ensureSettings();
+  const key = String(s.wiRollStatVarName || 'stat_data').trim();
+  if (!key) return { statData: null, rawText: '' };
+
+  try {
+    // 尝试从 DOM 中查找最近的状态块
+    const chatContainer = document.querySelector('#chat, .chat, [id*="chat"]');
+    if (!chatContainer) return { statData: null, rawText: '' };
+
+    // 查找所有消息块
+    const messages = chatContainer.querySelectorAll('.mes, [class*="message"]');
+    if (!messages.length) return { statData: null, rawText: '' };
+
+    // 从后往前查找包含状态数据的消息
+    for (let i = messages.length - 1; i >= Math.max(0, messages.length - 10); i--) {
+      const msg = messages[i];
+      if (!msg) continue;
+
+      // 跳过用户消息
+      const isUser = msg.classList.contains('user_mes') || msg.dataset.isUser === 'true';
+      if (isUser) continue;
+
+      const textEl = msg.querySelector('.mes_text, .message-text, [class*="mes_text"]');
+      if (!textEl) continue;
+
+      const text = textEl.innerText || textEl.textContent || '';
+      if (!text) continue;
+
+      // 尝试提取状态块
+      const block = extractStatusBlock(text);
+      if (block) {
+        const parsed = parseStatData(block, s.wiRollStatParseMode || 'json');
+        if (parsed) {
+          return { statData: parsed, rawText: block };
+        }
+      }
+    }
+
+    return { statData: null, rawText: '' };
+  } catch (e) {
+    console.debug('[StoryGuide] resolveStatDataFromChatDOM failed:', e);
+    return { statData: null, rawText: '' };
+  }
+}
+
+/**
+ * 综合查找变量数据：尝试多种来源以确保能读取到最新数据
+ * 按优先级依次尝试：
+ * 1. /getvar 斜杠命令（最稳定）
+ * 2. 变量存储对象
+ * 3. 模板渲染
+ * 4. 从 DOM 读取
+ * 5. 从最新 AI 回复读取
+ */
+async function resolveStatDataComprehensive(chat, settings) {
+  const s = settings || ensureSettings();
+
+  // 方法1：使用 /getvar 斜杠命令（最稳定）
+  try {
+    const { statData, rawText } = await resolveStatDataViaSlashCommand(s);
+    if (statData) {
+      console.debug('[StoryGuide] Variable loaded via /getvar slash command');
+      return { statData, rawText, source: 'slashCommand' };
+    }
+  } catch { /* continue */ }
+
+  // 方法2：从变量存储对象读取
+  try {
+    const { statData, rawText } = resolveStatDataFromVariableStore(s);
+    if (statData) {
+      console.debug('[StoryGuide] Variable loaded via variable store');
+      return { statData, rawText, source: 'variableStore' };
+    }
+  } catch { /* continue */ }
+
+  // 方法3：通过模板渲染读取
+  try {
+    const { statData, rawText } = await resolveStatDataFromTemplate(s);
+    if (statData) {
+      console.debug('[StoryGuide] Variable loaded via template rendering');
+      return { statData, rawText, source: 'template' };
+    }
+  } catch { /* continue */ }
+
+  // 方法4：从 DOM 读取
+  try {
+    const { statData, rawText } = resolveStatDataFromChatDOM(s);
+    if (statData) {
+      console.debug('[StoryGuide] Variable loaded via DOM');
+      return { statData, rawText, source: 'dom' };
+    }
+  } catch { /* continue */ }
+
+  // 方法5：从最新 AI 回复读取
+  try {
+    const { statData, rawText } = resolveStatDataFromLatestAssistant(chat, s);
+    if (statData) {
+      console.debug('[StoryGuide] Variable loaded via latest assistant message');
+      return { statData, rawText, source: 'latestAssistant' };
+    }
+  } catch { /* continue */ }
+
+  return { statData: null, rawText: '', source: null };
+}
+
 async function maybeInjectRollResult(reason = 'msg_sent') {
   const s = ensureSettings();
   if (!s.wiRollEnabled) return;
@@ -3097,21 +3272,38 @@ async function maybeInjectRollResult(reason = 'msg_sent') {
 
   const source = String(s.wiRollStatSource || 'variable');
   let statData = null;
+  let varSource = '';
   if (source === 'latest') {
     ({ statData } = resolveStatDataFromLatestAssistant(chat, s));
+    varSource = 'latest';
   } else if (source === 'template') {
     ({ statData } = await resolveStatDataFromTemplate(s));
-    if (!statData) ({ statData } = resolveStatDataFromVariableStore(s));
-    if (!statData) ({ statData } = resolveStatDataFromLatestAssistant(chat, s));
+    varSource = 'template';
+    if (!statData) {
+      ({ statData } = await resolveStatDataViaSlashCommand(s));
+      varSource = 'slashCommand';
+    }
+    if (!statData) {
+      ({ statData } = resolveStatDataFromVariableStore(s));
+      varSource = 'variableStore';
+    }
+    if (!statData) {
+      ({ statData } = resolveStatDataFromLatestAssistant(chat, s));
+      varSource = 'latestAssistant';
+    }
   } else {
-    ({ statData } = resolveStatDataFromVariableStore(s));
-    if (!statData) ({ statData } = await resolveStatDataFromTemplate(s));
-    if (!statData) ({ statData } = resolveStatDataFromLatestAssistant(chat, s));
+    // 默认使用综合方法（最稳定）
+    const result = await resolveStatDataComprehensive(chat, s);
+    statData = result.statData;
+    varSource = result.source || '';
   }
   if (!statData) {
     const name = String(s.wiRollStatVarName || 'stat_data').trim() || 'stat_data';
     logStatus(`ROLL 未触发：未读取到变量（${name}）`, 'warn');
     return;
+  }
+  if (s.wiRollDebugLog && varSource) {
+    console.debug(`[StoryGuide] ROLL 变量读取来源: ${varSource}`);
   }
 
   const randomRoll = rollDice(100);
@@ -3180,21 +3372,38 @@ async function buildRollInjectionForText(userText, chat, settings, logStatus) {
   if (String(userText || '').includes(rollTag)) return null;
   const source = String(s.wiRollStatSource || 'variable');
   let statData = null;
+  let varSource = '';
   if (source === 'latest') {
     ({ statData } = resolveStatDataFromLatestAssistant(chat, s));
+    varSource = 'latest';
   } else if (source === 'template') {
     ({ statData } = await resolveStatDataFromTemplate(s));
-    if (!statData) ({ statData } = resolveStatDataFromVariableStore(s));
-    if (!statData) ({ statData } = resolveStatDataFromLatestAssistant(chat, s));
+    varSource = 'template';
+    if (!statData) {
+      ({ statData } = await resolveStatDataViaSlashCommand(s));
+      varSource = 'slashCommand';
+    }
+    if (!statData) {
+      ({ statData } = resolveStatDataFromVariableStore(s));
+      varSource = 'variableStore';
+    }
+    if (!statData) {
+      ({ statData } = resolveStatDataFromLatestAssistant(chat, s));
+      varSource = 'latestAssistant';
+    }
   } else {
-    ({ statData } = resolveStatDataFromVariableStore(s));
-    if (!statData) ({ statData } = await resolveStatDataFromTemplate(s));
-    if (!statData) ({ statData } = resolveStatDataFromLatestAssistant(chat, s));
+    // 默认使用综合方法（最稳定）
+    const result = await resolveStatDataComprehensive(chat, s);
+    statData = result.statData;
+    varSource = result.source || '';
   }
   if (!statData) {
     const name = String(s.wiRollStatVarName || 'stat_data').trim() || 'stat_data';
     logStatus?.(`ROLL 未触发：未读取到变量（${name}）`, 'warn');
     return null;
+  }
+  if (s.wiRollDebugLog && varSource) {
+    console.debug(`[StoryGuide] buildRollInjectionForText 变量读取来源: ${varSource}`);
   }
 
   const randomRoll = rollDice(100);
@@ -5549,10 +5758,11 @@ function buildModalHtml() {
                   <div class="sg-field">
                     <label>变量来源</label>
                     <select id="sg_wiRollStatSource">
-                      <option value="variable">变量存储（推荐）</option>
+                      <option value="variable">综合多来源（最稳定，推荐）</option>
                       <option value="template">模板渲染（stat_data）</option>
                       <option value="latest">最新正文末尾</option>
                     </select>
+                    <div class="sg-hint">综合模式按优先级尝试：/getvar命令 → 变量存储 → 模板渲染 → DOM读取 → 最新AI回复</div>
                   </div>
                   <div class="sg-field">
                     <label>变量解析模式</label>
@@ -5622,7 +5832,7 @@ function buildModalHtml() {
                     <textarea id="sg_wiRollSystemPrompt" rows="5"></textarea>
                   </div>
                 </div>
-                <div class="sg-hint">AI 会先判断是否需要判定，再计算并注入结果；变量来源可选模板渲染的 stat_data 或最新正文末尾的 status_current_variable 块。</div>
+                <div class="sg-hint">AI 会先判断是否需要判定，再计算并注入结果。"综合多来源"模式会尝试多种方式读取变量，确保最大兼容性。</div>
               </div>
 
               <div class="sg-card sg-subcard" style="margin-top:10px;">
