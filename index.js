@@ -86,35 +86,81 @@ const DEFAULT_ROLL_FORMULAS = Object.freeze({
   default: 'MOD.total',
 });
 const DEFAULT_ROLL_MODIFIER_SOURCES = Object.freeze(['skill', 'talent', 'trait', 'buff', 'equipment']);
-const DEFAULT_ROLL_SYSTEM_PROMPT = `你是“轮回乐园风格”的行动判定/ROLL 点计算器。\n\n核心规则：\n- 只使用 statDataJson（变量数据），不要参考剧情描述。\n- 难度模式 difficulty：simple/normal/hard/hellãhard/hell ç´æ¥æé« DC åºé´æéä½æååºé´ï¼normal=DC15~20ï¼hard=DC20~25ï¼hell=DC25~30ï¼æå°æååºé´æ¶ç¼© (margin>=8ææ®éæåï¼margin 0~7 ä¸ºåå¼ºæåï¼margin -7~-1 ä¸ºå¤±è´¥ä½ææ¶è·ï¼margin<=-8 ä¸ºå¤§å¤±è´¥)ã\n- 依据轮回乐园设定处理位阶压制与属性壁障；若 statDataJson 中存在压制/壁障相关字段，需体现在判定修正中。\n- 若提供生物强度/等级差/等阶差字段，必须作为关键修正项，显著影响阈值或 mods。\n- 数值映射建议：等级差每 1 级=±2 修正；等阶差每 1 阶=±10 修正；生物强度差每 1 档=±5 修正（可按情况转为阈值调整）。\n- 允许综合主角/装备/技能/天赋/特性Buff/环境/性格/角色当前状态 等数据进行修正汇总。\n- 上述每类数据需细读其子信息（如技能效果/熟练度/品级/层级/冷却/消耗，装备词缀/宝石/品质/特效，Buff层数/剩余时间/可叠加状态等），只要在 statDataJson 中存在就必须纳入修正或阈值调整。
-- 状态/Buff/Debuff 叠加规则：可叠加则按层数线性叠加；标注递增/递减则按描述；冷却中不生效；剩余时间不足可按比例折算。\n- 多目标对战：若存在多个敌人，需明确主要目标，并同时考虑群体压力/围攻/保护阵形等对判定的影响。如为范围/溅杀行动，目标数量可提升阈值或降低命中/稳定性。
-- 多目标权重：主目标修正与阈值权重 100%；次要目标影响最多 50%，多个次要目标递减（50%/30%/20%）。\n- 若存在队友/友军配合，必须读取其属性/技能/天赋/特性Buff/装备/状态/位置与配合手段（夹击、掩护、增益等），计入协同修正。\n\nD20 规则（D&D/PF 风格）：
-- 协同修正上限建议：团队协同总修正不超过 +15 或不超过基础修正的 50%（取较小）。\n- 基础判定：1d20 + 修正 >= DC。\n- randomRoll 是 1~100 时，将其映射为 d20 点数：d20 = ceil(randomRoll / 5)。\n- 优势/劣势：掷两次 d20 取高/取低（若 statDataJson 提供优势/劣势标记则 적용）。\n- 自然 20 视为大成功，自然 1 视为大失败（若无明确规则冲突则 적용）。\n- 若非自然20/1，则按 success 判定为“成功/失败”。自然20=大成功，自然1=大失败。\n- 结果等级：
-  - 大成功 / 暴击（critical）
-  - 普通成功
-  - 勉强成功 / 成功但有代价
-  - 失败但有收获（fail forward）
-  - 大失败 / 灾难（fumble）
-- 结果判定区间：定义 margin = final - threshold。自然20=大成功，自然1=大失败。其余情况：success 且 margin>=6 为普通成功；success 且 0~5 为勉强成功；失败且 margin 在 -5~-1 为失败但有收获；失败且 margin<=-6 为大失败。
-- 失败但有收获类型建议：情报/位置/士气/消耗减免/部分伤害或效果成立（二选一即可）。
-\n判定步骤：\n1) 判断是否需要判定（ROLL）。不需要则返回 needRoll=false。\n2) 需要判定时：\n   - 自行选择合理 action 名称。\n   - 以相关核心属性为主（如 力量/敏捷/体质/智力/幸运/魅力，或真实属性），必要时参考衍生属性（物理攻击/物理防御/法术攻击/法术防御）。\n   - 结合技能/天赋/特性Buff/装备/环境/性格/当前状态等修正，汇总为 mods。\n   - 计算 base，并按公式计算 final 与 success。\n\n公式规则：\n- base = 你采用的公式计算结果\n- final = base + base * randomWeight * ((randomRoll - 50) / 50)\n- success = final >= threshold\n
-- 成功阈值/DC 由你根据行动难度自行选择，需在输出中返回 threshold。\n\n输出要求：\n- 严格 JSON，不要任何额外文字。\n- 必须包含 outcomeTier 与 explanation（用于日志简述）。\n- explanation 控制在 1~2 句，避免过长影响日志可读性。\n- analysisSummary 可选，但若提供需包含“修正来源汇总/映射应用”两段（可简短）。\n`;
+const DEFAULT_ROLL_SYSTEM_PROMPT = `你是一个专业的TRPG/ROLL点裁判。
+
+【任务】
+- 根据用户行为与属性数据 (statDataJson) 进行动作判定。
+- 难度模式 difficulty：simple (简单) / normal (普通) / hard (困难) / hell (地狱)。
+- 设定 成功阈值/DC (Difficulty Class)：
+  - normal: DC 15~20
+  - hard: DC 20~25
+  - hell: DC 25~30
+  - 成功判定基于 margin (final - threshold)：
+    - margin >= 8 : critical_success (大成功)
+    - margin 0 ~ 7 : success (成功)
+    - margin -1 ~ -7 : failure (失败)
+    - margin <= -8 : fumble (大失败)
+
+【数值映射建议】
+- 将文本描述的等级转化为数值修正 (MOD)：
+  - F=0, E=+0.5, D=+1, C=+2, B=+3, A=+4, S=+6, SS=+8, SSS=+10
+  - 若为数值 (如 Lv.5)，则直接取值 (如 +5)。
+- 品级修正：若装备/技能有稀有度划分，可参考上述映射给予额外加值。
+- Buff/Debuff：根据上下文给予 +/- 1~5 的临时调整。
+
+【D20 规则参考】
+- 核心公式：d20 + 属性修正 + 熟练值 + 其他修正 >= DC
+- randomRoll (1~100) 换算为 d20 = ceil(randomRoll / 5)。
+- 大成功/大失败：
+  - d20 = 20 (即 randomRoll 96~100) 视为“大成功”(不论数值，除非 DC 极高)。
+  - d20 = 1 (即 randomRoll 1~5) 视为“大失败”。
+
+【计算流程】
+1. 确定 action (动作类型) 与 formula (计算公式)。
+2. 计算 base (基础值) 与 mods (所有修正来源之和)。
+3. 计算 final = base + mods + 随机要素。
+4. 比较 final 与 threshold，得出 success (true/false) 与 outcomeTier。
+
+【输出要求】
+- 必须输出符合 JSON Requirement 的 JSON 格式。
+- explanation: 简短描述判定过程与结果 (1~2句)。
+- analysisSummary: 汇总修正来源与关键映射逻辑。
+`;
+
 const DEFAULT_ROLL_USER_TEMPLATE = `动作={{action}}\n公式={{formula}}\nrandomWeight={{randomWeight}}\ndifficulty={{difficulty}}\nrandomRoll={{randomRoll}}\nmodifierSources={{modifierSourcesJson}}\nstatDataJson={{statDataJson}}`;
 const ROLL_JSON_REQUIREMENT = `输出要求（严格 JSON）：\n{"action": string, "formula": string, "base": number, "mods": [{"source": string, "value": number}], "random": {"roll": number, "weight": number}, "final": number, "threshold": number, "success": boolean, "outcomeTier": string, "explanation": string, "analysisSummary"?: string}\n- analysisSummary 可选，用于日志显示，建议包含“修正来源汇总/映射应用”两段；explanation 建议 1~2 句。`;
 const ROLL_DECISION_JSON_REQUIREMENT = `输出要求（严格 JSON）：\n- 若无需判定：只输出 {"needRoll": false}。\n- 若需要判定：输出 {"needRoll": true, "result": {action, formula, base, mods, random, final, threshold, success, outcomeTier, explanation, analysisSummary?}}。\n- 不要 Markdown、不要代码块、不要任何多余文字。`;
 
-const DEFAULT_ROLL_DECISION_SYSTEM_PROMPT = `你是“轮回乐园风格”的行动判定/ROLL 点助手。\n\n任务：\n- 先判断用户输入是否需要进行行动判定（ROLL）。\n- 若需要，选择一个合适的 action，并基于给定数据计算结果。\n- 只使用 statDataJson 里的数据（属性/装备/技能/天赋/特性Buff/状态/环境/性格等）。\n- 难度模式 difficulty：simple/normal/hard/hellãhard/hell ç´æ¥æé« DC åºé´æéä½æååºé´ï¼normal=DC15~20ï¼hard=DC20~25ï¼hell=DC25~30ï¼æå°æååºé´æ¶ç¼© (margin>=8ææ®éæåï¼margin 0~7 ä¸ºåå¼ºæåï¼margin -7~-1 ä¸ºå¤±è´¥ä½ææ¶è·ï¼margin<=-8 ä¸ºå¤§å¤±è´¥)ã\n- 处理位阶压制与属性壁障规则：若 statDataJson 中存在相关字段，必须影响判定。\n- 输出严格 JSON，不要任何额外文字。\n- 必须包含 outcomeTier 与 explanation（用于日志简述）。\n- explanation 控制在 1~2 句，避免过长影响日志可读性。\n- analysisSummary 可选，但若提供需包含“修正来源汇总/映射应用”两段（可简短）。\n\nD20 规则（D&D/PF 风格）：\n- 基础判定：1d20 + 修正 >= DC。\n- randomRoll 是 1~100 时，将其映射为 d20 点数：d20 = ceil(randomRoll / 5)。\n- 优势/劣势：掷两次 d20 取高/取低（若 statDataJson 提供优势/劣势标记则 적용）。\n- 自然 20 视为大成功，自然 1 视为大失败（若无明确规则冲突则 적용）。\n- 若非自然20/1，则按 success 判定为“成功/失败”。自然20=大成功，自然1=大失败。\n- 结果等级：
-  - 大成功 / 暴击（critical）
-  - 普通成功
-  - 勉强成功 / 成功但有代价
-  - 失败但有收获（fail forward）
-  - 大失败 / 灾难（fumble）
-- 结果判定区间：定义 margin = final - threshold。自然20=大成功，自然1=大失败。其余情况：success 且 margin>=6 为普通成功；success 且 0~5 为勉强成功；失败且 margin 在 -5~-1 为失败但有收获；失败且 margin<=-6 为大失败。
-- 失败但有收获类型建议：情报/位置/士气/消耗减免/部分伤害或效果成立（二选一即可）。
-\n修正规则（必须考虑）：\n- 技能/天赋/特性Buff/装备提供的数值加成或减益，要汇总为 mods。\n- 修正来源可多项叠加，但需遵守“属性壁障/位阶压制”限制。\n- 若存在“真实属性/衍生属性”（如物理攻击/物理防御、法术攻击/法术防御），优先使用与行动类型最相关的一组。\n- 角色当前状态（伤势/虚弱/诅咒/疲劳/专注/兴奋等）必须体现在修正或阈值上。\n- 必须考虑各类数据的子信息：\n  - 技能/天赋/特性Buff：效果、熟练度/等级、品级、层级、冷却、消耗、可叠加与层数、剩余时间。\n  - 装备：品质、评分、词缀、宝石、特效、耐久/状态、武器类型匹配。\n  - 敌方同类条目也必须读取其子信息。\n\n环境因素（必须考虑）：\n- 若 statDataJson 提供环境字段（地形、视野、天气、光照、噪音、空间压制、结界、毒雾等），必须影响修正或阈值。\n- 环境优势/劣势需体现为正/负修正，或影响 success 判定阈值。\n\n性格因素（必须考虑）：
-- 环境反制优先级建议：先应用环境负面，再应用技能/装备加成；若有护具或抗性标记可部分抵消。\n- 若 statDataJson 提供性格/心态字段（如冷静/鲁莽/谨慎/嗜战/恐惧等），需对判定产生修正。\n- 性格修正应与行动类型一致（鲁莽提高进攻但降低防御或稳定性；谨慎提高防御/命中但降低爆发等）。\n\n对战判定（必须考虑敌方）：\n- 若为对战行动，需读取敌方属性与敌方技能/天赋/特性Buff/装备/状态的修正效果。\n- 若存在“位阶压制差值/属性壁障差值”，必须对结果产生明显影响。\n- 若提供生物强度/等级差/等阶差字段，必须作为关键修正项，显著影响阈值或 mods。\n- 数值映射建议：等级差每 1 级=±2 修正；等阶差每 1 阶=±10 修正；生物强度差每 1 档=±5 修正（可按情况转为阈值调整）。\n- 敌我属性或装备的相克/克制，若 statDataJson 有对应字段，需计入修正或阈值。
-- 相克/克制映射建议：轻度/中度/重度=+3/+6/+10（或等幅负修正）。\n- 多目标对战：若有多个敌人，需明确主要目标，并同时考虑群体压力/围攻/保护阵形等对判定的影响。若行动为范围/溅杀，将目标数量纳入阈值或命中/稳定性调整。\n- 若存在队友/友军配合，必须读取其属性/技能/天赋/特性Buff/装备/状态/位置与配合手段（夹击、掩护、增益等），计入协同修正。\n\n判定步骤：\n1) 判断是否需要判定（ROLL）。不需要则返回 needRoll=false。\n2) 需要判定时：\n   - 选择合理 action 名称（自定义即可）。\n   - 结合核心属性/衍生属性/技能/天赋/特性Buff/装备/环境/性格/当前状态，汇总为 mods。\n   - 计算 base，并按公式计算 final 与 success。\n\n公式规则：\n- base = 你采用的公式计算结果\n- final = base + base * randomWeight * ((randomRoll - 50) / 50)\n- success = final >= threshold\n
-- 成功阈值/DC 由你根据行动难度自行选择，需在输出中返回 threshold。\n`;
+const DEFAULT_ROLL_DECISION_SYSTEM_PROMPT = `你是一个判定动作是否需要ROLL点的辅助AI。
+
+【任务】
+- 核心任务是判断用户的行为是否需要进行随机性判定 (ROLL)。
+- 只有当行为具有不确定性、挑战性或对抗性时才需要 ROLL。
+- 若 needRoll=true，则同时进行判定计算。
+
+【判定原则 (needRoll)】
+- needRoll = false: 
+  - 日常行为 (吃饭/走路/闲聊)。
+  - 必定成功的行为 (没有干扰/难度极低)。
+  - 纯粹的情感表达或心理活动。
+- needRoll = true:
+  - 战斗/攻击/防御。
+  - 尝试说服/欺骗/恐吓他人。
+  - 具有风险或难度的动作 (撬锁/攀爬/潜行)。
+  - 知识检定/感知检定 (发现隐藏线索)。
+
+【若 needRoll=true，计算参考】
+- 难度模式 difficulty 与 成功阈值/DC (simple/normal/hard/hell)。
+- 数值映射建议：F=0, E=+0.5, D=+1, C=+2, B=+3, A=+4, S=+6, SS=+8, SSS=+10。
+- 品级修正：参考装备/技能品级。
+- margin 判定：>=8 大成功，0~7 成功，-1~-7 失败，<=-8 大失败。
+
+【输出要求】
+- 若无需判定：{"needRoll": false}
+- 若需要判定：{"needRoll": true, "result": { ...完整计算过程... }}
+- 严格遵循 JSON Requirement 格式，不要输出 Markdown 代码块。
+`;
+
 const DEFAULT_ROLL_DECISION_USER_TEMPLATE = `用户输入={{userText}}\nrandomWeight={{randomWeight}}\ndifficulty={{difficulty}}\nrandomRoll={{randomRoll}}\nstatDataJson={{statDataJson}}`;
 
 const DEFAULT_SETTINGS = Object.freeze({
@@ -397,11 +443,8 @@ function ensureSettings() {
   }
   if (typeof extensionSettings[MODULE_NAME].wiRollSystemPrompt === 'string') {
     const cur = extensionSettings[MODULE_NAME].wiRollSystemPrompt;
-    const needsRefresh = !cur.includes('outcomeTier')
-      || !cur.includes('explanation')
-      || !cur.includes('\u96be\u5ea6\u6a21\u5f0f difficulty')
-      || !cur.includes('\u6210\u529f\u9608\u503c/DC');
-    if (needsRefresh) {
+    const hasMojibake = /\?{5,}/.test(cur);
+    if (hasMojibake) {
       extensionSettings[MODULE_NAME].wiRollSystemPrompt = DEFAULT_ROLL_SYSTEM_PROMPT;
       saveSettingsDebounced();
     }
@@ -2851,7 +2894,10 @@ function buildRollPromptMessages(actionKey, statData, settings, formula, randomW
 
 function buildRollDecisionPromptMessages(userText, statData, settings, randomRoll) {
   const s = settings || ensureSettings();
-  const sys = DEFAULT_ROLL_DECISION_SYSTEM_PROMPT;
+  const rawSys = String(s.wiRollSystemPrompt || '').trim();
+  const sys = (rawSys && rawSys !== DEFAULT_ROLL_SYSTEM_PROMPT)
+    ? rawSys
+    : DEFAULT_ROLL_DECISION_SYSTEM_PROMPT;
   const randomWeight = clampFloat(s.wiRollRandomWeight, 0, 1, 0.3);
   const difficulty = String(s.wiRollDifficulty || 'normal');
   const statDataJson = JSON.stringify(statData || {}, null, 0);
@@ -2935,7 +2981,7 @@ function buildRollInjectionFromResult(res, tag = 'SG_ROLL', style = 'hidden') {
   const weight = Number.isFinite(Number(res.random?.weight)) ? Number(res.random?.weight) : 0;
   const mods = Array.isArray(res.mods) ? res.mods : [];
   const modLine = mods.map(m => `${m.source}:${Number(m.value) >= 0 ? '+' : ''}${Number(m.value) || 0}`).join(' | ');
-  const outcome = String(res.outcomeTier || '').trim() || (success == null ? 'N/A' : (success ? '成功' : '失败')) ;
+  const outcome = String(res.outcomeTier || '').trim() || (success == null ? 'N/A' : (success ? '成功' : '失败'));
 
   if (String(style || 'hidden') === 'plain') {
     return `\n\n[${tag}] 动作=${action} | 结果=${outcome} | 最终=${final.toFixed(2)} | 阈值>=${threshold == null ? 'N/A' : threshold} | 基础=${base.toFixed(2)} | 随机=1d100:${roll}*${weight} | 修正=${modLine} | 公式=${formula}\n`;
@@ -4800,9 +4846,29 @@ function clearFloatingPanelPos() {
 }
 
 function clampToViewport(left, top, w, h) {
-  const pad = 8;
-  const L = Math.max(pad, Math.min(left, window.innerWidth - w - pad));
-  const T = Math.max(pad, Math.min(top, window.innerHeight - h - pad));
+  // 放宽边界限制：允许窗口越界 50%（即至少保留 50% 或标题栏 40px 可见）
+  const minVisibleRatio = 0.5; // 至少 50% 可见（允许另外 50% 在屏幕外）
+  const minVisiblePx = 40;     // 或至少 40px（保证标题栏可拖回）
+
+  // 计算水平方向需要保持可见的最小宽度
+  const minVisibleW = Math.max(minVisiblePx, w * minVisibleRatio);
+  // 计算垂直方向需要保持可见的最小高度
+  const minVisibleH = Math.max(minVisiblePx, h * minVisibleRatio);
+
+  // 左边界：允许负值，但确保右侧至少 minVisibleW 在屏幕内
+  // 即 left + w >= minVisibleW → left >= minVisibleW - w
+  const minLeft = minVisibleW - w;
+  // 右边界：确保左侧至少 minVisibleW 在屏幕内
+  // 即 left + minVisibleW <= window.innerWidth → left <= window.innerWidth - minVisibleW
+  const maxLeft = window.innerWidth - minVisibleW;
+
+  // 上边界：严格限制 >= 0，保证标题栏不被遮挡
+  const minTop = 0;
+  // 下边界：确保顶部至少 minVisibleH 在屏幕内
+  const maxTop = window.innerHeight - minVisibleH;
+
+  const L = Math.max(minLeft, Math.min(left, maxLeft));
+  const T = Math.max(minTop, Math.min(top, maxTop));
   return { left: L, top: T };
 }
 
@@ -7046,13 +7112,16 @@ function createFloatingPanel() {
     <div class="sg-floating-header" style="cursor: move; touch-action: none;">
       <span class="sg-floating-title">📘 剧情指导</span>
       <div class="sg-floating-actions">
-        <button class="sg-floating-action-btn" id="sg_floating_refresh" title="刷新分析">🔄</button>
+        <button class="sg-floating-action-btn" id="sg_floating_show_report" title="查看分析">📖</button>
+        <button class="sg-floating-action-btn" id="sg_floating_roll_logs" title="ROLL日志">🎲</button>
         <button class="sg-floating-action-btn" id="sg_floating_settings" title="打开设置">⚙️</button>
         <button class="sg-floating-action-btn" id="sg_floating_close" title="关闭">✕</button>
       </div>
     </div>
     <div class="sg-floating-body" id="sg_floating_body">
-      <div class="sg-floating-loading">点击 🔄 生成剧情分析</div>
+      <div style="padding:20px; text-align:center; color:#aaa;">
+        点击 <button class="sg-inner-refresh-btn" style="background:none; border:none; cursor:pointer; font-size:1.2em;">🔄</button> 生成
+      </div>
     </div>
   `;
 
@@ -7079,8 +7148,19 @@ function createFloatingPanel() {
     hideFloatingPanel();
   });
 
-  $('#sg_floating_refresh').on('click', async () => {
+  $('#sg_floating_show_report').on('click', () => {
+    showFloatingReport();
+  });
+
+  // Delegate inner refresh click
+  $(document).on('click', '.sg-inner-refresh-btn', async (e) => {
+    // Only handle if inside our panel
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
     await refreshFloatingPanelContent();
+  });
+
+  $('#sg_floating_roll_logs').on('click', () => {
+    showFloatingRollLogs();
   });
 
   $('#sg_floating_settings').on('click', () => {
@@ -7179,24 +7259,33 @@ function ensureFloatingPanelInViewport(panel) {
   try {
     if (!panel || !panel.getBoundingClientRect) return;
 
-    if (!shouldGuardFloatingPanelViewport()) return;
+    // Remove viewport size guard to ensure panel is always kept reachable
+    // if (!shouldGuardFloatingPanelViewport()) return;
 
-    const pad = 8;
-
-    // Ensure the panel itself never exceeds viewport bounds
-    // (helps when the browser height is tiny, e.g. mobile landscape).
-    panel.style.maxWidth = `calc(100vw - ${pad * 2}px)`;
-    panel.style.maxHeight = `calc(100dvh - ${pad * 2}px)`;
+    // 与 clampToViewport 保持一致的边界逻辑（允许 50% 越界）
+    const minVisibleRatio = 0.5;
+    const minVisiblePx = 40;
 
     const rect = panel.getBoundingClientRect();
     const w = rect.width || panel.offsetWidth || 300;
     const h = rect.height || panel.offsetHeight || 400;
 
+    const minVisibleW = Math.max(minVisiblePx, w * minVisibleRatio);
+    const minVisibleH = Math.max(minVisiblePx, h * minVisibleRatio);
+
+    // Ensure the panel itself never exceeds viewport bounds for max size
+    panel.style.maxWidth = `calc(100vw - ${minVisiblePx}px)`;
+    panel.style.maxHeight = `calc(100dvh - ${minVisiblePx}px)`;
+
     // Clamp current on-screen position into viewport.
     const clamped = clampToViewport(rect.left, rect.top, w, h);
 
-    // If anything is out of bounds, switch to explicit top/left positioning.
-    if (rect.top < pad || rect.left < pad || rect.bottom > window.innerHeight - pad || rect.right > window.innerWidth - pad) {
+    // 检查是否需要调整位置（使用放宽的边界逻辑）
+    // 如果可见部分少于 minVisible，则需要调整
+    const visibleLeft = Math.max(0, Math.min(rect.right, window.innerWidth) - Math.max(0, rect.left));
+    const visibleTop = Math.max(0, Math.min(rect.bottom, window.innerHeight) - Math.max(0, rect.top));
+
+    if (visibleLeft < minVisibleW || visibleTop < minVisibleH || rect.top < 0) {
       panel.style.left = `${Math.round(clamped.left)}px`;
       panel.style.top = `${Math.round(clamped.top)}px`;
       panel.style.right = 'auto';
@@ -7300,7 +7389,13 @@ async function refreshFloatingPanelContent() {
     const quickActions = Array.isArray(mergedParsed.quick_actions) ? mergedParsed.quick_actions : [];
     const optionsHtml = renderDynamicQuickActionsHtml(quickActions, 'panel');
 
-    const fullHtml = html + optionsHtml;
+    const refreshBtnHtml = `
+      <div style="padding:2px 8px; border-bottom:1px solid rgba(128,128,128,0.2); margin-bottom:4px; text-align:right;">
+        <button class="sg-inner-refresh-btn" title="重新生成分析" style="background:none; border:none; cursor:pointer; font-size:1.1em; opacity:0.8;">🔄</button>
+      </div>
+    `;
+
+    const fullHtml = refreshBtnHtml + html + optionsHtml;
     lastFloatingContent = fullHtml;
     updateFloatingPanelBody(fullHtml);
 
@@ -7314,6 +7409,66 @@ function updateFloatingPanelBody(html) {
   const $body = $('#sg_floating_body');
   if ($body.length) {
     $body.html(html);
+  }
+}
+
+function showFloatingRollLogs() {
+  const $body = $('#sg_floating_body');
+  if (!$body.length) return;
+
+  const meta = getSummaryMeta();
+  const logs = Array.isArray(meta?.rollLogs) ? meta.rollLogs : [];
+
+  if (!logs.length) {
+    $body.html('<div class="sg-floating-loading">暂无 ROLL 日志</div>');
+    return;
+  }
+
+  const html = logs.slice(0, 50).map((l) => {
+    const ts = l?.ts ? new Date(l.ts).toLocaleString() : '';
+    const action = String(l?.action || '').trim();
+    const outcome = String(l?.outcomeTier || '').trim()
+      || (l?.success == null ? 'N/A' : (l.success ? '成功' : '失败'));
+    const finalVal = Number.isFinite(Number(l?.final)) ? Number(l.final).toFixed(2) : '';
+    let summary = '';
+    if (l?.summary && typeof l.summary === 'object') {
+      const pick = l.summary.summary ?? l.summary.text ?? l.summary.message;
+      summary = String(pick || '').trim();
+      if (!summary) {
+        try { summary = JSON.stringify(l.summary); } catch { summary = String(l.summary); }
+      }
+    } else {
+      summary = String(l?.summary || '').trim();
+    }
+    const userShort = String(l?.userText || '').trim().slice(0, 160);
+
+    const detailsLines = [];
+    if (userShort) detailsLines.push(`<div><b>用户输入</b>：${escapeHtml(userShort)}</div>`);
+    if (summary) detailsLines.push(`<div><b>摘要</b>：${escapeHtml(summary)}</div>`);
+    return `
+      <details style="margin-bottom:4px; padding:4px; border-bottom:1px solid rgba(128,128,128,0.3);">
+        <summary style="font-size:0.9em; cursor:pointer; outline:none;">${escapeHtml(`${ts}｜${action || 'ROLL'}｜${outcome}${finalVal ? `｜最终=${finalVal}` : ''}`)}</summary>
+        <div class="sg-log-body" style="padding-left:1em; opacity:0.9; font-size:0.85em; margin-top:4px;">${detailsLines.join('')}</div>
+      </details>
+    `;
+  }).join('');
+
+  $body.html(`<div style="padding:10px; overflow-y:auto; max-height:100%; box-sizing:border-box;">${html}</div>`);
+}
+
+function showFloatingReport() {
+  const $body = $('#sg_floating_body');
+  if (!$body.length) return;
+
+  // Use last cached content if available, otherwise show empty state
+  if (lastFloatingContent) {
+    updateFloatingPanelBody(lastFloatingContent);
+  } else {
+    $body.html(`
+      <div style="padding:20px; text-align:center; color:#aaa;">
+        点击 <button class="sg-inner-refresh-btn" style="background:none; border:none; cursor:pointer; font-size:1.2em;">🔄</button> 生成
+      </div>
+    `);
   }
 }
 
