@@ -5736,103 +5736,10 @@ function buildModalHtml() {
 
               <div class="sg-card sg-subcard" style="margin-top:10px;">
                 <div class="sg-row sg-inline" style="margin-top:0;">
-                  <div class="sg-card-title" style="margin:0;">ROLL 点（判定）</div>
+                  <div class="sg-hint">ROLL 设置已移至独立的「ROLL 设置」标签页。</div>
+                  <div class="sg-spacer"></div>
+                  <button class="menu_button sg-btn" id="sg_gotoRollPage">打开 ROLL 设置</button>
                 </div>
-                <label class="sg-check"><input type="checkbox" id="sg_wiRollEnabled">启用 ROLL 点（战斗/劝说/学习等判定；与用户输入一起注入）</label>
-                <div class="sg-grid2">
-                  <div class="sg-field">
-                    <label>随机权重（0~1）</label>
-                    <input id="sg_wiRollRandomWeight" type="number" min="0" max="1" step="0.01" placeholder="0.3">
-                  </div>
-                  <div class="sg-field">
-                    <label>难度模式</label>
-                    <select id="sg_wiRollDifficulty">
-                      <option value="simple">简单</option>
-                      <option value="normal">普通</option>
-                      <option value="hard">困难</option>
-                      <option value="hell">地狱</option>
-                    </select>
-                  </div>
-                </div>
-                <div class="sg-grid2">
-                  <div class="sg-field">
-                    <label>变量来源</label>
-                    <select id="sg_wiRollStatSource">
-                      <option value="variable">综合多来源（最稳定，推荐）</option>
-                      <option value="template">模板渲染（stat_data）</option>
-                      <option value="latest">最新正文末尾</option>
-                    </select>
-                    <div class="sg-hint">综合模式按优先级尝试：/getvar命令 → 变量存储 → 模板渲染 → DOM读取 → 最新AI回复</div>
-                  </div>
-                  <div class="sg-field">
-                    <label>变量解析模式</label>
-                    <select id="sg_wiRollStatParseMode">
-                      <option value="json">JSON</option>
-                      <option value="kv">键值行（pc.atk=10）</option>
-                    </select>
-                  </div>
-                </div>
-                <div class="sg-field">
-                  <label>变量名（用于“变量存储”来源）</label>
-                  <input id="sg_wiRollStatVarName" type="text" placeholder="stat_data">
-                </div>
-                <div class="sg-row sg-inline">
-                  <label>注入方式</label>
-                  <select id="sg_wiRollInjectStyle">
-                    <option value="hidden">隐藏注释</option>
-                    <option value="plain">普通文本</option>
-                  </select>
-                </div>
-                <div class="sg-row sg-inline">
-                  <label class="sg-check" style="margin:0;"><input type="checkbox" id="sg_wiRollDebugLog">调试：状态栏显示判定细节/未触发原因</label>
-                </div>
-                <div class="sg-grid2">
-                  <div class="sg-field">
-                    <label>ROLL Provider</label>
-                    <select id="sg_wiRollProvider">
-                      <option value="custom">独立 API</option>
-                      <option value="local">本地计算</option>
-                    </select>
-                  </div>
-                </div>
-                <div class="sg-card sg-subcard" id="sg_roll_custom_block" style="display:none; margin-top:8px;">
-                  <div class="sg-grid2">
-                    <div class="sg-field">
-                      <label>ROLL 独立 API 基础URL</label>
-                      <input id="sg_wiRollCustomEndpoint" type="text" placeholder="https://api.openai.com/v1">
-                    </div>
-                    <div class="sg-field">
-                      <label>API Key</label>
-                      <input id="sg_wiRollCustomApiKey" type="password" placeholder="sk-...">
-                    </div>
-                  </div>
-                  <div class="sg-grid2">
-                    <div class="sg-field">
-                      <label>模型ID</label>
-                      <input id="sg_wiRollCustomModel" type="text" placeholder="gpt-4o-mini">
-                    </div>
-                    <div class="sg-field">
-                      <label>Max Tokens</label>
-                      <input id="sg_wiRollCustomMaxTokens" type="number" min="128" max="200000">
-                    </div>
-                  </div>
-                  <div class="sg-grid2">
-                    <div class="sg-field">
-                      <label>Temperature</label>
-                      <input id="sg_wiRollCustomTemperature" type="number" min="0" max="2" step="0.1">
-                    </div>
-                    <div class="sg-field">
-                      <label>TopP</label>
-                      <input id="sg_wiRollCustomTopP" type="number" min="0" max="1" step="0.01">
-                    </div>
-                  </div>
-                  <label class="sg-check"><input type="checkbox" id="sg_wiRollCustomStream">stream（若支持）</label>
-                  <div class="sg-field" style="margin-top:8px;">
-                    <label>ROLL 系统提示词</label>
-                    <textarea id="sg_wiRollSystemPrompt" rows="5"></textarea>
-                  </div>
-                </div>
-                <div class="sg-hint">AI 会先判断是否需要判定，再计算并注入结果。"综合多来源"模式会尝试多种方式读取变量，确保最大兼容性。</div>
               </div>
 
               <div class="sg-card sg-subcard" style="margin-top:10px;">
@@ -5891,8 +5798,103 @@ function buildModalHtml() {
           <div class="sg-page" id="sg_page_roll">
             <div class="sg-card">
               <div class="sg-card-title">ROLL 设置（判定）</div>
-              <div class="sg-hint" style="margin-bottom:10px;">用于行动判定的 ROLL 注入与计算规则。</div>
-              <div id="sg_roll_mount"></div>
+              <div class="sg-hint" style="margin-bottom:10px;">用于行动判定的 ROLL 注入与计算规则。ROLL 模块独立运行，不依赖总结或索引功能。</div>
+              
+              <label class="sg-check"><input type="checkbox" id="sg_wiRollEnabled">启用 ROLL 点（战斗/劝说/学习等判定；与用户输入一起注入）</label>
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>随机权重（0~1）</label>
+                  <input id="sg_wiRollRandomWeight" type="number" min="0" max="1" step="0.01" placeholder="0.3">
+                </div>
+                <div class="sg-field">
+                  <label>难度模式</label>
+                  <select id="sg_wiRollDifficulty">
+                    <option value="simple">简单</option>
+                    <option value="normal">普通</option>
+                    <option value="hard">困难</option>
+                    <option value="hell">地狱</option>
+                  </select>
+                </div>
+              </div>
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>变量来源</label>
+                  <select id="sg_wiRollStatSource">
+                    <option value="variable">综合多来源（最稳定，推荐）</option>
+                    <option value="template">模板渲染（stat_data）</option>
+                    <option value="latest">最新正文末尾</option>
+                  </select>
+                  <div class="sg-hint">综合模式按优先级尝试：/getvar命令 → 变量存储 → 模板渲染 → DOM读取 → 最新AI回复</div>
+                </div>
+                <div class="sg-field">
+                  <label>变量解析模式</label>
+                  <select id="sg_wiRollStatParseMode">
+                    <option value="json">JSON</option>
+                    <option value="kv">键值行（pc.atk=10）</option>
+                  </select>
+                </div>
+              </div>
+              <div class="sg-field">
+                <label>变量名（用于"变量存储"来源）</label>
+                <input id="sg_wiRollStatVarName" type="text" placeholder="stat_data">
+              </div>
+              <div class="sg-row sg-inline">
+                <label>注入方式</label>
+                <select id="sg_wiRollInjectStyle">
+                  <option value="hidden">隐藏注释</option>
+                  <option value="plain">普通文本</option>
+                </select>
+              </div>
+              <div class="sg-row sg-inline">
+                <label class="sg-check" style="margin:0;"><input type="checkbox" id="sg_wiRollDebugLog">调试：状态栏显示判定细节/未触发原因</label>
+              </div>
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>ROLL Provider</label>
+                  <select id="sg_wiRollProvider">
+                    <option value="custom">独立 API</option>
+                    <option value="local">本地计算</option>
+                  </select>
+                </div>
+              </div>
+              <div class="sg-card sg-subcard" id="sg_roll_custom_block" style="display:none; margin-top:8px;">
+                <div class="sg-grid2">
+                  <div class="sg-field">
+                    <label>ROLL 独立 API 基础URL</label>
+                    <input id="sg_wiRollCustomEndpoint" type="text" placeholder="https://api.openai.com/v1">
+                  </div>
+                  <div class="sg-field">
+                    <label>API Key</label>
+                    <input id="sg_wiRollCustomApiKey" type="password" placeholder="sk-...">
+                  </div>
+                </div>
+                <div class="sg-grid2">
+                  <div class="sg-field">
+                    <label>模型ID</label>
+                    <input id="sg_wiRollCustomModel" type="text" placeholder="gpt-4o-mini">
+                  </div>
+                  <div class="sg-field">
+                    <label>Max Tokens</label>
+                    <input id="sg_wiRollCustomMaxTokens" type="number" min="128" max="200000">
+                  </div>
+                </div>
+                <div class="sg-grid2">
+                  <div class="sg-field">
+                    <label>Temperature</label>
+                    <input id="sg_wiRollCustomTemperature" type="number" min="0" max="2" step="0.1">
+                  </div>
+                  <div class="sg-field">
+                    <label>TopP</label>
+                    <input id="sg_wiRollCustomTopP" type="number" min="0" max="1" step="0.01">
+                  </div>
+                </div>
+                <label class="sg-check"><input type="checkbox" id="sg_wiRollCustomStream">stream（若支持）</label>
+                <div class="sg-field" style="margin-top:8px;">
+                  <label>ROLL 系统提示词</label>
+                  <textarea id="sg_wiRollSystemPrompt" rows="5"></textarea>
+                </div>
+              </div>
+              <div class="sg-hint">AI 会先判断是否需要判定，再计算并注入结果。"综合多来源"模式会尝试多种方式读取变量，确保最大兼容性。</div>
             </div>
             <div class="sg-card sg-subcard" style="margin-top:10px;">
               <div class="sg-row sg-inline" style="margin-top:0;">
@@ -6454,15 +6456,7 @@ function setupSettingsPages() {
     }
   } catch { /* ignore */ }
 
-  // 把“ROLL 设置块”移动到 ROLL 设置页
-  try {
-    const $mount = $('#sg_roll_mount');
-    const $rollWrapper = $('#sg_wiRollEnabled').closest('.sg-card.sg-subcard');
-    if ($mount.length && $rollWrapper.length) {
-      $mount.append($rollWrapper.children());
-      $rollWrapper.remove();
-    }
-  } catch { /* ignore */ }
+  // ROLL 设置已直接内嵌在 sg_page_roll 中，无需移动
 
   // tabs
   $('#sg_pgtab_guide').on('click', () => showSettingsPage('guide'));
@@ -6472,6 +6466,7 @@ function setupSettingsPages() {
 
   // quick jump
   $('#sg_gotoIndexPage').on('click', () => showSettingsPage('index'));
+  $('#sg_gotoRollPage').on('click', () => showSettingsPage('roll'));
 }
 
 function pullSettingsToUi() {
