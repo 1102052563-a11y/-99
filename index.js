@@ -7436,6 +7436,11 @@ function saveBtnPos(left, top) {
   } catch { }
 }
 
+// 检测移动端竖屏模式（禁用自定义定位，使用 CSS 底部弹出样式）
+function isMobilePortrait() {
+  return window.innerWidth <= 500 && window.matchMedia('(orientation: portrait)').matches;
+}
+
 function createFloatingButton() {
   if (document.getElementById('sg_floating_btn')) return;
 
@@ -7585,9 +7590,9 @@ function createFloatingPanel() {
 
   document.body.appendChild(panel);
 
-  // Restore position (Only on Desktop/Large screens)
-  // On mobile/tablets (< 1200px wide), we rely on CSS defaults (bottom sheet style) to ensure visibility
-  if (window.innerWidth >= 1200) {
+  // Restore position (Only on Desktop/Large screens, NOT in mobile portrait)
+  // On mobile portrait, we rely on CSS defaults (bottom sheet style) to ensure visibility
+  if (!isMobilePortrait() && window.innerWidth >= 1200) {
     loadFloatingPanelPos();
     if (sgFloatingPinnedPos) {
       const w = panel.offsetWidth || 300;
@@ -7634,6 +7639,8 @@ function createFloatingPanel() {
 
   const onDown = (ev) => {
     if (ev.target.closest('button')) return; // ignore buttons
+    if (isMobilePortrait()) return; // 移动端竖屏禁用拖拽，使用 CSS 底部弹出
+
     dragging = true;
     startX = ev.clientX;
     startY = ev.clientY;
