@@ -7418,6 +7418,7 @@ function setupEventListeners() {
 let floatingPanelVisible = false;
 let lastFloatingContent = null;
 let sgFloatingResizeGuardBound = false;
+let sgFloatingToggleLock = 0;
 
 const SG_FLOATING_BTN_POS_KEY = 'storyguide_floating_btn_pos_v1';
 let sgBtnPos = null;
@@ -7436,9 +7437,27 @@ function saveBtnPos(left, top) {
   } catch { }
 }
 
-// 检测移动端竖屏模式（禁用自定义定位，使用 CSS 底部弹出样式）
+// Sync CSS viewport units for mobile browsers with dynamic bars.
+function updateSgVh() {
+  const root = document.documentElement;
+  if (!root) return;
+  const h = window.visualViewport?.height || window.innerHeight || 0;
+  if (!h) return;
+  root.style.setProperty('--sg-vh', `${h * 0.01}px`);
+}
+
+updateSgVh();
+window.addEventListener('resize', updateSgVh);
+window.addEventListener('orientationchange', updateSgVh);
+window.visualViewport?.addEventListener('resize', updateSgVh);
+
+// 检测移动端/平板竖屏模式（禁用自定义定位，使用 CSS 底部弹出样式）
+// 匹配 CSS 媒体查询: (max-width: 768px), (max-aspect-ratio: 1/1)
 function isMobilePortrait() {
-  return window.innerWidth <= 500 && window.matchMedia('(orientation: portrait)').matches;
+  if (window.matchMedia) {
+    return window.matchMedia('(max-width: 768px), (max-aspect-ratio: 1/1)').matches;
+  }
+  return window.innerWidth <= 768 || (window.innerHeight >= window.innerWidth);
 }
 
 function createFloatingButton() {
@@ -7706,6 +7725,9 @@ function createFloatingPanel() {
 }
 
 function toggleFloatingPanel() {
+  const now = Date.now();
+  if (now - sgFloatingToggleLock < 280) return;
+  sgFloatingToggleLock = now;
   if (floatingPanelVisible) {
     hideFloatingPanel();
   } else {
@@ -7723,6 +7745,9 @@ function shouldGuardFloatingPanelViewport() {
 function ensureFloatingPanelInViewport(panel) {
   try {
     if (!panel || !panel.getBoundingClientRect) return;
+
+    // 移动端竖屏使用 CSS 底部弹出，不需要 JS 定位
+    if (isMobilePortrait()) return;
 
     // Remove viewport size guard to ensure panel is always kept reachable
     // if (!shouldGuardFloatingPanelViewport()) return;
@@ -7775,27 +7800,55 @@ function showFloatingPanel() {
   createFloatingPanel();
   const panel = document.getElementById('sg_floating_panel');
   if (panel) {
-    panel.classList.add('visible');
-    floatingPanelVisible = true;
-
-    // Force safe positioning on mobile/tablet (<1200px) every time it opens
-    // This ensures it doesn't get stuck in weird places or off-screen
-    if (window.innerWidth < 1200) {
+    // 移动端/平板：强制使用底部弹出样式
+    if (isMobilePortrait()) {
+      panel.style.position = 'fixed';
+      panel.style.top = '0';
+      panel.style.bottom = '0';
+      panel.style.left = '0';
+      panel.style.right = '0';
+      panel.style.width = '100%';
+      panel.style.maxWidth = '100%';
+      panel.style.height = 'calc(var(--sg-vh, 1vh) * 100)';
+      panel.style.maxHeight = 'calc(var(--sg-vh, 1vh) * 100)';
+      panel.style.borderRadius = '0';
+      panel.style.resize = 'none';
+      panel.style.transform = 'none';
+      panel.style.transition = 'none';
+      panel.style.opacity = '1';
+      panel.style.visibility = 'visible';
+      panel.style.display = 'flex';
+    } else if (window.innerWidth < 1200) {
+      // 桌面端小窗口：清除可能的内联样式，使用 CSS
       panel.style.left = '';
       panel.style.top = '';
-      panel.style.bottom = ''; // Revert to CSS default (fixed bottom)
+      panel.style.bottom = '';
       panel.style.right = '';
-      panel.style.transform = ''; // Clear strict transform if needed, though CSS handles transition
+      panel.style.transform = '';
+      panel.style.maxWidth = '';
+      panel.style.maxHeight = '';
+      panel.style.display = '';
+      panel.style.height = '';
+      panel.style.opacity = '';
+      panel.style.visibility = '';
+      panel.style.transition = '';
+      panel.style.borderRadius = '';
+    } else {
+      panel.style.display = '';
     }
 
+    panel.classList.add('visible');
+    floatingPanelVisible = true;
     // 如果有缓存内容则显示
     if (lastFloatingContent) {
       updateFloatingPanelBody(lastFloatingContent);
     }
 
-    bindFloatingPanelResizeGuard();
-    // Final guard: make sure the panel is actually within the viewport on tiny screens.
-    requestAnimationFrame(() => ensureFloatingPanelInViewport(panel));
+    // 非移动端才运行视口检测
+    if (!isMobilePortrait()) {
+      bindFloatingPanelResizeGuard();
+      requestAnimationFrame(() => ensureFloatingPanelInViewport(panel));
+    }
   }
 }
 
@@ -7804,6 +7857,9 @@ function hideFloatingPanel() {
   if (panel) {
     panel.classList.remove('visible');
     floatingPanelVisible = false;
+    if (isMobilePortrait()) {
+      panel.style.display = 'none';
+    }
   }
 }
 

@@ -1481,11 +1481,11 @@ body.sg-zoom-lock {
   border-radius: 10px;
 }
 
-/* 移动端适配 */
+/* 移动端适配 - 底部弹出式面板 */
 @media (max-width: 500px) {
   .sg-floating-btn {
     bottom: 90px;
-    /* Liitle higher to avoid bottom bars */
+    /* Little higher to avoid bottom bars */
     right: 16px;
     width: 48px;
     height: 48px;
@@ -1494,13 +1494,25 @@ body.sg-zoom-lock {
   }
 
   .sg-floating-panel {
-    bottom: clamp(12px, 12dvh, 120px);
-    right: 10px;
-    left: 10px;
-    width: auto;
-    max-width: none;
-    max-height: min(70dvh, calc(100dvh - 24px));
-    z-index: 2147483641;
+    position: fixed !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    top: auto !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: calc(var(--sg-vh, 1vh) * 75) !important;
+    min-height: 200px;
+    border-radius: 16px 16px 0 0 !important;
+    z-index: 2147483641 !important;
+    resize: none !important;
+    /* 初始状态：隐藏在屏幕底部下方 */
+    transform: translateY(100%) !important;
+    transition: transform 0.3s ease, opacity 0.2s ease, visibility 0.3s ease !important;
+  }
+
+  .sg-floating-panel.visible {
+    display: flex !important;
   }
 }
 
@@ -1784,26 +1796,33 @@ body.sg-zoom-lock {
   border-color: rgba(100, 160, 220, 0.4);
 }
 
-/* ===== 手机端竖屏优化 ===== */
-@media (max-width: 500px) and (orientation: portrait) {
+/* ===== 手机端/平板竖屏优化 ===== */
+/* 扩大匹配范围：768px 以下宽度，或窄高比（竖屏） */
+@media (max-width: 768px),
+(max-aspect-ratio: 1/1) {
 
   /* 悬浮面板全屏底部弹出 */
+
   .sg-floating-panel {
     position: fixed !important;
-    bottom: 0 !important;
-    left: 0 !important;
-    right: 0 !important;
-    top: auto !important;
+    inset: 0 !important;
     width: 100% !important;
+    height: calc(var(--sg-vh, 1vh) * 100) !important;
     max-width: 100% !important;
-    max-height: 80dvh !important;
-    min-height: 200px;
-    border-radius: 16px 16px 0 0 !important;
+    max-height: calc(var(--sg-vh, 1vh) * 100) !important;
+    border-radius: 0 !important;
     z-index: 2147483641 !important;
     resize: none !important;
+    display: none;
+    opacity: 1 !important;
+    visibility: visible !important;
+    transform: none !important;
+    transition: none !important;
   }
 
   .sg-floating-panel.visible {
+    opacity: 1 !important;
+    visibility: visible !important;
     transform: translateY(0) !important;
   }
 
@@ -1830,7 +1849,7 @@ body.sg-zoom-lock {
   /* 面板内容 */
   .sg-floating-body {
     padding: 12px;
-    max-height: calc(80dvh - 60px);
+    max-height: none;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
   }
@@ -1891,7 +1910,7 @@ body.sg-zoom-lock {
 /* 更小屏幕的额外优化 */
 @media (max-width: 380px) {
   .sg-floating-panel {
-    max-height: 85dvh !important;
+    max-height: calc(var(--sg-vh, 1vh) * 100) !important;
   }
 
   .sg-floating-header {
