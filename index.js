@@ -686,6 +686,7 @@ async function importPreset(file) {
     }
 
     // 应用新设置
+    const { extensionSettings } = SillyTavern.getContext();
     Object.assign(extensionSettings[MODULE_NAME], newSettings);
     saveSettings();
 
