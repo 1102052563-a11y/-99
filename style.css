@@ -1464,6 +1464,7 @@ body.sg-zoom-lock {
   font-size: 14px;
   line-height: 1.6;
   color: rgba(200, 210, 220, 0.92);
+  position: relative;
 }
 
 .sg-floating-loading {
@@ -2059,3 +2060,61 @@ body.sg-zoom-lock {
     bottom: max(90px, calc(env(safe-area-inset-bottom) + 80px)) !important;
   }
 }
+
+/* ===== Grid Map Styles ===== */
+.sg-map-container { margin-top: 10px; padding: 14px; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 14px; background: radial-gradient(120% 120% at 10% 0%, rgba(255, 255, 255, 0.06) 0%, rgba(0, 0, 0, 0.25) 55%, rgba(0, 0, 0, 0.35) 100%); position: relative; }
+.sg-map-container::before { content: ""; position: absolute; inset: 0; border-radius: 14px; background-image: repeating-linear-gradient(135deg, rgba(255,255,255,0.03) 0, rgba(255,255,255,0.03) 2px, transparent 2px, transparent 6px); opacity: 0.25; pointer-events: none; }
+.sg-map-container > * { position: relative; z-index: 1; }
+.sg-map-title { font-weight: 700; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+.sg-map-container { overflow: auto; }
+.sg-map-grid { display: grid; grid-template-columns: repeat(var(--sg-map-cols, 7), 80px); grid-auto-rows: 50px; gap: 4px; justify-content: start; width: max-content; }
+.sg-map-row { display: flex; gap: 4px; }
+.sg-map-cell { width: 80px; height: 50px; border-radius: 10px; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 11px; text-align: center; position: relative; transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease, border-color 0.18s ease; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04); animation: sg-map-pop 280ms ease-out; }
+.sg-map-empty-cell { background: rgba(255, 255, 255, 0.03); border: 1px dashed rgba(255, 255, 255, 0.08); }
+.sg-map-location { background: rgba(100, 150, 200, 0.18); border: 1px solid rgba(100, 150, 200, 0.35); cursor: pointer; }
+.sg-map-location:hover { background: rgba(100, 150, 200, 0.35); transform: scale(1.05); }
+.sg-map-protagonist { background: rgba(100, 200, 100, 0.25); border-color: rgba(100, 200, 100, 0.5); box-shadow: 0 0 10px rgba(100, 200, 100, 0.35); }
+.sg-map-protagonist::after { content: ""; position: absolute; inset: 2px; border-radius: 8px; border: 1px solid rgba(100, 200, 100, 0.35); animation: sg-map-pulse 1.8s ease-in-out infinite; }
+.sg-map-has-events { border-color: rgba(255, 180, 80, 0.5); }
+.sg-map-unvisited { background: rgba(255, 255, 255, 0.04); border-color: rgba(255, 255, 255, 0.1); opacity: 0.55; filter: saturate(0.6); }
+.sg-map-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: normal; max-width: 72px; font-size: clamp(10px, 1.6vw, 11px); text-shadow: 0 1px 0 rgba(0,0,0,0.25); line-height: 1.1; max-height: 2.2em; margin-top: 10px; }
+.sg-map-marker { position: absolute; top: 2px; right: 4px; font-size: 12px; color: #4ade80; }
+.sg-map-event-marker { position: absolute; bottom: 2px; right: 4px; font-size: 10px; color: #fbbf24; }
+.sg-map-badges { position: absolute; top: 2px; left: 50%; transform: translateX(-50%); display: flex; gap: 1px; flex-wrap: nowrap; white-space: nowrap; max-width: 70px; }
+.sg-map-badge { font-size: 8px; width: 16px; height: 12px; display: inline-flex; align-items: center; justify-content: center; border-radius: 6px; background: rgba(0,0,0,0.25); color: #e5e7eb; }
+.sg-map-badge-layer { background: rgba(30, 60, 120, 0.35); }
+.sg-map-badge-group { background: rgba(60, 80, 40, 0.35); }
+.sg-map-event-delete { margin-top: 6px; padding: 4px 8px; border-radius: 8px; border: 1px solid rgba(255, 80, 80, 0.5); background: rgba(255, 80, 80, 0.15); color: rgba(255, 200, 200, 0.95); font-size: 11px; cursor: pointer; }
+.sg-map-legend { margin-top: 8px; font-size: 11px; opacity: 0.7; text-align: center; }
+.sg-map-empty { text-align: center; padding: 20px; opacity: 0.6; font-size: 13px; }
+.sg-map-event-panel { margin-top: 8px; padding: 10px 12px; border-radius: 10px; background: rgba(0, 0, 0, 0.18); border: 1px solid rgba(255, 255, 255, 0.08); font-size: 12px; }
+.sg-map-event-panel--floating { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 5; max-width: 80%; max-height: 70%; overflow: auto; background: rgba(20, 20, 20, 0.9); border: 1px solid rgba(255, 255, 255, 0.12); box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45); }
+.sg-map-event-header { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
+.sg-map-event-title { font-weight: 700; }
+.sg-map-event-chip { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); }
+.sg-map-event-desc { opacity: 0.85; margin-bottom: 6px; }
+.sg-map-event-list { margin: 0; padding-left: 16px; }
+.sg-map-event-list li { margin: 2px 0; }
+.sg-map-event-text { margin-right: 6px; }
+.sg-map-event-tags { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.sg-map-event-tag { font-size: 10px; padding: 1px 5px; border-radius: 999px; background: rgba(255, 180, 80, 0.25); border: 1px solid rgba(255, 180, 80, 0.35); }
+.sg-map-event-empty { opacity: 0.7; }
+.sg-map-popover { backdrop-filter: blur(4px); }
+
+@keyframes sg-map-pop {
+  0% { transform: scale(0.96); opacity: 0; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes sg-map-pulse {
+  0% { opacity: 0.2; transform: scale(0.98); }
+  50% { opacity: 0.6; transform: scale(1); }
+  100% { opacity: 0.2; transform: scale(0.98); }
+}
+.sg-map-popover { position: fixed; z-index: 2147483647; max-width: 260px; padding: 8px 10px; border-radius: 10px; background: rgba(20, 20, 20, 0.92); color: #f0f0f0; border: 1px solid rgba(255, 255, 255, 0.15); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35); font-size: 12px; line-height: 1.4; display: none; pointer-events: auto; }
+.sg-map-popover-inpanel { position: absolute; z-index: 2147483647; }
+.sg-map-popover-title { font-weight: 700; margin-bottom: 2px; }
+.sg-map-popover-desc { opacity: 0.85; margin-bottom: 4px; }
+.sg-map-popover-label { font-weight: 600; margin-bottom: 2px; opacity: 0.9; }
+.sg-map-popover-events ul { margin: 0; padding-left: 16px; }
+.sg-map-popover-empty { opacity: 0.7; }

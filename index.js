@@ -66,12 +66,107 @@ const DEFAULT_SUMMARY_USER_TEMPLATE = `【楼层范围】{{fromFloor}}-{{toFloor
 const SUMMARY_JSON_REQUIREMENT = `输出要求：\n- 只输出严格 JSON，不要 Markdown、不要代码块、不要任何多余文字。\n- JSON 结构必须为：{"title": string, "summary": string, "keywords": string[]}。\n- keywords 为 6~14 个词/短语，尽量去重、避免泛词。`;
 
 
-// ===== 索引提示词默认值（可在面板中自定义；用于“LLM 综合判断”模式） =====
-const DEFAULT_INDEX_SYSTEM_PROMPT = `你是一个“剧情索引匹配”助手。\n\n任务：\n- 输入包含：最近剧情正文（节选）、用户当前输入、以及若干候选索引条目（每条含标题/摘要/触发词）。\n- 你的目标是：综合判断哪些候选条目与“当前剧情”最相关（不是只匹配用户这一句话），并返回这些候选的 id。\n\n要求：\n- 优先选择与当前剧情主线/关键人物/关键地点/关键物品/未解决悬念相关的条目。\n- 避免选择明显无关或过于泛的条目。\n- 返回条目数量应 <= maxPick。`;
+// ===== 索引提示词默认值（可在面板中自定义；用于"LLM 综合判断"模式） =====
+const DEFAULT_INDEX_SYSTEM_PROMPT = `你是一个"剧情索引匹配"助手。
 
-const DEFAULT_INDEX_USER_TEMPLATE = `【用户当前输入】\n{{userMessage}}\n\n【最近剧情（节选）】\n{{recentText}}\n\n【候选索引条目（JSON）】\n{{candidates}}\n\n请从候选中选出与当前剧情最相关的条目（不超过 {{maxPick}} 条），并仅输出 JSON。`;
+【任务】
+- 输入包含：最近剧情正文（节选）、用户当前输入、以及若干候选索引条目（含标题/摘要/触发词/类型）。
+- 你的目标是：综合判断哪些候选条目与"当前剧情"最相关，并返回这些候选的 id。
 
-const INDEX_JSON_REQUIREMENT = `输出要求：\n- 只输出严格 JSON，不要 Markdown、不要代码块、不要任何多余文字。\n- JSON 结构必须为：{"pickedIds": number[]}。\n- pickedIds 必须是候选列表里的 id（整数）。\n- 返回的 pickedIds 数量 <= maxPick。`;
+【选择优先级】
+1. **人物相关**：当前剧情涉及某个NPC时，优先索引该NPC的档案条目
+2. **装备相关**：当前剧情涉及某件装备时，优先索引该装备的条目
+3. **历史剧情**：优先选择时间较久远但与当前剧情相关的条目（避免索引最近已在上下文中的剧情）
+4. **因果关联**：当前事件的前因、伏笔、未解悬念
+
+【避免】
+- 不要选择刚刚发生的剧情（最近5层以内的内容通常已在上下文中）
+- 避免选择明显无关或过于泛泛的条目
+
+【返回要求】
+- 返回条目数量应 <= maxPick
+- 分类控制：人物条目 <= maxCharacters，装备条目 <= maxEquipments，剧情条目 <= maxPlot`;
+
+const DEFAULT_INDEX_USER_TEMPLATE = `【用户当前输入】
+{{userMessage}}
+
+【最近剧情（节选）】
+{{recentText}}
+
+【候选索引条目（JSON）】
+{{candidates}}
+
+【选择限制】
+- 总数不超过 {{maxPick}} 条
+- 人物条目不超过 {{maxCharacters}} 条
+- 装备条目不超过 {{maxEquipments}} 条
+- 剧情条目不超过 {{maxPlot}} 条
+
+请从候选中选出与当前剧情最相关的条目，优先选择：与当前提到的人物/装备相关的条目、时间较久远的相关剧情。仅输出 JSON。`;
+
+const INDEX_JSON_REQUIREMENT = `输出要求：
+- 只输出严格 JSON，不要 Markdown、不要代码块、不要任何多余文字。
+- JSON 结构必须为：{"pickedIds": number[]}。
+- pickedIds 必须是候选列表里的 id（整数）。
+- 返回的 pickedIds 数量 <= maxPick。`;
+
+
+// ===== 结构化世界书条目提示词默认值 =====
+const DEFAULT_STRUCTURED_ENTRIES_SYSTEM_PROMPT = `你是一个"剧情记忆管理"助手，负责从对话片段中提取结构化信息用于长期记忆。
+
+【任务】
+1. 识别本次对话中出现的重要 NPC（不含主角）
+2. 识别主角当前持有/装备的关键物品
+3. 识别主角新增或变化的能力
+4. 识别需要删除的条目（死亡的角色、卖掉/分解的装备等）
+5. 生成档案式的客观第三人称描述
+
+【筛选标准】
+- NPC：只记录有名有姓的角色，忽略杂兵、无名NPC、普通敌人
+- 装备：只记录绿色品质以上的装备，或紫色品质以上的重要物品
+
+【去重规则（重要）】
+- 仔细检查【已知人物列表】和【已知装备列表】，避免重复创建条目
+- 同一角色可能有多种写法（如繁体/简体、英文/中文翻译），必须识别为同一人
+- 如果发现角色已存在于列表中，使用 isUpdated=true 更新而不是创建新条目
+- 将不同名称写法添加到 aliases 数组中
+
+【删除条目规则】
+- 若角色在对话中明确死亡/永久离开，将其加入 deletedCharacters 数组
+- 若装备被卖掉/分解/丢弃/彻底损坏，将其加入 deletedEquipments 数组
+- 若能力被遗忘/剥夺/彻底失效，将其加入 deletedAbilities 数组
+
+【重要】
+- 若提供了 statData，请从中提取该角色/物品的**关键数值**（如属性、等级、状态），精简为1-2行
+- 不要完整复制 statData，只提取最重要的信息
+- 重点描述：与主角的关系发展、角色背景、性格特点、关键事件
+
+【性格铆钉】
+- 为每个重要NPC提取「核心性格」：不会因剧情发展而轻易改变的根本特质
+- 提取「角色动机」：该角色自己的目标/追求，不是围绕主角转
+- 评估「关系阶段」：陌生/初识/熟悉/信任/亲密，关系发展应循序渐进`;
+const DEFAULT_STRUCTURED_ENTRIES_USER_TEMPLATE = `【楼层范围】{{fromFloor}}-{{toFloor}}\\n【对话片段】\\n{{chunk}}\\n【已知人物列表】\\n{{knownCharacters}}\\n【已知装备列表】\\n{{knownEquipments}}`;
+const DEFAULT_STRUCTURED_CHARACTER_PROMPT = `只记录有名有姓的重要NPC（不含主角），忽略杂兵、无名敌人、路人。
+
+【必填字段】阵营身份、性格特点、背景故事、与主角关系及发展、关键事件
+
+【性格铆钉字段（重要）】
+- corePersonality：核心性格锚点，不会轻易改变的根本特质（如"傲慢"、"多疑"、"重义"），即使与主角关系改善也会保持
+- motivation：角色自己的独立目标/动机，不应为了主角而放弃
+- relationshipStage：与主角的关系阶段（陌生/初识/熟悉/信任/亲密），关系不应跳跃式发展
+
+若角色死亡/永久离开，将其名字加入 deletedCharacters。若有 statData，在 statInfo 中精简总结。信息不足写"待确认"。`;
+const DEFAULT_STRUCTURED_EQUIPMENT_PROMPT = `只记录绿色品质以上的装备，或紫色品质以上的重要物品（忽略白色/灰色普通物品）。必须记录：获得时间、获得地点、来源（掉落/购买/锻造/奖励等）、当前状态。若有强化/升级，描述主角如何培养这件装备。若装备被卖掉/分解/丢弃/损坏，将其名字加入 deletedEquipments。若有 statData，精简总结其属性。`;
+const DEFAULT_STRUCTURED_ABILITY_PROMPT = `记录主角的能力/技能。说明类型、效果、触发条件、代价。若能力被遗忘/剥夺/失效，将其名字加入 deletedAbilities。若有 statData，精简总结其数值。`;
+const STRUCTURED_ENTRIES_JSON_REQUIREMENT = `输出要求：只输出严格 JSON。各字段要填写完整，statInfo 只填关键数值的精简总结（1-2行）。
+
+结构：{"characters":[...],"equipments":[...],"abilities":[...],"deletedCharacters":[...],"deletedEquipments":[...],"deletedAbilities":[...]}
+
+characters 条目结构：{name,uid,aliases[],faction,status,personality,corePersonality:"核心性格锚点（不轻易改变）",motivation:"角色独立动机/目标",relationshipStage:"陌生|初识|熟悉|信任|亲密",background,relationToProtagonist,keyEvents[],statInfo,isNew,isUpdated}
+
+equipments 条目结构：{name,uid,type,rarity,effects,source,currentState,statInfo,boundEvents[],isNew}
+
+abilities 条目结构：{name,uid,type,effects,trigger,cost,statInfo,boundEvents[],isNegative,isNew}`;
 
 // ===== ROLL 判定默认配置 =====
 const DEFAULT_ROLL_ACTIONS = Object.freeze([
@@ -224,6 +319,10 @@ const DEFAULT_SETTINGS = Object.freeze({
   summaryMaxCharsPerMessage: 4000,
   summaryMaxTotalChars: 24000,
 
+  // 是否读取 stat_data 变量作为总结上下文（类似 roll 点模块）
+  summaryReadStatData: false,
+  summaryStatVarName: 'stat_data',
+
   // 总结调用方式：st=走酒馆当前已连接的 LLM；custom=独立 OpenAI 兼容 API
   summaryProvider: 'st',
   summaryTemperature: 0.4,
@@ -305,6 +404,10 @@ const DEFAULT_SETTINGS = Object.freeze({
   wiTriggerStartAfterAssistantMessages: 0,
   // 最多选择多少条 summary 条目来触发
   wiTriggerMaxEntries: 4,
+  // 分类最大索引数
+  wiTriggerMaxCharacters: 2, // 最多索引多少个人物条目
+  wiTriggerMaxEquipments: 2, // 最多索引多少个装备条目
+  wiTriggerMaxPlot: 3,       // 最多索引多少个剧情条目（优先较久远的）
   // 相关度阈值（0~1，越大越严格）
   wiTriggerMinScore: 0.08,
   // 最多注入多少个触发词（去重后）
@@ -354,6 +457,20 @@ const DEFAULT_SETTINGS = Object.freeze({
   customSystemPreamble: '',     // 附加在默认 system 之后
   customConstraints: '',        // 附加在默认 constraints 之后
 
+  // ===== 结构化世界书条目（人物/装备/能力） =====
+  structuredEntriesEnabled: true,
+  characterEntriesEnabled: true,
+  equipmentEntriesEnabled: true,
+  abilityEntriesEnabled: false, // 默认关闭
+  characterEntryPrefix: '人物',
+  equipmentEntryPrefix: '装备',
+  abilityEntryPrefix: '能力',
+  structuredEntriesSystemPrompt: '',
+  structuredEntriesUserTemplate: '',
+  structuredCharacterPrompt: '',
+  structuredEquipmentPrompt: '',
+  structuredAbilityPrompt: '',
+
   // ===== 快捷选项功能 =====
   quickOptionsEnabled: true,
   quickOptionsShowIn: 'inline', // inline | panel | both
@@ -364,6 +481,36 @@ const DEFAULT_SETTINGS = Object.freeze({
     { label: '对话', prompt: '让角色之间展开更多对话' },
     { label: '行动', prompt: '描述接下来的具体行动' },
   ], null, 2),
+
+  // ===== 地图功能 =====
+  mapEnabled: false,
+  mapAutoUpdate: true,
+  mapSystemPrompt: `从对话中提取地点信息，并尽量还原空间关系：
+  1. 识别当前主角所在的地点名称
+  2. 识别提及的新地点
+  3. 判断地点之间的连接关系（哪些地点相邻/可通行，方向感如：北/南/东/西/楼上/楼下）
+  4. 记录该地点发生的重要事件（事件用一句话，包含触发条件/影响）
+  5. 若文本明确提到相对位置/楼层/方位，请给出 row/col（网格坐标）或相邻关系
+  6. 在原著世界观下，结合谷歌搜索的原著资料补充“待探索地点”，并为每个地点写明可能触发的任务/简介
+  7. 待探索地点数量不超过 6 个，避免与已有地点重复；若对话中地点较少，至少补充 2 个待探索地点
+  8. 若无法给出 row/col，至少给出 connectedTo 或方位词
+  9. 没有明确依据时用“待确认”描述，不要乱猜
+  10. 必须输出 currentLocation/newLocations/events 三个字段，数组可为空但字段必须存在；newLocations 总数不少于 3（含待探索地点）
+  11. 为地点补充分组/图层信息：group（室外/室内/楼层区域等），layer（如“一层/二层/地下”）
+  12. 事件允许附带 tags（如：战斗/任务/对话/解谜/探索），每个事件 1~3 个标签
+  13. 避免同义地点重复：输出前先合并同义词（如 豪宅/宅邸/府邸/公馆；学园/学院/学校；城堡/要塞/王城；寺庙/神殿/道观/教堂；洞穴/洞窟；遗迹/秘境）
+  14. 仅依据对话/设定/原著信息进行推断，不要引入无根据的信息
+  
+  输出 JSON 格式：
+  {
+    "currentLocation": "主角当前所在地点",
+    "newLocations": [
+      { "name": "地点名", "description": "简述", "connectedTo": ["相邻地点1"], "row": 0, "col": 0, "group": "室外", "layer": "一层" }
+    ],
+    "events": [
+      { "location": "地点名", "event": "事件描述", "tags": ["任务"] }
+    ]
+  }`,
 });
 
 const META_KEYS = Object.freeze({
@@ -374,6 +521,7 @@ const META_KEYS = Object.freeze({
   boundGreenWI: 'storyguide_bound_green_wi',
   boundBlueWI: 'storyguide_bound_blue_wi',
   autoBindCreated: 'storyguide_auto_bind_created',
+  mapData: 'storyguide_map_data',
 });
 
 let lastReport = null;
@@ -384,6 +532,7 @@ let refreshTimer = null;
 let appendTimer = null;
 let summaryTimer = null;
 let isSummarizing = false;
+let summaryCancelled = false;
 let sgToastTimer = null;
 
 // 蓝灯索引“实时读取”缓存（防止每条消息都请求一次）
@@ -468,6 +617,88 @@ function ensureSettings() {
 
 function saveSettings() { SillyTavern.getContext().saveSettingsDebounced(); }
 
+// 导出全局预设
+function exportPreset() {
+  const s = ensureSettings();
+  const preset = {
+    _type: 'StoryGuide_Preset',
+    _version: '1.0',
+    _exportedAt: new Date().toISOString(),
+    settings: { ...s }
+  };
+  // 移除敏感信息（API Key）
+  delete preset.settings.customApiKey;
+  delete preset.settings.summaryCustomApiKey;
+  delete preset.settings.wiIndexCustomApiKey;
+  delete preset.settings.wiRollCustomApiKey;
+  // 移除缓存数据
+  delete preset.settings.customModelsCache;
+  delete preset.settings.summaryCustomModelsCache;
+  delete preset.settings.wiIndexCustomModelsCache;
+  delete preset.settings.wiRollCustomModelsCache;
+
+  const json = JSON.stringify(preset, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `StoryGuide_Preset_${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+
+  showToast('预设已导出 ✅', { kind: 'ok' });
+}
+
+// 导入全局预设
+async function importPreset(file) {
+  if (!file) return;
+
+  try {
+    const text = await file.text();
+    const preset = JSON.parse(text);
+
+    // 验证格式
+    if (preset._type !== 'StoryGuide_Preset') {
+      showToast('无效的预设文件格式', { kind: 'err' });
+      return;
+    }
+
+    if (!preset.settings || typeof preset.settings !== 'object') {
+      showToast('预设文件内容无效', { kind: 'err' });
+      return;
+    }
+
+    // 获取当前设置并保留敏感信息
+    const currentSettings = ensureSettings();
+    const preservedKeys = [
+      'customApiKey', 'summaryCustomApiKey', 'wiIndexCustomApiKey', 'wiRollCustomApiKey',
+      'customModelsCache', 'summaryCustomModelsCache', 'wiIndexCustomModelsCache', 'wiRollCustomModelsCache'
+    ];
+
+    // 合并设置（保留敏感信息）
+    const newSettings = { ...preset.settings };
+    for (const key of preservedKeys) {
+      if (currentSettings[key]) {
+        newSettings[key] = currentSettings[key];
+      }
+    }
+
+    // 应用新设置
+    Object.assign(extensionSettings[MODULE_NAME], newSettings);
+    saveSettings();
+
+    // 刷新 UI
+    pullSettingsToUi();
+
+    showToast(`预设已导入 ✅\n版本: ${preset._version || '未知'}\n导出时间: ${preset._exportedAt || '未知'}`, { kind: 'ok', duration: 3000 });
+  } catch (e) {
+    console.error('[StoryGuide] Import preset failed:', e);
+    showToast(`导入失败: ${e.message}`, { kind: 'err' });
+  }
+}
+
 function stripHtml(input) {
   if (!input) return '';
   return String(input).replace(/<[^>]*>/g, '').replace(/\s+\n/g, '\n').trim();
@@ -512,6 +743,270 @@ function safeJsonParse(maybeJson) {
   const last = t.lastIndexOf('}');
   if (first !== -1 && last !== -1 && last > first) t = t.slice(first, last + 1);
   try { return JSON.parse(t); } catch { return null; }
+}
+
+function parseJsonArrayAttr(maybeJsonArray) {
+  if (!maybeJsonArray) return [];
+  const t = String(maybeJsonArray || '').trim();
+  try {
+    const parsed = JSON.parse(t);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeMapName(name) {
+  let out = String(name || '').replace(/\s+/g, ' ').trim();
+  // common CN place variants (reduce duplicates like "豪宅/宅邸/府邸/公馆")
+  out = out.replace(/(家|宅)(豪宅|宅邸|府邸|公馆|别墅|庄园|大宅|府|宅|宅子)$/g, '宅邸');
+  out = out.replace(/(豪宅|府邸|公馆|别墅|庄园|大宅|府|宅|宅子)$/g, '宅邸');
+  out = out.replace(/宅邸$/g, '宅邸');
+  // broader suffix normalization
+  const rules = [
+    [/学校$/g, '学校'],
+    [/学园$/g, '学校'],
+    [/学院$/g, '学校'],
+    [/大学$/g, '学校'],
+    [/大桥$/g, '桥'],
+    [/桥梁$/g, '桥'],
+    [/桥$/g, '桥'],
+    [/大道$/g, '路'],
+    [/大街$/g, '街'],
+    [/街道$/g, '街'],
+    [/街$/g, '街'],
+    [/商业街区$/g, '商业街'],
+    [/商业街$/g, '商业街'],
+    [/步行街$/g, '商业街'],
+    [/购物中心$/g, '商场'],
+    [/商城$/g, '商场'],
+    [/商场$/g, '商场'],
+    [/商业区$/g, '商业区'],
+    [/广场$/g, '广场'],
+    [/公园$/g, '公园'],
+    [/园区$/g, '公园'],
+    [/体育馆$/g, '体育馆'],
+    [/运动馆$/g, '体育馆'],
+    [/体育中心$/g, '体育馆'],
+    [/图书馆$/g, '图书馆'],
+    [/阅览室$/g, '图书馆'],
+    [/医院$/g, '医院'],
+    [/诊所$/g, '医院'],
+    [/车站$/g, '车站'],
+    [/站点$/g, '车站'],
+    [/地铁站$/g, '地铁站'],
+    [/地铁口$/g, '地铁站'],
+    [/机场$/g, '机场'],
+    [/港口$/g, '港口'],
+    [/码头$/g, '港口'],
+    [/旅馆$/g, '旅馆'],
+    [/酒店$/g, '旅馆'],
+    [/宾馆$/g, '旅馆'],
+    [/大厦$/g, '大楼'],
+    [/大楼$/g, '大楼'],
+    [/楼宇$/g, '大楼'],
+    [/楼栋$/g, '大楼'],
+    [/中心$/g, '中心'],
+    [/森林$/g, '森林'],
+    [/林地$/g, '森林'],
+    [/树林$/g, '森林'],
+    [/山脉$/g, '山'],
+    [/高地$/g, '山'],
+    [/河流$/g, '河'],
+    [/河$/g, '河'],
+    [/湖泊$/g, '湖'],
+    [/湖$/g, '湖'],
+    [/海岸$/g, '海边'],
+    [/海滩$/g, '海边'],
+    [/海边$/g, '海边'],
+    [/地下室$/g, '地下'],
+    [/地底$/g, '地下'],
+    [/地下$/g, '地下'],
+    // fantasy/setting-specific systems
+    [/宫殿$/g, '城堡'],
+    [/王城$/g, '城堡'],
+    [/城堡$/g, '城堡'],
+    [/要塞$/g, '城堡'],
+    [/城邦$/g, '城堡'],
+    [/堡垒$/g, '城堡'],
+    [/神殿$/g, '寺庙'],
+    [/寺庙$/g, '寺庙'],
+    [/道观$/g, '寺庙'],
+    [/教堂$/g, '寺庙'],
+    [/大教堂$/g, '寺庙'],
+    [/修道院$/g, '寺庙'],
+    [/洞穴$/g, '洞穴'],
+    [/洞窟$/g, '洞穴'],
+    [/遗迹$/g, '遗迹'],
+    [/秘境$/g, '遗迹'],
+    [/秘境之门$/g, '遗迹'],
+    [/遗址$/g, '遗迹'],
+    [/门派$/g, '宗门'],
+    [/宗门$/g, '宗门'],
+    [/帮会$/g, '宗门'],
+    [/门派驻地$/g, '宗门'],
+    [/宗门驻地$/g, '宗门'],
+  ];
+  for (const [re, rep] of rules) out = out.replace(re, rep);
+  return out.toLowerCase();
+}
+
+let sgMapPopoverEl = null;
+let sgMapPopoverHost = null;
+let sgMapEventHandlerBound = false;
+
+function isMapAutoUpdateEnabled(s) {
+  const v = s?.mapAutoUpdate;
+  if (v === undefined || v === null) return true;
+  if (v === false) return false;
+  if (typeof v === 'string') return !['false', '0', 'off', 'no'].includes(v.toLowerCase());
+  if (typeof v === 'number') return v !== 0;
+  return Boolean(v);
+}
+
+function bindMapEventPanelHandler() {
+  if (sgMapEventHandlerBound) return;
+  sgMapEventHandlerBound = true;
+
+    $(document).on('click', '.sg-map-location', (e) => {
+      const $cell = $(e.currentTarget);
+      const $wrap = $cell.closest('.sg-map-wrapper');
+      let $panel = $wrap.find('.sg-map-event-panel');
+      if (!$panel.length) {
+        $wrap.append('<div class="sg-map-event-panel"></div>');
+        $panel = $wrap.find('.sg-map-event-panel');
+      }
+
+    const name = String($cell.attr('data-name') || '').trim();
+    const desc = String($cell.attr('data-desc') || '').trim();
+    const group = String($cell.attr('data-group') || '').trim();
+    const layer = String($cell.attr('data-layer') || '').trim();
+    const events = parseJsonArrayAttr($cell.attr('data-events'));
+
+    const headerBits = [];
+    if (name) headerBits.push(`<span class="sg-map-event-title">${escapeHtml(name)}</span>`);
+    if (layer) headerBits.push(`<span class="sg-map-event-chip">${escapeHtml(layer)}</span>`);
+    if (group) headerBits.push(`<span class="sg-map-event-chip">${escapeHtml(group)}</span>`);
+      const header = headerBits.length ? `<div class="sg-map-event-header">${headerBits.join('')}</div>` : '';
+      const descHtml = desc ? `<div class="sg-map-event-desc">${escapeHtml(desc)}</div>` : '';
+
+      let listHtml = '';
+      if (events.length) {
+      const items = events.map((ev) => {
+        const text = escapeHtml(String(ev?.text || ev?.event || ev || '').trim());
+        const tags = Array.isArray(ev?.tags) ? ev.tags : [];
+        const tagsHtml = tags.length
+          ? `<span class="sg-map-event-tags">${tags.map(t => `<span class="sg-map-event-tag">${escapeHtml(String(t || ''))}</span>`).join('')}</span>`
+          : '';
+        return `<li><span class="sg-map-event-text">${text || '（无内容）'}</span>${tagsHtml}</li>`;
+      }).join('');
+      listHtml = `<ul class="sg-map-event-list">${items}</ul>`;
+    } else {
+      listHtml = '<div class="sg-map-event-empty">暂无事件</div>';
+    }
+
+      const deleteBtn = name
+        ? `<button class="sg-map-event-delete" data-name="${escapeHtml(name)}">删除地点</button>`
+        : '';
+      $panel.html(`${header}${descHtml}${listHtml}${deleteBtn}`);
+      $panel.addClass('sg-map-event-panel--floating');
+    });
+
+    $(document).on('click', '.sg-map-wrapper', (e) => {
+      if ($(e.target).closest('.sg-map-location, .sg-map-event-panel').length) return;
+      const $wrap = $(e.currentTarget);
+      $wrap.find('.sg-map-event-panel').remove();
+    });
+
+    $(document).on('click', '.sg-map-event-delete', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const name = String($(e.currentTarget).attr('data-name') || '').trim();
+      if (!name) return;
+      try {
+        const map = getMapData();
+        const key = map.locations?.[name] ? name : (normalizeMapName(name) ? Array.from(Object.keys(map.locations || {})).find(k => normalizeMapName(k) === normalizeMapName(name)) : null);
+        if (key && map.locations && map.locations[key]) {
+          delete map.locations[key];
+        }
+        for (const loc of Object.values(map.locations || {})) {
+          if (!Array.isArray(loc.connections)) continue;
+          loc.connections = loc.connections.filter(c => normalizeMapName(c) !== normalizeMapName(name));
+        }
+        if (map.protagonistLocation && normalizeMapName(map.protagonistLocation) === normalizeMapName(name)) {
+          map.protagonistLocation = '';
+        }
+        await setMapData(map);
+        updateMapPreview();
+      } catch (err) {
+        console.warn('[StoryGuide] delete map location failed:', err);
+      }
+    });
+  }
+
+function showMapPopover($cell) {
+  const name = String($cell.attr('data-name') || '').trim();
+  const desc = String($cell.attr('data-desc') || '').trim();
+  const events = parseJsonArrayAttr($cell.attr('data-events'));
+
+  const parts = [];
+  if (name) parts.push(`<div class="sg-map-popover-title">${escapeHtml(name)}</div>`);
+  if (desc) parts.push(`<div class="sg-map-popover-desc">${escapeHtml(desc)}</div>`);
+  if (events.length) {
+    const items = events.map(e => `<li>${escapeHtml(String(e || ''))}</li>`).join('');
+    parts.push(`<div class="sg-map-popover-events"><div class="sg-map-popover-label">事件</div><ul>${items}</ul></div>`);
+  } else {
+    parts.push('<div class="sg-map-popover-empty">暂无事件</div>');
+  }
+
+  const $panelHost = $cell.closest('#sg_floating_panel, .sg-modal');
+  const usePanel = $panelHost.length > 0;
+  const hostEl = usePanel ? $panelHost[0] : document.body;
+
+  if (!sgMapPopoverEl || sgMapPopoverHost !== hostEl) {
+    if (sgMapPopoverEl && sgMapPopoverEl.parentElement) {
+      sgMapPopoverEl.parentElement.removeChild(sgMapPopoverEl);
+    }
+    sgMapPopoverEl = document.createElement('div');
+    sgMapPopoverEl.className = usePanel ? 'sg-map-popover sg-map-popover-inpanel' : 'sg-map-popover';
+    hostEl.appendChild(sgMapPopoverEl);
+    sgMapPopoverHost = hostEl;
+  } else {
+    sgMapPopoverEl.className = usePanel ? 'sg-map-popover sg-map-popover-inpanel' : 'sg-map-popover';
+  }
+
+  sgMapPopoverEl.innerHTML = parts.join('');
+
+  const rect = $cell[0].getBoundingClientRect();
+  const pop = sgMapPopoverEl;
+  pop.style.display = 'block';
+  pop.style.visibility = 'hidden';
+
+  const popRect = pop.getBoundingClientRect();
+  if (usePanel) {
+    const hostRect = hostEl.getBoundingClientRect();
+    let left = rect.left - hostRect.left + rect.width / 2 - popRect.width / 2;
+    let top = rect.top - hostRect.top - popRect.height - 8;
+    if (top < 8) top = rect.bottom - hostRect.top + 8;
+    const maxLeft = hostEl.clientWidth - popRect.width - 8;
+    const maxTop = hostEl.clientHeight - popRect.height - 8;
+    if (left < 8) left = 8;
+    if (left > maxLeft) left = maxLeft;
+    if (top < 8) top = 8;
+    if (top > maxTop) top = maxTop;
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top)}px`;
+  } else {
+    let left = rect.left + rect.width / 2 - popRect.width / 2;
+    let top = rect.top - popRect.height - 8;
+    if (top < 8) top = rect.bottom + 8;
+    if (left < 8) left = 8;
+    if (left + popRect.width > window.innerWidth - 8) left = window.innerWidth - popRect.width - 8;
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top)}px`;
+  }
+
+  pop.style.visibility = 'visible';
 }
 
 // ===== 快捷选项功能 =====
@@ -670,6 +1165,13 @@ function getDefaultSummaryMeta() {
     history: [], // [{title, summary, keywords, createdAt, range:{fromFloor,toFloor,fromIdx,toIdx}, worldInfo:{file,uid}}]
     wiTriggerLogs: [], // [{ts,userText,picked:[{title,score,keywordsPreview}], injectedKeywords, lookback, style, tag}]
     rollLogs: [], // [{ts, action, summary, final, success, userText}]
+    // 结构化条目缓存（用于去重与更新 - 方案C混合策略）
+    characterEntries: {}, // { uid: { name, aliases, lastUpdated, wiEntryUid, content } }
+    equipmentEntries: {}, // { uid: { name, aliases, lastUpdated, wiEntryUid, content } }
+    abilityEntries: {}, // { uid: { name, lastUpdated, wiEntryUid, content } }
+    nextCharacterIndex: 1, // NPC-001, NPC-002...
+    nextEquipmentIndex: 1, // EQP-001, EQP-002...
+    nextAbilityIndex: 1, // ABL-001, ABL-002...
   };
 }
 
@@ -711,6 +1213,147 @@ async function setStaticModulesCache(cache) {
   await setChatMetaValue(META_KEYS.staticModulesCache, JSON.stringify(cache ?? {}));
 }
 
+// ===== 地图数据（网格地图功能）=====
+function getDefaultMapData() {
+  return {
+    locations: {},
+    protagonistLocation: '',
+    gridSize: { rows: 5, cols: 7 },
+    lastUpdated: null,
+  };
+}
+
+function getMapData() {
+  const raw = String(getChatMetaValue(META_KEYS.mapData) || '').trim();
+  if (!raw) return getDefaultMapData();
+  try {
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== 'object') return getDefaultMapData();
+    return {
+      ...getDefaultMapData(),
+      ...data,
+      locations: (data.locations && typeof data.locations === 'object') ? data.locations : {},
+    };
+  } catch {
+    return getDefaultMapData();
+  }
+}
+
+async function setMapData(mapData) {
+  await setChatMetaValue(META_KEYS.mapData, JSON.stringify(mapData ?? getDefaultMapData()));
+}
+
+// 更新地图预览
+function updateMapPreview() {
+  try {
+    const mapData = getMapData();
+    const html = renderGridMap(mapData);
+    const $preview = $('#sg_mapPreview');
+    if ($preview.length) {
+      $preview.html(html);
+    }
+  } catch (e) {
+    console.warn('[StoryGuide] updateMapPreview error:', e);
+  }
+}
+
+const MAP_JSON_REQUIREMENT = `输出要求：
+- 只输出严格 JSON，不要 Markdown、不要代码块、不要任何多余文字。`;
+
+function getMapSchema() {
+  return {
+    type: 'object',
+    properties: {
+      currentLocation: { type: 'string' },
+      newLocations: {
+        type: 'array',
+        items: {
+          type: 'object',
+            properties: {
+              name: { type: 'string' },
+              description: { type: 'string' },
+              connectedTo: { type: 'array', items: { type: 'string' } },
+              group: { type: 'string' },
+              layer: { type: 'string' },
+              row: { type: 'number' },
+              col: { type: 'number' },
+            },
+          required: ['name'],
+          additionalProperties: true,
+        },
+      },
+      events: {
+        type: 'array',
+        items: {
+          type: 'object',
+            properties: {
+              location: { type: 'string' },
+              event: { type: 'string' },
+              tags: { type: 'array', items: { type: 'string' } },
+            },
+          required: ['location', 'event'],
+          additionalProperties: true,
+        },
+      },
+    },
+    required: ['currentLocation', 'newLocations', 'events'],
+    additionalProperties: true,
+  };
+}
+
+function buildMapPromptMessages(snapshotText) {
+  const s = ensureSettings();
+  let sys = String(s.mapSystemPrompt || '').trim();
+  if (!sys) sys = String(DEFAULT_SETTINGS.mapSystemPrompt || '').trim();
+  sys = sys + '\n\n' + MAP_JSON_REQUIREMENT;
+  const user = String(snapshotText || '').trim();
+  return [
+    { role: 'system', content: sys },
+    { role: 'user', content: user },
+  ];
+}
+
+async function updateMapFromSnapshot(snapshotText) {
+  const s = ensureSettings();
+  if (!s.mapEnabled) return;
+  if (!isMapAutoUpdateEnabled(s)) return;
+  const user = String(snapshotText || '').trim();
+  if (!user) return;
+
+  try {
+    const messages = buildMapPromptMessages(user);
+    let jsonText = '';
+    if (s.provider === 'custom') {
+      jsonText = await callViaCustom(s.customEndpoint, s.customApiKey, s.customModel, messages, s.temperature, s.customMaxTokens, s.customTopP, s.customStream);
+    } else {
+      jsonText = await callViaSillyTavern(messages, getMapSchema(), s.temperature);
+      if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
+    }
+
+    let parsed = parseMapLLMResponse(jsonText);
+    if (!parsed) {
+      try {
+        const retryText = (s.provider === 'custom')
+          ? await fallbackAskJsonCustom(s.customEndpoint, s.customApiKey, s.customModel, messages, s.temperature, s.customMaxTokens, s.customTopP, s.customStream)
+          : await fallbackAskJson(messages, s.temperature);
+        parsed = parseMapLLMResponse(retryText);
+      } catch { /* ignore */ }
+    }
+      if (!parsed) return;
+
+      if (parsed?.newLocations) {
+        parsed.newLocations = normalizeNewLocations(parsed.newLocations);
+      }
+      parsed = ensureMapMinimums(parsed);
+
+      const merged = mergeMapData(getMapData(), parsed);
+    await setMapData(merged);
+    updateMapPreview();
+  } catch (e) {
+    console.warn('[StoryGuide] map update failed:', e);
+  }
+}
+
 // 合并静态模块缓存到分析结果中
 function mergeStaticModulesIntoResult(parsedJson, modules) {
   const cache = getStaticModulesCache();
@@ -748,9 +1391,413 @@ async function updateStaticModulesCache(parsedJson, modules) {
   }
 }
 
+// ===== 地图功能：提取和渲染 =====
+
+// 从 LLM 响应中提取地图数据
+function parseMapLLMResponse(responseText) {
+  const parsed = safeJsonParse(responseText);
+  if (!parsed) return null;
+  return {
+    currentLocation: String(parsed.currentLocation || '').trim(),
+    newLocations: Array.isArray(parsed.newLocations) ? parsed.newLocations : [],
+    events: Array.isArray(parsed.events) ? parsed.events : [],
+  };
+}
+
+function ensureMapMinimums(parsed) {
+  if (!parsed || typeof parsed !== 'object') return parsed;
+  const out = {
+    currentLocation: String(parsed.currentLocation || '').trim(),
+    newLocations: Array.isArray(parsed.newLocations) ? parsed.newLocations.slice() : [],
+    events: Array.isArray(parsed.events) ? parsed.events.slice() : [],
+  };
+
+  const existingNames = new Set(
+    out.newLocations.map(l => String(l?.name || '').trim()).filter(Boolean)
+  );
+
+  let exploreCount = 0;
+  for (const loc of out.newLocations) {
+    const desc = String(loc?.description || '').trim();
+    if (desc.includes('待探索')) exploreCount += 1;
+  }
+
+  const desiredMin = 3;
+  const desiredExploreMin = 2;
+  const neededTotal = Math.max(0, desiredMin - out.newLocations.length);
+  const neededExplore = Math.max(0, desiredExploreMin - exploreCount);
+  const addCount = Math.max(neededTotal, neededExplore);
+
+  if (addCount > 0) {
+    const baseName = out.currentLocation ? `${out.currentLocation}·待探索` : '待探索地点';
+    for (let i = 0; i < addCount; i++) {
+      let name = `${baseName}${i + 1}`;
+      let n = 1;
+      while (existingNames.has(name)) {
+        n += 1;
+        name = `${baseName}${i + 1}-${n}`;
+      }
+      existingNames.add(name);
+      out.newLocations.push({
+        name,
+        description: '待探索',
+        connectedTo: out.currentLocation ? [out.currentLocation] : [],
+        group: '',
+        layer: '',
+      });
+    }
+  }
+
+  return out;
+}
+
+function normalizeNewLocations(list) {
+  const result = [];
+  const seen = new Map();
+  for (const loc of Array.isArray(list) ? list : []) {
+    const rawName = String(loc?.name || '').trim();
+    if (!rawName) continue;
+    const key = normalizeMapName(rawName);
+    if (!key) continue;
+    if (!seen.has(key)) {
+      seen.set(key, {
+        ...loc,
+        name: rawName,
+        connectedTo: Array.isArray(loc.connectedTo) ? loc.connectedTo.slice() : [],
+      });
+      result.push(seen.get(key));
+      continue;
+    }
+    const existing = seen.get(key);
+    // Merge connections
+    const conn = Array.isArray(loc.connectedTo) ? loc.connectedTo : [];
+    for (const c of conn) {
+      if (!existing.connectedTo.includes(c)) existing.connectedTo.push(c);
+    }
+    // Prefer non-empty description/group/layer
+    if (!existing.description && loc.description) existing.description = loc.description;
+    if (!existing.group && loc.group) existing.group = loc.group;
+    if (!existing.layer && loc.layer) existing.layer = loc.layer;
+    // Prefer valid coordinates if existing lacks
+    const hasRow = Number.isFinite(Number(existing.row));
+    const hasCol = Number.isFinite(Number(existing.col));
+    const newRow = Number.isFinite(Number(loc.row)) ? Number(loc.row) : null;
+    const newCol = Number.isFinite(Number(loc.col)) ? Number(loc.col) : null;
+    if ((!hasRow || !hasCol) && newRow != null && newCol != null) {
+      existing.row = newRow;
+      existing.col = newCol;
+    }
+  }
+  return result;
+}
+
+function normalizeMapEvent(evt) {
+  if (typeof evt === 'string') return { text: evt, tags: [] };
+  if (!evt || typeof evt !== 'object') return null;
+  const text = String(evt.event || evt.text || '').trim();
+  if (!text) return null;
+  const tags = Array.isArray(evt.tags) ? evt.tags.map(t => String(t || '').trim()).filter(Boolean) : [];
+  return { text, tags };
+}
+
+function formatMapEventText(evt) {
+  const text = typeof evt === 'string' ? evt : String(evt?.text || evt?.event || '').trim();
+  const tags = Array.isArray(evt?.tags) ? evt.tags : [];
+  const tagText = tags.length ? ` [${tags.join('/')}]` : '';
+  return `${text}${tagText}`.trim();
+}
+
+
+// 合并新地图数据到现有地图
+function mergeMapData(existingMap, newData) {
+  if (!newData) return existingMap;
+
+  const map = { ...existingMap, locations: { ...existingMap.locations } };
+  const existingNameMap = new Map();
+  for (const key of Object.keys(map.locations)) {
+    const norm = normalizeMapName(key);
+    if (norm) existingNameMap.set(norm, key);
+  }
+
+  // 更新主角位置
+  if (newData.currentLocation) {
+    const normalized = normalizeMapName(newData.currentLocation);
+    const existingKey = existingNameMap.get(normalized);
+    map.protagonistLocation = existingKey || newData.currentLocation;
+    // 确保当前位置存在
+    if (!map.locations[map.protagonistLocation]) {
+      map.locations[map.protagonistLocation] = {
+        row: 0, col: 0, connections: [], events: [], visited: true, description: ''
+      };
+    }
+    map.locations[map.protagonistLocation].visited = true;
+  }
+
+  // 添加新地点
+  for (const loc of newData.newLocations) {
+    const name = String(loc.name || '').trim();
+    if (!name) continue;
+    const normalized = normalizeMapName(name);
+    const existingKey = existingNameMap.get(normalized);
+    const targetKey = existingKey || name;
+
+    if (!map.locations[targetKey]) {
+      let row = Number.isFinite(Number(loc.row)) ? Number(loc.row) : null;
+      let col = Number.isFinite(Number(loc.col)) ? Number(loc.col) : null;
+      if (row == null || col == null) {
+        const anchorName = Array.isArray(loc.connectedTo)
+          ? loc.connectedTo.map(x => String(x || '').trim()).find(n => map.locations[n])
+          : null;
+        if (anchorName) {
+          const anchor = map.locations[anchorName];
+          const pos = findAdjacentGridPosition(map, anchor.row, anchor.col);
+          row = pos.row;
+          col = pos.col;
+        } else {
+          const pos = findNextGridPosition(map);
+          row = pos.row;
+          col = pos.col;
+        }
+      }
+      map.locations[targetKey] = {
+        row, col,
+        connections: Array.isArray(loc.connectedTo) ? loc.connectedTo : [],
+        events: [],
+        visited: targetKey === map.protagonistLocation,
+        description: String(loc.description || ''),
+        group: String(loc.group || '').trim(),
+        layer: String(loc.layer || '').trim(),
+      };
+      ensureGridSize(map, row, col);
+      if (!existingKey && normalized) existingNameMap.set(normalized, targetKey);
+    } else {
+      // 更新现有地点的连接
+      if (Array.isArray(loc.connectedTo)) {
+        for (const conn of loc.connectedTo) {
+          if (!map.locations[targetKey].connections.includes(conn)) {
+            map.locations[targetKey].connections.push(conn);
+          }
+        }
+      }
+      if (loc.group) map.locations[targetKey].group = String(loc.group || '').trim();
+      if (loc.layer) map.locations[targetKey].layer = String(loc.layer || '').trim();
+      const hasRow = Number.isFinite(Number(map.locations[targetKey].row));
+      const hasCol = Number.isFinite(Number(map.locations[targetKey].col));
+      const newRow = Number.isFinite(Number(loc.row)) ? Number(loc.row) : null;
+      const newCol = Number.isFinite(Number(loc.col)) ? Number(loc.col) : null;
+      if ((!hasRow || !hasCol) && newRow != null && newCol != null) {
+        map.locations[targetKey].row = newRow;
+        map.locations[targetKey].col = newCol;
+        ensureGridSize(map, map.locations[targetKey].row, map.locations[targetKey].col);
+      }
+    }
+  }
+
+  // 添加事件
+  for (const evt of newData.events) {
+    const locName = String(evt.location || '').trim();
+    const normalized = normalizeMapName(locName);
+    const targetKey = existingNameMap.get(normalized) || locName;
+    const eventObj = normalizeMapEvent(evt);
+    if (locName && eventObj && map.locations[targetKey]) {
+      const list = Array.isArray(map.locations[targetKey].events) ? map.locations[targetKey].events : [];
+      const exists = list.some(e => String(e?.text || e?.event || e || '').trim() === eventObj.text);
+      if (!exists) list.push(eventObj);
+      map.locations[targetKey].events = list;
+    }
+  }
+
+  // 更新双向连接
+  for (const [name, loc] of Object.entries(map.locations)) {
+    for (const conn of loc.connections) {
+      if (map.locations[conn] && !map.locations[conn].connections.includes(name)) {
+        map.locations[conn].connections.push(name);
+      }
+    }
+  }
+
+  map.lastUpdated = new Date().toISOString();
+  return map;
+}
+
+function findAdjacentGridPosition(map, baseRow, baseCol) {
+  const occupied = new Set();
+  for (const loc of Object.values(map.locations)) {
+    occupied.add(`${loc.row},${loc.col}`);
+  }
+  const candidates = [
+    { row: baseRow - 1, col: baseCol },
+    { row: baseRow + 1, col: baseCol },
+    { row: baseRow, col: baseCol - 1 },
+    { row: baseRow, col: baseCol + 1 },
+    { row: baseRow - 1, col: baseCol - 1 },
+    { row: baseRow - 1, col: baseCol + 1 },
+    { row: baseRow + 1, col: baseCol - 1 },
+    { row: baseRow + 1, col: baseCol + 1 },
+  ];
+  for (const pos of candidates) {
+    if (pos.row < 0 || pos.col < 0) continue;
+    if (!occupied.has(`${pos.row},${pos.col}`)) return pos;
+  }
+  return findNextGridPosition(map);
+}
+
+function ensureGridSize(map, row, col) {
+  if (!map || !map.gridSize) return;
+  const r = Number(row);
+  const c = Number(col);
+  if (!Number.isFinite(r) || !Number.isFinite(c)) return;
+  if (r >= map.gridSize.rows) map.gridSize.rows = r + 1;
+  if (c >= map.gridSize.cols) map.gridSize.cols = c + 1;
+}
+
+// 寻找网格中的下一个空位
+function findNextGridPosition(map) {
+  const occupied = new Set();
+  for (const loc of Object.values(map.locations)) {
+    occupied.add(`${loc.row},${loc.col}`);
+  }
+
+  for (let r = 0; r < map.gridSize.rows; r++) {
+    for (let c = 0; c < map.gridSize.cols; c++) {
+      if (!occupied.has(`${r},${c}`)) {
+        return { row: r, col: c };
+      }
+    }
+  }
+  // 扩展网格
+  map.gridSize.rows++;
+  return { row: map.gridSize.rows - 1, col: 0 };
+}
+
+// 渲染网格地图为 HTML（纯 HTML/CSS 网格）
+function renderGridMap(mapData) {
+  if (!mapData || Object.keys(mapData.locations).length === 0) {
+    return `<div class="sg-map-empty">暂无地图数据。开启地图功能并进行剧情分析后，地图将自动生成。</div>`;
+  }
+
+  const locList = Object.values(mapData.locations);
+  const rawRows = locList.map(l => Number(l.row)).filter(Number.isFinite);
+  const rawCols = locList.map(l => Number(l.col)).filter(Number.isFinite);
+  const rowVals = Array.from(new Set(rawRows)).sort((a, b) => a - b);
+  const colVals = Array.from(new Set(rawCols)).sort((a, b) => a - b);
+  const maxDim = 20;
+  const rowCount = Math.max(mapData.gridSize.rows, rowVals.length || mapData.gridSize.rows);
+  const colCount = Math.max(mapData.gridSize.cols, colVals.length || mapData.gridSize.cols);
+  const rows = Math.min(maxDim, rowCount);
+  const cols = Math.min(maxDim, colCount);
+
+  const mapIndex = (vals, v, limit) => {
+    const idx = vals.indexOf(v);
+    if (idx < 0) return null;
+    if (vals.length <= limit) return idx;
+    return Math.round(idx * (limit - 1) / Math.max(1, vals.length - 1));
+  };
+
+  const findNextEmptyCell = (grid, startRow, startCol) => {
+    const rLen = grid.length;
+    const cLen = grid[0]?.length || 0;
+    for (let r = startRow; r < rLen; r++) {
+      for (let c = (r === startRow ? startCol : 0); c < cLen; c++) {
+        if (!grid[r][c]) return { row: r, col: c };
+      }
+    }
+    for (let r = 0; r < rLen; r++) {
+      for (let c = 0; c < cLen; c++) {
+        if (!grid[r][c]) return { row: r, col: c };
+      }
+    }
+    return null;
+  };
+
+  const grid = Array(rows).fill(null).map(() => Array(cols).fill(null));
+
+  // 填充网格
+  for (const [name, loc] of Object.entries(mapData.locations)) {
+    const rr = mapIndex(rowVals, Number(loc.row), rows);
+    const cc = mapIndex(colVals, Number(loc.col), cols);
+    if (Number.isFinite(rr) && Number.isFinite(cc) && rr >= 0 && rr < rows && cc >= 0 && cc < cols) {
+      if (!grid[rr][cc]) {
+        grid[rr][cc] = { name, ...loc };
+      } else {
+        const next = findNextEmptyCell(grid, rr, cc);
+        if (next) grid[next.row][next.col] = { name, ...loc };
+      }
+    }
+  }
+
+  // 渲染 HTML（使用 CSS Grid）
+  const gridInlineStyle = `display:grid;grid-template-columns:repeat(${cols},80px);grid-auto-rows:50px;gap:4px;justify-content:center;`;
+  const baseCellStyle = 'width:80px;height:50px;border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:11px;text-align:center;position:relative;';
+  const emptyCellStyle = baseCellStyle + 'background:rgba(255,255,255,0.03);border:1px dashed rgba(255,255,255,0.08);';
+  const locationBaseStyle = baseCellStyle + 'background:rgba(100,150,200,0.2);border:1px solid rgba(100,150,200,0.35);';
+
+  let html = `<div class="sg-map-wrapper">`;
+  html += `<div class="sg-map-grid" style="--sg-map-cols:${cols};${gridInlineStyle}">`;
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const cell = grid[r][c];
+      if (cell) {
+        const isProtagonist = cell.name === mapData.protagonistLocation;
+        const hasEvents = cell.events && cell.events.length > 0;
+        const classes = ['sg-map-cell', 'sg-map-location'];
+        if (isProtagonist) classes.push('sg-map-protagonist');
+        if (hasEvents) classes.push('sg-map-has-events');
+        if (!cell.visited) classes.push('sg-map-unvisited');
+
+          const eventList = hasEvents ? cell.events.map(e => `• ${formatMapEventText(e)}`).join('\n') : '';
+          const tooltip = `${cell.name}${cell.description ? '\n' + cell.description : ''}${eventList ? '\n---\n' + eventList : ''}`;
+
+        let inlineStyle = locationBaseStyle;
+        if (isProtagonist) inlineStyle += 'background:rgba(100,200,100,0.25);border-color:rgba(100,200,100,0.5);box-shadow:0 0 8px rgba(100,200,100,0.3);';
+        if (hasEvents) inlineStyle += 'border-color:rgba(255,180,80,0.5);';
+        if (!cell.visited) inlineStyle += 'background:rgba(255,255,255,0.05);border-color:rgba(255,255,255,0.1);opacity:0.6;';
+          const eventsJson = escapeHtml(JSON.stringify(Array.isArray(cell.events) ? cell.events : []));
+          const descAttr = escapeHtml(String(cell.description || ''));
+          const nameAttr = escapeHtml(String(cell.name || ''));
+          const groupAttr = escapeHtml(String(cell.group || ''));
+          const layerAttr = escapeHtml(String(cell.layer || ''));
+          html += `<div class="${classes.join(' ')}" style="${inlineStyle}" title="${escapeHtml(tooltip)}" data-name="${nameAttr}" data-desc="${descAttr}" data-events="${eventsJson}" data-group="${groupAttr}" data-layer="${layerAttr}">`;
+          if (cell.layer || cell.group) {
+            html += `<div class="sg-map-badges">`;
+            if (cell.layer) html += `<span class="sg-map-badge sg-map-badge-layer" title="${escapeHtml(String(cell.layer))}">${escapeHtml(String(cell.layer || '').slice(0, 2))}</span>`;
+            if (cell.group) html += `<span class="sg-map-badge sg-map-badge-group" title="${escapeHtml(String(cell.group))}">${escapeHtml(String(cell.group || '').slice(0, 2))}</span>`;
+            html += `</div>`;
+          }
+          html += `<span class="sg-map-name">${escapeHtml(cell.name)}</span>`;
+        if (isProtagonist) html += '<span class="sg-map-marker">★</span>';
+        if (hasEvents) html += '<span class="sg-map-event-marker">⚔</span>';
+        html += '</div>';
+      } else {
+        html += `<div class="sg-map-cell sg-map-empty-cell" style="${emptyCellStyle}"></div>`;
+      }
+    }
+  }
+
+    html += '</div>';
+    html += '<div class="sg-map-legend">★ 主角位置 | ⚔ 有事件 | 灰色 = 未探索</div>';
+    html += '<div class="sg-map-event-panel">点击地点查看事件列表</div>';
+    html += '</div>';
+
+  return html;
+}
+
 // 清除静态模块缓存（手动刷新时使用）
 async function clearStaticModulesCache() {
   await setStaticModulesCache({});
+}
+
+// 清除结构化条目缓存（人物/装备/能力）
+async function clearStructuredEntriesCache() {
+  const meta = getSummaryMeta();
+  meta.characterEntries = {};
+  meta.equipmentEntries = {};
+  meta.abilityEntries = {};
+  meta.nextCharacterIndex = 1;
+  meta.nextEquipmentIndex = 1;
+  meta.nextAbilityIndex = 1;
+  await setSummaryMeta(meta);
 }
 
 // -------------------- 自动绑定世界书（每个聊天专属世界书） --------------------
@@ -774,7 +1821,7 @@ async function ensureBoundWorldInfo(opts = {}) {
 
   // 如果已经应用过，只需重新应用设置
   if (alreadyApplied) {
-    applyBoundWorldInfoToSettings();
+    await applyBoundWorldInfoToSettings();
     return false;
   }
 
@@ -787,7 +1834,7 @@ async function ensureBoundWorldInfo(opts = {}) {
   });
 
   // 应用设置
-  applyBoundWorldInfoToSettings();
+  await applyBoundWorldInfoToSettings();
   return true;
 }
 
@@ -900,17 +1947,46 @@ async function createWorldInfoFile(fileName, initialContent = '初始化条目')
   return false;
 }
 
+// 解析当前聊天绑定的 chatbook 文件名（用于持久绑定）
+async function resolveChatbookFileName() {
+  const varName = '__sg_chatbook_name';
+  try {
+    const out = await execSlash(`/getchatbook | /setvar key=${varName} | /getvar ${varName} | /flushvar ${varName}`);
+    const raw = slashOutputToText(out).trim();
+    if (!raw) return '';
+    const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const name = lines[lines.length - 1] || '';
+    return name.replace(/^"+|"+$/g, '');
+  } catch (e) {
+    console.warn('[StoryGuide] resolveChatbookFileName failed:', e?.message || e);
+    return '';
+  }
+}
+
 // 将绑定的世界书应用到设置
-function applyBoundWorldInfoToSettings() {
+async function applyBoundWorldInfoToSettings() {
   const s = ensureSettings();
   if (!s.autoBindWorldInfo) return;
 
   console.log('[StoryGuide] 应用自动绑定设置（使用 chatbook 模式）');
 
-  // 绿灯世界书：使用 chatbook 目标（/getchatbook 会自动创建聊天绑定的世界书）
+  let greenWI = String(getChatMetaValue(META_KEYS.boundGreenWI) || '').trim();
+  if (!greenWI) {
+    greenWI = await resolveChatbookFileName();
+    if (greenWI) await setChatMetaValue(META_KEYS.boundGreenWI, greenWI);
+  }
+
+  // 绿灯世界书：优先使用已解析的绑定文件名，避免切换/刷新后产生新文件
   s.summaryToWorldInfo = true;
-  s.summaryWorldInfoTarget = 'chatbook';
-  console.log('[StoryGuide] 绿灯设置: chatbook（将使用聊天绑定的世界书）');
+  if (greenWI) {
+    s.summaryWorldInfoTarget = 'file';
+    s.summaryWorldInfoFile = greenWI;
+    console.log('[StoryGuide] 绿灯设置: file（绑定文件）', greenWI);
+  } else {
+    s.summaryWorldInfoTarget = 'chatbook';
+    s.summaryWorldInfoFile = '';
+    console.log('[StoryGuide] 绿灯设置: chatbook（将使用聊天绑定的世界书）');
+  }
 
   // 蓝灯世界书：暂时禁用（因为无法自动创建独立文件）
   // 用户如需蓝灯功能，需要手动创建世界书文件并在设置中指定
@@ -948,14 +2024,32 @@ async function onChatSwitched() {
     return;
   }
 
+  // 等待 chatMetadata 加载完成（增加重试机制）
+  let retries = 0;
+  const maxRetries = 5;
+  while (retries < maxRetries) {
+    await new Promise(r => setTimeout(r, 200));
+    const { chatMetadata } = SillyTavern.getContext();
+    if (chatMetadata && Object.keys(chatMetadata).length > 0) {
+      console.log('[StoryGuide] chatMetadata 已加载，keys:', Object.keys(chatMetadata).length);
+      break;
+    }
+    retries++;
+    console.log(`[StoryGuide] 等待 chatMetadata 加载... (${retries}/${maxRetries})`);
+  }
+
   const greenWI = getChatMetaValue(META_KEYS.boundGreenWI);
   const blueWI = getChatMetaValue(META_KEYS.boundBlueWI);
+  const autoBindCreated = getChatMetaValue(META_KEYS.autoBindCreated);
 
-  console.log('[StoryGuide] 当前聊天绑定的世界书:', { greenWI, blueWI });
+  console.log('[StoryGuide] 当前聊天绑定信息:', { greenWI, blueWI, autoBindCreated });
 
-  if (greenWI || blueWI) {
-    applyBoundWorldInfoToSettings();
-    showToast(`已切换到本聊天专属世界书\n绿灯：${greenWI || '(无)'}\n蓝灯：${blueWI || '(无)'}`, {
+  // 如果已经创建过绑定（即使 greenWI 为空也尝试恢复）
+  if (autoBindCreated || greenWI || blueWI) {
+    console.log('[StoryGuide] 恢复已有绑定');
+    await applyBoundWorldInfoToSettings();
+    const greenNow = String(getChatMetaValue(META_KEYS.boundGreenWI) || greenWI || '').trim();
+    showToast(`已切换到本聊天专属世界书\n绿灯：${greenNow || '(无)'}\n蓝灯：${blueWI || '(无)'}`, {
       kind: 'info', spinner: false, sticky: false, duration: 2500
     });
   } else {
@@ -2016,12 +3110,14 @@ async function runAnalysis() {
       throw new Error('模型输出无法解析为 JSON（已切到 JSON 标签，看看原文）');
     }
 
-    const md = renderReportMarkdownFromModules(parsed, modules);
-    lastReport = { json: parsed, markdown: md, createdAt: Date.now(), sourceSummary };
-    renderMarkdownInto($('#sg_md'), md);
+      const md = renderReportMarkdownFromModules(parsed, modules);
+      lastReport = { json: parsed, markdown: md, createdAt: Date.now(), sourceSummary };
+      renderMarkdownInto($('#sg_md'), md);
 
-    // 同步面板报告到聊天末尾
-    try { syncPanelOutputToChat(md, false); } catch { /* ignore */ }
+      await updateMapFromSnapshot(snapshotText);
+
+      // 同步面板报告到聊天末尾
+      try { syncPanelOutputToChat(md, false); } catch { /* ignore */ }
 
     updateButtonsEnabled();
     showPane('md');
@@ -2170,7 +3266,7 @@ function getSummarySchema() {
   };
 }
 
-function buildSummaryPromptMessages(chunkText, fromFloor, toFloor) {
+function buildSummaryPromptMessages(chunkText, fromFloor, toFloor, statData = null) {
   const s = ensureSettings();
 
   // system prompt
@@ -2182,14 +3278,23 @@ function buildSummaryPromptMessages(chunkText, fromFloor, toFloor) {
   // user template (supports placeholders)
   let tpl = String(s.summaryUserTemplate || '').trim();
   if (!tpl) tpl = DEFAULT_SUMMARY_USER_TEMPLATE;
+
+  // 格式化 statData（如果有）
+  const statDataJson = statData ? JSON.stringify(statData, null, 2) : '';
+
   let user = renderTemplate(tpl, {
     fromFloor: String(fromFloor),
     toFloor: String(toFloor),
     chunk: String(chunkText || ''),
+    statData: statDataJson,
   });
   // 如果用户模板里没有包含 chunk，占位补回去，防止误配导致无内容
   if (!/{{\s*chunk\s*}}/i.test(tpl) && !String(user).includes(String(chunkText || '').slice(0, 12))) {
     user = String(user || '').trim() + `\n\n【对话片段】\n${chunkText}`;
+  }
+  // 如果有 statData 且用户模板里没有包含，追加到末尾
+  if (statData && !/{{\s*statData\s*}}/i.test(tpl)) {
+    user = String(user || '').trim() + `\n\n【角色状态数据】\n${statDataJson}`;
   }
   return [
     { role: 'system', content: sys },
@@ -2244,6 +3349,643 @@ function appendToBlueIndexCache(rec) {
   s.summaryBlueIndex = arr;
   saveSettings();
   updateBlueIndexInfoLabel();
+}
+
+// ===== 结构化世界书条目核心函数 =====
+
+function buildStructuredEntriesPromptMessages(chunkText, fromFloor, toFloor, meta, statData = null) {
+  const s = ensureSettings();
+  let sys = String(s.structuredEntriesSystemPrompt || '').trim();
+  if (!sys) sys = DEFAULT_STRUCTURED_ENTRIES_SYSTEM_PROMPT;
+  const charPrompt = String(s.structuredCharacterPrompt || '').trim() || DEFAULT_STRUCTURED_CHARACTER_PROMPT;
+  const equipPrompt = String(s.structuredEquipmentPrompt || '').trim() || DEFAULT_STRUCTURED_EQUIPMENT_PROMPT;
+  const abilityPrompt = String(s.structuredAbilityPrompt || '').trim() || DEFAULT_STRUCTURED_ABILITY_PROMPT;
+  sys = [
+    sys,
+    `【人物条目要求】\n${charPrompt}`,
+    `【装备条目要求】\n${equipPrompt}`,
+    `【能力条目要求】\n${abilityPrompt}`,
+    STRUCTURED_ENTRIES_JSON_REQUIREMENT,
+  ].join('\n\n');
+
+  // 构建已知列表供 LLM 判断是否新增/更新（包含别名以帮助识别不同写法）
+  const knownChars = Object.values(meta.characterEntries || {}).map(c => {
+    const aliases = Array.isArray(c.aliases) && c.aliases.length > 0 ? `[别名:${c.aliases.join('/')}]` : '';
+    return `${c.name}${aliases}`;
+  }).join('、') || '无';
+  const knownEquips = Object.values(meta.equipmentEntries || {}).map(e => {
+    const aliases = Array.isArray(e.aliases) && e.aliases.length > 0 ? `[别名:${e.aliases.join('/')}]` : '';
+    return `${e.name}${aliases}`;
+  }).join('、') || '无';
+
+  // 格式化 statData
+  const statDataJson = statData ? JSON.stringify(statData, null, 2) : '';
+
+  let tpl = String(s.structuredEntriesUserTemplate || '').trim();
+  if (!tpl) tpl = DEFAULT_STRUCTURED_ENTRIES_USER_TEMPLATE;
+  let user = renderTemplate(tpl, {
+    fromFloor: String(fromFloor),
+    toFloor: String(toFloor),
+    chunk: String(chunkText || ''),
+    knownCharacters: knownChars,
+    knownEquipments: knownEquips,
+    statData: statDataJson,
+  });
+  // 如果有 statData 且模板里没有包含，追加到末尾
+  if (statData && !/\{\{\s*statData\s*\}\}/i.test(tpl)) {
+    user = String(user || '').trim() + `\n\n【角色状态数据 statData】\n${statDataJson}`;
+  }
+  return [
+    { role: 'system', content: sys },
+    { role: 'user', content: user },
+  ];
+}
+
+async function generateStructuredEntries(chunkText, fromFloor, toFloor, meta, settings, statData = null) {
+  const messages = buildStructuredEntriesPromptMessages(chunkText, fromFloor, toFloor, meta, statData);
+  let jsonText = '';
+  if (String(settings.summaryProvider || 'st') === 'custom') {
+    jsonText = await callViaCustom(settings.summaryCustomEndpoint, settings.summaryCustomApiKey, settings.summaryCustomModel, messages, settings.summaryTemperature, settings.summaryCustomMaxTokens, 0.95, settings.summaryCustomStream);
+  } else {
+    jsonText = await callViaSillyTavern(messages, null, settings.summaryTemperature);
+    if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
+  }
+  const parsed = safeJsonParse(jsonText);
+  if (!parsed) return null;
+  return {
+    characters: Array.isArray(parsed.characters) ? parsed.characters : [],
+    equipments: Array.isArray(parsed.equipments) ? parsed.equipments : [],
+    abilities: Array.isArray(parsed.abilities) ? parsed.abilities : [],
+    deletedCharacters: Array.isArray(parsed.deletedCharacters) ? parsed.deletedCharacters : [],
+    deletedEquipments: Array.isArray(parsed.deletedEquipments) ? parsed.deletedEquipments : [],
+    deletedAbilities: Array.isArray(parsed.deletedAbilities) ? parsed.deletedAbilities : [],
+  };
+}
+
+// 构建条目的 key（用于世界书触发词和去重）
+function buildStructuredEntryKey(prefix, name, indexId) {
+  return `${prefix}｜${name}｜${indexId}`;
+}
+
+// 构建条目内容（档案式描述）
+function buildCharacterContent(char) {
+  const parts = [];
+  if (char.name) parts.push(`【人物】${char.name}`);
+  if (char.aliases?.length) parts.push(`别名：${char.aliases.join('、')}`);
+  if (char.faction) parts.push(`阵营/身份：${char.faction}`);
+  if (char.status) parts.push(`状态：${char.status}`);
+  if (char.personality) parts.push(`性格：${char.personality}`);
+
+  // 性格铆钉（用特殊格式突出显示）
+  if (char.corePersonality) parts.push(`【核心性格锚点】${char.corePersonality}（不会轻易改变）`);
+  if (char.motivation) parts.push(`【角色动机】${char.motivation}（独立于主角的目标）`);
+  if (char.relationshipStage) parts.push(`【关系阶段】${char.relationshipStage}`);
+
+  if (char.background) parts.push(`背景：${char.background}`);
+  if (char.relationToProtagonist) parts.push(`与主角关系：${char.relationToProtagonist}`);
+  if (char.keyEvents?.length) parts.push(`关键事件：${char.keyEvents.join('；')}`);
+  if (char.statInfo) {
+    const infoStr = typeof char.statInfo === 'object' ? JSON.stringify(char.statInfo, null, 2) : String(char.statInfo);
+    parts.push(`属性数据：${infoStr}`);
+  }
+  return parts.join('\n');
+}
+
+function buildEquipmentContent(equip) {
+  const parts = [];
+  if (equip.name) parts.push(`【装备】${equip.name}`);
+  if (equip.aliases?.length) parts.push(`别名：${equip.aliases.join('、')}`);
+  if (equip.type) parts.push(`类型：${equip.type}`);
+  if (equip.rarity) parts.push(`品质：${equip.rarity}`);
+  if (equip.effects) parts.push(`效果：${equip.effects}`);
+  if (equip.source) parts.push(`来源：${equip.source}`);
+  if (equip.currentState) parts.push(`当前状态：${equip.currentState}`);
+  if (equip.statInfo) {
+    const infoStr = typeof equip.statInfo === 'object' ? JSON.stringify(equip.statInfo, null, 2) : String(equip.statInfo);
+    parts.push(`属性数据：${infoStr}`);
+  }
+  if (equip.boundEvents?.length) parts.push(`相关事件：${equip.boundEvents.join('；')}`);
+  return parts.join('\n');
+}
+
+function buildAbilityContent(ability) {
+  const parts = [];
+  if (ability.name) parts.push(`【能力】${ability.name}${ability.isNegative ? '（负面）' : ''}`);
+  if (ability.type) parts.push(`类型：${ability.type}`);
+  if (ability.effects) parts.push(`效果：${ability.effects}`);
+  if (ability.trigger) parts.push(`触发条件：${ability.trigger}`);
+  if (ability.cost) parts.push(`代价/冷却：${ability.cost}`);
+  if (ability.statInfo) {
+    const infoStr = typeof ability.statInfo === 'object' ? JSON.stringify(ability.statInfo, null, 2) : String(ability.statInfo);
+    parts.push(`属性数据：${infoStr}`);
+  }
+  if (ability.boundEvents?.length) parts.push(`相关事件：${ability.boundEvents.join('；')}`);
+  return parts.join('\n');
+}
+
+// 写入或更新结构化条目（方案C：混合策略）
+// targetType: 'green' = 绿灯世界书（触发词触发）, 'blue' = 蓝灯世界书（常开索引）
+async function writeOrUpdateStructuredEntry(entryType, entryData, meta, settings, {
+  buildContent,
+  entriesCache,
+  nextIndexKey,
+  prefix,
+  targetType = 'green', // 'green' | 'blue'
+}) {
+  // 使用规范化的名称作为唯一标识符（忽略 LLM 提供的 uid，因为不可靠）
+  const entryName = String(entryData.name || '').trim();
+  if (!entryName) return null;
+
+  // 规范化名称：移除特殊字符，用于缓存 key
+  const normalizedName = entryName.replace(/[|｜,，\s]/g, '_').toLowerCase();
+  const cacheKey = `${normalizedName}_${targetType}`;
+
+  // 首先按 cacheKey 直接查找
+  let cached = entriesCache[cacheKey];
+
+  // 如果直接查找失败，遍历缓存按名称模糊匹配（处理同一人物不同写法）
+  if (!cached) {
+    for (const [key, value] of Object.entries(entriesCache)) {
+      if (!key.endsWith(`_${targetType}`)) continue;
+      const cachedNameNorm = String(value.name || '').replace(/[|｜,，\s]/g, '_').toLowerCase();
+      const cachedAliases = Array.isArray(value.aliases) ? value.aliases.map(a => String(a).toLowerCase().trim()) : [];
+      const newAliases = Array.isArray(entryData.aliases) ? entryData.aliases.map(a => String(a).toLowerCase().trim()) : [];
+      const nameMatch = cachedNameNorm === normalizedName || cachedNameNorm.includes(normalizedName) || normalizedName.includes(cachedNameNorm);
+      const newNameInCachedAliases = cachedAliases.some(a => a === normalizedName || a.includes(normalizedName) || normalizedName.includes(a));
+      const cachedNameInNewAliases = newAliases.some(a => a === cachedNameNorm || a.includes(cachedNameNorm) || cachedNameNorm.includes(a));
+      const aliasesOverlap = cachedAliases.some(ca => newAliases.some(na => ca === na || ca.includes(na) || na.includes(ca)));
+      if (nameMatch || newNameInCachedAliases || cachedNameInNewAliases || aliasesOverlap) {
+        cached = value;
+        console.log(`[StoryGuide] Found cached ${entryType} by smart match: "${entryName}" -> "${value.name}"`);
+        if (entryName.toLowerCase() !== String(value.name).toLowerCase()) {
+          cached.aliases = cached.aliases || [];
+          if (!cached.aliases.some(a => String(a).toLowerCase() === entryName.toLowerCase())) {
+            cached.aliases.push(entryName);
+            console.log(`[StoryGuide] Added "${entryName}" as alias for "${value.name}"`);
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  const content = buildContent(entryData).replace(/\|/g, '｜');
+
+  // 根据 targetType 选择世界书目标
+  let target, file, constant;
+  if (targetType === 'blue') {
+    target = 'file';
+    file = String(settings.summaryBlueWorldInfoFile || '');
+    constant = 1; // 蓝灯=常开
+    if (!file) return null; // 蓝灯必须指定文件名
+  } else {
+    target = String(settings.summaryWorldInfoTarget || 'chatbook');
+    file = String(settings.summaryWorldInfoFile || '');
+    constant = 0; // 绿灯=触发词触发
+  }
+  const fileExprForQuery = (target === 'chatbook') ? '{{getchatbook}}' : file;
+
+  // 去重和更新检查：如果本地缓存已有此条目
+  if (cached) {
+    // 内容相同 -> 跳过
+    if (cached.content === content) {
+      console.log(`[StoryGuide] Skip unchanged ${entryType} (${targetType}): ${entryName}`);
+      return { skipped: true, name: entryName, targetType, reason: 'unchanged' };
+    }
+
+    // 内容不同 -> 尝试使用 /findentry 查找并更新
+    console.log(`[StoryGuide] Content changed for ${entryType} (${targetType}): ${entryName}, attempting update via /findentry...`);
+    try {
+      // 使用 /findentry 通过 comment 字段查找条目 UID
+      // comment 格式为: "人物｜角色名｜CHA-001"
+      const searchPattern = `${prefix}｜${entryName}`;
+
+      // 构建查找脚本
+      let findParts = [];
+      const findUidVar = '__sg_find_uid';
+      const findFileVar = '__sg_find_file';
+
+      if (target === 'chatbook') {
+        findParts.push('/getchatbook');
+        findParts.push(`/setvar key=${findFileVar}`);
+        findParts.push(`/findentry file={{getvar::${findFileVar}}} field=comment ${quoteSlashValue(searchPattern)}`);
+      } else {
+        findParts.push(`/findentry file=${quoteSlashValue(file)} field=comment ${quoteSlashValue(searchPattern)}`);
+      }
+      findParts.push(`/setvar key=${findUidVar}`);
+      findParts.push(`/getvar ${findUidVar}`);
+
+      const findResult = await execSlash(findParts.join(' | '));
+
+      // DEBUG: 查看 findentry 返回值
+      console.log(`[StoryGuide] DEBUG /findentry result:`, findResult, `type:`, typeof findResult);
+
+      // 解析 UID - 处理多种可能的返回格式
+      let foundUid = null;
+      if (findResult !== null && findResult !== undefined) {
+        // 如果是数字，直接使用
+        if (typeof findResult === 'number') {
+          foundUid = String(findResult);
+        } else if (typeof findResult === 'string') {
+          const trimmed = findResult.trim();
+          // 直接是数字字符串
+          if (trimmed.match(/^\d+$/)) {
+            foundUid = trimmed;
+          } else {
+            // 尝试解析 JSON
+            try {
+              const parsed = JSON.parse(trimmed);
+              if (typeof parsed === 'number') {
+                foundUid = String(parsed);
+              } else if (parsed?.pipe !== undefined) {
+                foundUid = String(parsed.pipe);
+              } else if (parsed?.result !== undefined) {
+                foundUid = String(parsed.result);
+              }
+            } catch { /* not JSON */ }
+          }
+        } else if (typeof findResult === 'object') {
+          // 对象形式 {pipe: xxx} 或 {result: xxx}
+          if (findResult?.pipe !== undefined) {
+            foundUid = String(findResult.pipe);
+          } else if (findResult?.result !== undefined) {
+            foundUid = String(findResult.result);
+          }
+        }
+      }
+      console.log(`[StoryGuide] DEBUG parsed foundUid:`, foundUid);
+
+      // 清理临时变量
+      try { await execSlash(`/flushvar ${findUidVar}`); } catch { /* ignore */ }
+      if (target === 'chatbook') {
+        try { await execSlash(`/flushvar ${findFileVar}`); } catch { /* ignore */ }
+      }
+
+      if (foundUid) {
+        // 找到条目，更新内容
+        let updateParts = [];
+        const updateFileVar = '__sg_update_file';
+
+        if (target === 'chatbook') {
+          // chatbook 模式需要先获取文件名
+          updateParts.push('/getchatbook');
+          updateParts.push(`/setvar key=${updateFileVar}`);
+          updateParts.push(`/setentryfield file={{getvar::${updateFileVar}}} uid=${foundUid} field=content ${quoteSlashValue(content)}`);
+          updateParts.push(`/flushvar ${updateFileVar}`);
+        } else {
+          updateParts.push(`/setentryfield file=${quoteSlashValue(file)} uid=${foundUid} field=content ${quoteSlashValue(content)}`);
+        }
+
+        await execSlash(updateParts.join(' | '));
+        cached.content = content;
+        cached.lastUpdated = Date.now();
+        console.log(`[StoryGuide] Updated ${entryType} (${targetType}): ${entryName} -> UID ${foundUid}`);
+        return { updated: true, name: entryName, targetType, uid: foundUid };
+      } else {
+        console.log(`[StoryGuide] Entry not found via /findentry: ${searchPattern}, skipping update`);
+        // 未找到条目（可能被手动删除），只更新缓存
+        cached.content = content;
+        cached.lastUpdated = Date.now();
+        return { skipped: true, name: entryName, targetType, reason: 'entry_not_found' };
+      }
+    } catch (e) {
+      console.warn(`[StoryGuide] Update ${entryType} (${targetType}) via /findentry failed:`, e);
+      // 更新失败，只更新缓存
+      cached.content = content;
+      cached.lastUpdated = Date.now();
+      return { skipped: true, name: entryName, targetType, reason: 'update_failed' };
+    }
+  }
+
+  // 创建新条目
+  // 对于蓝灯条目，先检查是否有对应的绿灯条目，复用其 indexId
+  let indexId;
+  const greenCacheKey = `${normalizedName}_green`;
+  const existingGreenEntry = entriesCache[greenCacheKey];
+
+  if (targetType === 'blue' && existingGreenEntry?.indexId) {
+    // 蓝灯复用绿灯的 indexId
+    indexId = existingGreenEntry.indexId;
+    console.log(`[StoryGuide] Reusing green indexId for blue: ${entryName} -> ${indexId}`);
+  } else {
+    // 绿灯或没有对应绿灯条目时，生成新 indexId
+    const indexNum = meta[nextIndexKey] || 1;
+    indexId = `${entryType.substring(0, 3).toUpperCase()}-${String(indexNum).padStart(3, '0')}`;
+  }
+
+  const keyValue = buildStructuredEntryKey(prefix, entryName, indexId);
+  const comment = `${prefix}｜${entryName}｜${indexId}`;
+
+  const uidVar = '__sg_struct_uid';
+  const fileVar = '__sg_struct_wbfile';
+  const createFileExpr = (target === 'chatbook') ? `{{getvar::${fileVar}}}` : file;
+
+  const parts = [];
+  if (target === 'chatbook') {
+    parts.push('/getchatbook');
+    parts.push(`/setvar key=${fileVar}`);
+  }
+  parts.push(`/createentry file=${quoteSlashValue(createFileExpr)} key=${quoteSlashValue(keyValue)} ${quoteSlashValue(content)}`);
+  parts.push(`/setvar key=${uidVar}`);
+  parts.push(`/setentryfield file=${quoteSlashValue(createFileExpr)} uid={{getvar::${uidVar}}} field=comment ${quoteSlashValue(comment)}`);
+  parts.push(`/setentryfield file=${quoteSlashValue(createFileExpr)} uid={{getvar::${uidVar}}} field=disable 0`);
+  parts.push(`/setentryfield file=${quoteSlashValue(createFileExpr)} uid={{getvar::${uidVar}}} field=constant ${constant}`);
+  parts.push(`/flushvar ${uidVar}`);
+  if (target === 'chatbook') parts.push(`/flushvar ${fileVar}`);
+
+  try {
+    await execSlash(parts.join(' | '));
+    // 更新缓存
+    entriesCache[cacheKey] = {
+      name: entryName,
+      aliases: entryData.aliases || [],
+      content,
+      lastUpdated: Date.now(),
+      indexId,
+      targetType,
+    };
+    if (targetType === 'green' && !existingGreenEntry) {
+      // 只在绿灯首次创建时递增索引
+      meta[nextIndexKey] = (meta[nextIndexKey] || 1) + 1;
+    }
+    console.log(`[StoryGuide] Created ${entryType} (${targetType}): ${entryName} -> ${indexId}`);
+    return { created: true, name: entryName, indexId, targetType };
+  } catch (e) {
+    console.warn(`[StoryGuide] Create ${entryType} (${targetType}) entry failed:`, e);
+    return null;
+  }
+}
+
+
+async function writeOrUpdateCharacterEntry(char, meta, settings) {
+  if (!char?.name) return null;
+  const results = [];
+  // 写入绿灯世界书
+  if (settings.summaryToWorldInfo) {
+    const r = await writeOrUpdateStructuredEntry('character', char, meta, settings, {
+      buildContent: buildCharacterContent,
+      entriesCache: meta.characterEntries,
+      nextIndexKey: 'nextCharacterIndex',
+      prefix: settings.characterEntryPrefix || '人物',
+      targetType: 'green',
+    });
+    if (r) results.push(r);
+  }
+  // 写入蓝灯世界书
+  if (settings.summaryToBlueWorldInfo) {
+    const r = await writeOrUpdateStructuredEntry('character', char, meta, settings, {
+      buildContent: buildCharacterContent,
+      entriesCache: meta.characterEntries,
+      nextIndexKey: 'nextCharacterIndex',
+      prefix: settings.characterEntryPrefix || '人物',
+      targetType: 'blue',
+    });
+    if (r) results.push(r);
+  }
+  return results.length ? results : null;
+}
+
+async function writeOrUpdateEquipmentEntry(equip, meta, settings) {
+  if (!equip?.name) return null;
+  const results = [];
+  // 写入绿灯世界书
+  if (settings.summaryToWorldInfo) {
+    const r = await writeOrUpdateStructuredEntry('equipment', equip, meta, settings, {
+      buildContent: buildEquipmentContent,
+      entriesCache: meta.equipmentEntries,
+      nextIndexKey: 'nextEquipmentIndex',
+      prefix: settings.equipmentEntryPrefix || '装备',
+      targetType: 'green',
+    });
+    if (r) results.push(r);
+  }
+  // 写入蓝灯世界书
+  if (settings.summaryToBlueWorldInfo) {
+    const r = await writeOrUpdateStructuredEntry('equipment', equip, meta, settings, {
+      buildContent: buildEquipmentContent,
+      entriesCache: meta.equipmentEntries,
+      nextIndexKey: 'nextEquipmentIndex',
+      prefix: settings.equipmentEntryPrefix || '装备',
+      targetType: 'blue',
+    });
+    if (r) results.push(r);
+  }
+  return results.length ? results : null;
+}
+
+async function writeOrUpdateAbilityEntry(ability, meta, settings) {
+  if (!ability?.name) return null;
+  const results = [];
+  // 写入绿灯世界书
+  if (settings.summaryToWorldInfo) {
+    const r = await writeOrUpdateStructuredEntry('ability', ability, meta, settings, {
+      buildContent: buildAbilityContent,
+      entriesCache: meta.abilityEntries,
+      nextIndexKey: 'nextAbilityIndex',
+      prefix: settings.abilityEntryPrefix || '能力',
+      targetType: 'green',
+    });
+    if (r) results.push(r);
+  }
+  // 写入蓝灯世界书
+  if (settings.summaryToBlueWorldInfo) {
+    const r = await writeOrUpdateStructuredEntry('ability', ability, meta, settings, {
+      buildContent: buildAbilityContent,
+      entriesCache: meta.abilityEntries,
+      nextIndexKey: 'nextAbilityIndex',
+      prefix: settings.abilityEntryPrefix || '能力',
+      targetType: 'blue',
+    });
+    if (r) results.push(r);
+  }
+  return results.length ? results : null;
+}
+
+// 删除结构化条目（从世界书中删除死亡角色、卖掉装备等）
+async function deleteStructuredEntry(entryType, entryName, meta, settings, {
+  entriesCache,
+  prefix,
+  targetType = 'green',
+}) {
+  if (!entryName) return null;
+  const normalizedName = String(entryName || '').trim().toLowerCase();
+
+  // 查找缓存中的条目
+  const cacheKey = `${normalizedName}_${targetType}`;
+  const cached = entriesCache[cacheKey];
+  if (!cached) {
+    console.log(`[StoryGuide] Delete ${entryType} (${targetType}): ${entryName} not found in cache`);
+    return null;
+  }
+
+  // 构建 comment 用于查找世界书条目
+  const comment = `${prefix}｜${cached.name}｜${cached.indexId}`;
+
+  // 确定目标世界书
+  let target = 'chatbook';
+  let file = '';
+  if (targetType === 'blue') {
+    target = 'file';
+    file = settings.summaryBlueWorldInfoFile || '';
+    if (!file) {
+      console.warn(`[StoryGuide] No blue world info file configured for deletion`);
+      return null;
+    }
+  } else {
+    const t = String(settings.summaryWorldInfoTarget || 'chatbook');
+    if (t === 'file') {
+      target = 'file';
+      file = settings.summaryWorldInfoFile || '';
+    }
+  }
+
+  // 使用 /findentry 查找条目 UID
+  try {
+    let findExpr;
+    const findFileVar = 'sgTmpFindFile';
+    if (target === 'chatbook') {
+      // 使用 setvar/getvar 管道获取 chatbook 文件名
+      await execSlash(`/getchatbook | /setvar key=${findFileVar}`);
+      findExpr = `/findentry file={{getvar::${findFileVar}}} field=comment ${quoteSlashValue(comment)}`;
+    } else {
+      findExpr = `/findentry file=${quoteSlashValue(file)} field=comment ${quoteSlashValue(comment)}`;
+    }
+
+    const findResult = await execSlash(findExpr);
+    const findText = slashOutputToText(findResult);
+
+    // 清理临时变量
+    if (target === 'chatbook') {
+      await execSlash(`/flushvar ${findFileVar}`);
+    }
+
+    // 解析 UID
+    let uid = null;
+    if (findText && findText !== 'null' && findText !== 'undefined') {
+      const parsed = safeJsonParse(findText);
+      if (parsed && parsed.uid) {
+        uid = parsed.uid;
+      } else if (/^\d+$/.test(findText.trim())) {
+        uid = findText.trim();
+      }
+    }
+
+    if (!uid) {
+      console.log(`[StoryGuide] Delete ${entryType} (${targetType}): ${entryName} not found in world book`);
+      // 仍然从缓存中删除
+      delete entriesCache[cacheKey];
+      return { deleted: true, name: entryName, source: 'cache_only' };
+    }
+
+    // SillyTavern 没有 /delentry 命令，改为禁用条目并标记为已删除
+    // 1. 设置 disable=1（禁用条目）
+    // 2. 清空内容或标记为已删除
+
+    // 构建文件表达式（chatbook 需要特殊处理）
+    let fileExpr;
+    const fileVar = 'sgTmpDeleteFile';
+    if (target === 'chatbook') {
+      // 使用 setvar/getvar 管道获取 chatbook 文件名
+      await execSlash(`/getchatbook | /setvar key=${fileVar}`);
+      fileExpr = `{{getvar::${fileVar}}}`;
+    } else {
+      fileExpr = quoteSlashValue(file);
+    }
+
+    const disableExpr = `/setentryfield file=${fileExpr} uid=${uid} field=disable 1`;
+    await execSlash(disableExpr);
+
+    // 修改 comment 为已删除标记
+    const deletedComment = `[已删除] ${comment}`;
+    const commentExpr = `/setentryfield file=${fileExpr} uid=${uid} field=comment ${quoteSlashValue(deletedComment)}`;
+    await execSlash(commentExpr);
+
+    // 清空触发词（避免被触发）
+    const keyExpr = `/setentryfield file=${fileExpr} uid=${uid} field=key ""`;
+    await execSlash(keyExpr);
+
+    // 清理临时变量
+    if (target === 'chatbook') {
+      await execSlash(`/flushvar ${fileVar}`);
+    }
+
+    // 从缓存中删除
+    delete entriesCache[cacheKey];
+
+    console.log(`[StoryGuide] Disabled ${entryType} (${targetType}): ${entryName} (UID: ${uid})`);
+    return { deleted: true, name: entryName, uid, targetType };
+  } catch (e) {
+    console.warn(`[StoryGuide] Delete ${entryType} (${targetType}) failed:`, e);
+    // 仍然从缓存中删除（避免下次再次尝试）
+    delete entriesCache[cacheKey];
+    return null;
+  }
+}
+
+// 删除角色条目
+async function deleteCharacterEntry(charName, meta, settings) {
+  const results = [];
+  if (settings.summaryToWorldInfo) {
+    const r = await deleteStructuredEntry('character', charName, meta, settings, {
+      entriesCache: meta.characterEntries,
+      prefix: settings.characterEntryPrefix || '人物',
+      targetType: 'green',
+    });
+    if (r) results.push(r);
+  }
+  if (settings.summaryToBlueWorldInfo) {
+    const r = await deleteStructuredEntry('character', charName, meta, settings, {
+      entriesCache: meta.characterEntries,
+      prefix: settings.characterEntryPrefix || '人物',
+      targetType: 'blue',
+    });
+    if (r) results.push(r);
+  }
+  return results.length ? results : null;
+}
+
+// 删除装备条目
+async function deleteEquipmentEntry(equipName, meta, settings) {
+  const results = [];
+  if (settings.summaryToWorldInfo) {
+    const r = await deleteStructuredEntry('equipment', equipName, meta, settings, {
+      entriesCache: meta.equipmentEntries,
+      prefix: settings.equipmentEntryPrefix || '装备',
+      targetType: 'green',
+    });
+    if (r) results.push(r);
+  }
+  if (settings.summaryToBlueWorldInfo) {
+    const r = await deleteStructuredEntry('equipment', equipName, meta, settings, {
+      entriesCache: meta.equipmentEntries,
+      prefix: settings.equipmentEntryPrefix || '装备',
+      targetType: 'blue',
+    });
+    if (r) results.push(r);
+  }
+  return results.length ? results : null;
+}
+
+// 删除能力条目
+async function deleteAbilityEntry(abilityName, meta, settings) {
+  const results = [];
+  if (settings.summaryToWorldInfo) {
+    const r = await deleteStructuredEntry('ability', abilityName, meta, settings, {
+      entriesCache: meta.abilityEntries,
+      prefix: settings.abilityEntryPrefix || '能力',
+      targetType: 'green',
+    });
+    if (r) results.push(r);
+  }
+  if (settings.summaryToBlueWorldInfo) {
+    const r = await deleteStructuredEntry('ability', abilityName, meta, settings, {
+      entriesCache: meta.abilityEntries,
+      prefix: settings.abilityEntryPrefix || '能力',
+      targetType: 'blue',
+    });
+    if (r) results.push(r);
+  }
+  return results.length ? results : null;
 }
 
 let cachedSlashExecutor = null;
@@ -2559,6 +4301,13 @@ async function writeSummaryToWorldInfoEntry(rec, meta, {
   return { file: (t === 'file') ? f : 'chatbook', uid: null };
 }
 
+function stopSummary() {
+  if (isSummarizing) {
+    summaryCancelled = true;
+    console.log('[StoryGuide] Summary stop requested');
+  }
+}
+
 async function runSummary({ reason = 'manual', manualFromFloor = null, manualToFloor = null, manualSplit = null } = {}) {
   const s = ensureSettings();
   const ctx = SillyTavern.getContext();
@@ -2567,6 +4316,7 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
 
   if (isSummarizing) return;
   isSummarizing = true;
+  summaryCancelled = false;
   setStatus('总结中…', 'warn');
   showToast('正在总结…', { kind: 'warn', spinner: true, sticky: true });
 
@@ -2635,7 +4385,31 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
     const writeErrs = [];
     const runErrs = [];
 
+    // 读取 stat_data（如果启用）
+    let summaryStatData = null;
+    if (s.summaryReadStatData) {
+      try {
+        const { statData } = await resolveStatDataComprehensive(chat, {
+          ...s,
+          wiRollStatVarName: s.summaryStatVarName || 'stat_data'
+        });
+        if (statData) {
+          summaryStatData = statData;
+          console.log('[StoryGuide] Summary loaded stat_data:', summaryStatData);
+        }
+      } catch (e) {
+        console.warn('[StoryGuide] Failed to load stat_data for summary:', e);
+      }
+    }
+
     for (let i = 0; i < segments.length; i++) {
+      // 检查是否被取消
+      if (summaryCancelled) {
+        setStatus('总结已取消', 'warn');
+        showToast('总结已取消', { kind: 'warn', spinner: false, sticky: false, duration: 2000 });
+        break;
+      }
+
       const seg = segments[i];
       const startIdx = seg.startIdx;
       const endIdx = seg.endIdx;
@@ -2651,7 +4425,7 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
         continue;
       }
 
-      const messages = buildSummaryPromptMessages(chunkText, fromFloor, toFloor);
+      const messages = buildSummaryPromptMessages(chunkText, fromFloor, toFloor, summaryStatData);
       const schema = getSummarySchema();
 
       let jsonText = '';
@@ -2731,6 +4505,62 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
 
       // 同步进蓝灯索引缓存（用于本地匹配/预筛选）
       try { appendToBlueIndexCache(rec); } catch { /* ignore */ }
+
+      // 生成结构化世界书条目（人物/装备/能力 - 与剧情总结同一事务）
+      if (s.structuredEntriesEnabled && (s.summaryToWorldInfo || s.summaryToBlueWorldInfo)) {
+        try {
+          const structuredResult = await generateStructuredEntries(chunkText, fromFloor, toFloor, meta, s, summaryStatData);
+          console.log('[StoryGuide] Structured entries result:', structuredResult);
+          if (structuredResult) {
+            // 写入/更新人物条目（去重由 writeOrUpdate 内部处理）
+            if (s.characterEntriesEnabled && structuredResult.characters?.length) {
+              console.log(`[StoryGuide] Processing ${structuredResult.characters.length} character(s)`);
+              for (const char of structuredResult.characters) {
+                await writeOrUpdateCharacterEntry(char, meta, s);
+              }
+            }
+            // 写入/更新装备条目
+            if (s.equipmentEntriesEnabled && structuredResult.equipments?.length) {
+              console.log(`[StoryGuide] Processing ${structuredResult.equipments.length} equipment(s)`);
+              for (const equip of structuredResult.equipments) {
+                await writeOrUpdateEquipmentEntry(equip, meta, s);
+              }
+            }
+            // 写入/更新能力条目
+            if (s.abilityEntriesEnabled && structuredResult.abilities?.length) {
+              console.log(`[StoryGuide] Processing ${structuredResult.abilities.length} ability(s)`);
+              for (const ability of structuredResult.abilities) {
+                await writeOrUpdateAbilityEntry(ability, meta, s);
+              }
+            }
+
+            // 处理删除的条目
+            if (structuredResult.deletedCharacters?.length) {
+              console.log(`[StoryGuide] Deleting ${structuredResult.deletedCharacters.length} character(s)`);
+              for (const charName of structuredResult.deletedCharacters) {
+                await deleteCharacterEntry(charName, meta, s);
+              }
+            }
+            if (structuredResult.deletedEquipments?.length) {
+              console.log(`[StoryGuide] Deleting ${structuredResult.deletedEquipments.length} equipment(s)`);
+              for (const equipName of structuredResult.deletedEquipments) {
+                await deleteEquipmentEntry(equipName, meta, s);
+              }
+            }
+            if (structuredResult.deletedAbilities?.length) {
+              console.log(`[StoryGuide] Deleting ${structuredResult.deletedAbilities.length} ability(s)`);
+              for (const abilityName of structuredResult.deletedAbilities) {
+                await deleteAbilityEntry(abilityName, meta, s);
+              }
+            }
+
+            await setSummaryMeta(meta);
+          }
+        } catch (e) {
+          console.warn('[StoryGuide] Structured entries generation failed:', e);
+          // 结构化条目生成失败不阻断主流程
+        }
+      }
 
       // world info write
       if (s.summaryToWorldInfo || s.summaryToBlueWorldInfo) {
@@ -4718,17 +6548,19 @@ async function runInlineAppendForLastMessage(opts = {}) {
     return;
   }
 
-  try {
-    const { snapshotText } = buildSnapshot();
+    try {
+      const { snapshotText } = buildSnapshot();
 
-    const modules = getModules('append');
-    // append 里 schema 按 inline 模块生成；如果用户把 inline 全关了，就不生成
-    if (!modules.length) return;
+      const modules = getModules('append');
+      // append 里 schema 按 inline 模块生成；如果用户把 inline 全关了，就不生成
+      if (!modules.length) return;
 
-    // 对 “compact/standard” 给一点暗示（不强制），避免用户模块 prompt 很长时没起作用
-    const modeHint = (s.appendMode === 'standard')
-      ? `\n【附加要求】inline 输出可比面板更短，但不要丢掉关键信息。\n`
-      : `\n【附加要求】inline 输出尽量短：每个字段尽量 1~2 句/2 条以内。\n`;
+      await updateMapFromSnapshot(snapshotText);
+
+      // 对 “compact/standard” 给一点暗示（不强制），避免用户模块 prompt 很长时没起作用
+      const modeHint = (s.appendMode === 'standard')
+        ? `\n【附加要求】inline 输出可比面板更短，但不要丢掉关键信息。\n`
+        : `\n【附加要求】inline 输出尽量短：每个字段尽量 1~2 句/2 条以内。\n`;
 
     const schema = buildSchemaFromModules(modules);
     const messages = buildPromptMessages(snapshotText + modeHint, s.spoilerLevel, modules, 'append');
@@ -5583,6 +7415,11 @@ function buildModalHtml() {
               <button class="menu_button sg-btn-primary" id="sg_saveSettings">保存设置</button>
               <button class="menu_button sg-btn-primary" id="sg_analyze">分析当前剧情</button>
             </div>
+            <div class="sg-actions-row" style="margin-top: 8px;">
+              <button class="menu_button sg-btn" id="sg_exportPreset">📤 导出全局预设</button>
+              <button class="menu_button sg-btn" id="sg_importPreset">📥 导入全局预设</button>
+              <input type="file" id="sg_importPresetFile" accept=".json" style="display: none;">
+            </div>
           </div>
 
           <div class="sg-card">
@@ -5675,6 +7512,35 @@ function buildModalHtml() {
             <div class="sg-hint" id="sg_worldbookInfo">（未导入世界书）</div>
           </div>
 
+          <div class="sg-card">
+            <div class="sg-card-title">🗺️ 网格地图</div>
+            <div class="sg-hint">从剧情中自动提取地点信息，生成可视化世界地图。显示主角位置和各地事件。</div>
+            
+              <div class="sg-row sg-inline" style="margin-top: 10px;">
+                <label class="sg-check"><input type="checkbox" id="sg_mapEnabled">启用地图功能</label>
+              </div>
+
+              <div class="sg-field" style="margin-top: 10px;">
+                <label>地图提示词</label>
+                <textarea id="sg_mapSystemPrompt" rows="6" placeholder="可自定义地图提取规则（仍需输出 JSON）"></textarea>
+                <div class="sg-actions-row">
+                  <button class="menu_button sg-btn" id="sg_mapResetPrompt">恢复默认提示词</button>
+                </div>
+              </div>
+              
+              <div class="sg-field" style="margin-top: 10px;">
+                <label>地图当前状态</label>
+                <div id="sg_mapPreview" class="sg-map-container">
+                <div class="sg-map-empty">暂无地图数据。启用后进行剧情分析将自动生成地图。</div>
+              </div>
+            </div>
+            
+            <div class="sg-actions-row">
+              <button class="menu_button sg-btn" id="sg_resetMap">🗑 重置地图</button>
+              <button class="menu_button sg-btn" id="sg_refreshMapPreview">🔄 刷新预览</button>
+            </div>
+          </div>
+
           </div> <!-- sg_page_guide -->
 
           <div class="sg-page" id="sg_page_summary">
@@ -5718,7 +7584,65 @@ function buildModalHtml() {
               </div>
               <div class="sg-row sg-inline">
                 <button class="menu_button sg-btn" id="sg_summaryResetPrompt">恢复默认提示词</button>
-                <div class="sg-hint" style="margin-left:auto">占位符：{{fromFloor}} {{toFloor}} {{chunk}}。插件会强制要求输出 JSON：{title, summary, keywords[]}。</div>
+                <div class="sg-hint" style="margin-left:auto">占位符：{{fromFloor}} {{toFloor}} {{chunk}} {{statData}}。插件会强制要求输出 JSON：{title, summary, keywords[]}。</div>
+              </div>
+              <div class="sg-row sg-inline" style="margin-top:8px">
+                <label class="sg-check"><input type="checkbox" id="sg_summaryReadStatData">读取角色状态变量</label>
+                <div class="sg-field" style="flex:1;margin-left:8px">
+                  <input id="sg_summaryStatVarName" type="text" placeholder="stat_data" style="width:120px">
+                </div>
+                <div class="sg-hint" style="margin-left:8px">AI 可看到变量中的角色属性数据（类似 ROLL 点模块）</div>
+              </div>
+            </div>
+
+            <div class="sg-card sg-subcard">
+              <div class="sg-card-title">结构化条目（人物/装备/能力）</div>
+              <div class="sg-row sg-inline">
+                <label class="sg-check"><input type="checkbox" id="sg_structuredEntriesEnabled">启用结构化条目</label>
+                <label class="sg-check"><input type="checkbox" id="sg_characterEntriesEnabled">人物</label>
+                <label class="sg-check"><input type="checkbox" id="sg_equipmentEntriesEnabled">装备</label>
+                <label class="sg-check"><input type="checkbox" id="sg_abilityEntriesEnabled">能力</label>
+              </div>
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>人物条目前缀</label>
+                  <input id="sg_characterEntryPrefix" type="text" placeholder="人物">
+                </div>
+                <div class="sg-field">
+                  <label>装备条目前缀</label>
+                  <input id="sg_equipmentEntryPrefix" type="text" placeholder="装备">
+                </div>
+              </div>
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>能力条目前缀</label>
+                  <input id="sg_abilityEntryPrefix" type="text" placeholder="能力">
+                </div>
+              </div>
+              <div class="sg-field">
+                <label>结构化提取提示词（System，可选）</label>
+                <textarea id="sg_structuredEntriesSystemPrompt" rows="5" placeholder="例如：强调客观档案式描述、避免杜撰…"></textarea>
+              </div>
+              <div class="sg-field">
+                <label>结构化提取模板（User，可选）</label>
+                <textarea id="sg_structuredEntriesUserTemplate" rows="4" placeholder="支持占位符：{{fromFloor}} {{toFloor}} {{chunk}} {{knownCharacters}} {{knownEquipments}}"></textarea>
+              </div>
+              <div class="sg-field">
+                <label>人物条目提示词（可选）</label>
+                <textarea id="sg_structuredCharacterPrompt" rows="3" placeholder="例如：优先记录阵营/关系/关键事件…"></textarea>
+              </div>
+              <div class="sg-field">
+                <label>装备条目提示词（可选）</label>
+                <textarea id="sg_structuredEquipmentPrompt" rows="3" placeholder="例如：强调来源/稀有度/当前状态…"></textarea>
+              </div>
+              <div class="sg-field">
+                <label>能力条目提示词（可选）</label>
+                <textarea id="sg_structuredAbilityPrompt" rows="3" placeholder="例如：强调触发条件/代价/负面效果…"></textarea>
+              </div>
+              <div class="sg-row sg-inline">
+                <button class="menu_button sg-btn" id="sg_structuredResetPrompt">恢复默认结构化提示词</button>
+                <button class="menu_button sg-btn" id="sg_clearStructuredCache">清除结构化条目缓存</button>
+                <div class="sg-hint" style="margin-left:auto">占位符：{{fromFloor}} {{toFloor}} {{chunk}} {{knownCharacters}} {{knownEquipments}}。</div>
               </div>
             </div>
 
@@ -5766,13 +7690,17 @@ function buildModalHtml() {
               <input id="sg_summaryBlueWorldInfoFile" type="text" placeholder="蓝灯世界书文件名（建议单独建一个）" style="flex:1; min-width: 260px;">
             </div>
 
-            <div class="sg-card sg-subcard" style="background: var(--SmartThemeBlurTintColor); margin-top: 8px;">
+            <div class="sg-card sg-subcard" style="background: var(--SmartThemeBlurTintColor); margin-top: 8px; display: none;">
               <div class="sg-row sg-inline" style="align-items: center;">
                 <label class="sg-check"><input type="checkbox" id="sg_autoBindWorldInfo">📒 自动绑定世界书（每个聊天生成专属世界书）</label>
                 <input id="sg_autoBindWorldInfoPrefix" type="text" placeholder="前缀" style="width: 80px;" title="世界书文件名前缀，默认 SG">
               </div>
               <div class="sg-hint" style="margin-top: 4px;">开启后，每个聊天会自动创建专属的绿灯/蓝灯世界书，切换聊天时自动加载。</div>
               <div id="sg_autoBindInfo" class="sg-hint" style="margin-top: 6px; display: none; font-size: 12px;"></div>
+            </div>
+
+            <div class="sg-hint" style="margin-top: 8px; color: var(--SmartThemeQuoteColor);">
+              💡 请手动创建世界书文件，然后在上方填写文件名。绿灯选择「写入指定世界书文件名」模式。
             </div>
 
             <div class="sg-grid2">
@@ -5824,6 +7752,23 @@ function buildModalHtml() {
                   <label>最多触发条目数</label>
                   <input id="sg_wiTriggerMaxEntries" type="number" min="1" max="20" placeholder="4">
                 </div>
+
+              <div class="sg-grid2" style="margin-top: 8px;">
+                <div class="sg-field">
+                  <label>最多索引人物数</label>
+                  <input id="sg_wiTriggerMaxCharacters" type="number" min="0" max="10" placeholder="2">
+                </div>
+                <div class="sg-field">
+                  <label>最多索引装备数</label>
+                  <input id="sg_wiTriggerMaxEquipments" type="number" min="0" max="10" placeholder="2">
+                </div>
+              </div>
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>最多索引剧情数（优先久远）</label>
+                  <input id="sg_wiTriggerMaxPlot" type="number" min="0" max="10" placeholder="3">
+                </div>
+              </div>
 
 <div class="sg-grid2">
   <div class="sg-field">
@@ -6004,6 +7949,7 @@ function buildModalHtml() {
 
             <div class="sg-row sg-inline">
               <button class="menu_button sg-btn" id="sg_summarizeNow">立即总结</button>
+              <button class="menu_button sg-btn" id="sg_stopSummary" style="background: var(--SmartThemeBodyColor); color: var(--SmartThemeQuoteColor);">停止总结</button>
               <button class="menu_button sg-btn" id="sg_resetSummaryState">重置本聊天总结进度</button>
               <div class="sg-hint" id="sg_summaryInfo" style="margin-left:auto">（未生成）</div>
             </div>
@@ -6305,6 +8251,27 @@ function ensureModal() {
     setStatus('已恢复默认总结提示词 ✅', 'ok');
   });
 
+  // structured entries prompt reset + cache clear
+  $('#sg_structuredResetPrompt').on('click', () => {
+    $('#sg_structuredEntriesSystemPrompt').val(DEFAULT_STRUCTURED_ENTRIES_SYSTEM_PROMPT);
+    $('#sg_structuredEntriesUserTemplate').val(DEFAULT_STRUCTURED_ENTRIES_USER_TEMPLATE);
+    $('#sg_structuredCharacterPrompt').val(DEFAULT_STRUCTURED_CHARACTER_PROMPT);
+    $('#sg_structuredEquipmentPrompt').val(DEFAULT_STRUCTURED_EQUIPMENT_PROMPT);
+    $('#sg_structuredAbilityPrompt').val(DEFAULT_STRUCTURED_ABILITY_PROMPT);
+    pullUiToSettings();
+    saveSettings();
+    setStatus('已恢复默认结构化提示词 ✅', 'ok');
+  });
+
+  $('#sg_clearStructuredCache').on('click', async () => {
+    try {
+      await clearStructuredEntriesCache();
+      setStatus('已清除结构化条目缓存 ✅', 'ok');
+    } catch (e) {
+      setStatus(`清除结构化条目缓存失败：${e?.message ?? e}`, 'err');
+    }
+  });
+
   // manual range split toggle & hint refresh
   $('#sg_summaryManualSplit').on('change', () => {
     pullUiToSettings();
@@ -6325,6 +8292,11 @@ function ensureModal() {
     } catch (e) {
       setStatus(`总结失败：${e?.message ?? e}`, 'err');
     }
+  });
+
+  $('#sg_stopSummary').on('click', () => {
+    stopSummary();
+    setStatus('正在停止总结…', 'warn');
   });
 
   $('#sg_summarizeRange').on('click', async () => {
@@ -6352,7 +8324,7 @@ function ensureModal() {
   });
 
   // auto-save summary settings
-  $('#sg_summaryEnabled, #sg_summaryEvery, #sg_summaryCountMode, #sg_summaryTemperature, #sg_summarySystemPrompt, #sg_summaryUserTemplate, #sg_summaryCustomEndpoint, #sg_summaryCustomApiKey, #sg_summaryCustomModel, #sg_summaryCustomMaxTokens, #sg_summaryCustomStream, #sg_summaryToWorldInfo, #sg_summaryWorldInfoFile, #sg_summaryWorldInfoCommentPrefix, #sg_summaryWorldInfoKeyMode, #sg_summaryIndexPrefix, #sg_summaryIndexPad, #sg_summaryIndexStart, #sg_summaryIndexInComment, #sg_summaryToBlueWorldInfo, #sg_summaryBlueWorldInfoFile, #sg_wiTriggerEnabled, #sg_wiTriggerLookbackMessages, #sg_wiTriggerIncludeUserMessage, #sg_wiTriggerUserMessageWeight, #sg_wiTriggerStartAfterAssistantMessages, #sg_wiTriggerMaxEntries, #sg_wiTriggerMinScore, #sg_wiTriggerMaxKeywords, #sg_wiTriggerInjectStyle, #sg_wiTriggerDebugLog, #sg_wiBlueIndexMode, #sg_wiBlueIndexFile, #sg_summaryMaxChars, #sg_summaryMaxTotalChars, #sg_wiTriggerMatchMode, #sg_wiIndexPrefilterTopK, #sg_wiIndexProvider, #sg_wiIndexTemperature, #sg_wiIndexSystemPrompt, #sg_wiIndexUserTemplate, #sg_wiIndexCustomEndpoint, #sg_wiIndexCustomApiKey, #sg_wiIndexCustomModel, #sg_wiIndexCustomMaxTokens, #sg_wiIndexTopP, #sg_wiIndexCustomStream, #sg_wiRollEnabled, #sg_wiRollStatSource, #sg_wiRollStatVarName, #sg_wiRollRandomWeight, #sg_wiRollDifficulty, #sg_wiRollInjectStyle, #sg_wiRollDebugLog, #sg_wiRollStatParseMode, #sg_wiRollProvider, #sg_wiRollCustomEndpoint, #sg_wiRollCustomApiKey, #sg_wiRollCustomModel, #sg_wiRollCustomMaxTokens, #sg_wiRollCustomTopP, #sg_wiRollCustomTemperature, #sg_wiRollCustomStream, #sg_wiRollSystemPrompt').on('change input', () => {
+  $('#sg_summaryEnabled, #sg_summaryEvery, #sg_summaryCountMode, #sg_summaryTemperature, #sg_summarySystemPrompt, #sg_summaryUserTemplate, #sg_summaryReadStatData, #sg_summaryStatVarName, #sg_structuredEntriesEnabled, #sg_characterEntriesEnabled, #sg_equipmentEntriesEnabled, #sg_abilityEntriesEnabled, #sg_characterEntryPrefix, #sg_equipmentEntryPrefix, #sg_abilityEntryPrefix, #sg_structuredEntriesSystemPrompt, #sg_structuredEntriesUserTemplate, #sg_structuredCharacterPrompt, #sg_structuredEquipmentPrompt, #sg_structuredAbilityPrompt, #sg_summaryCustomEndpoint, #sg_summaryCustomApiKey, #sg_summaryCustomModel, #sg_summaryCustomMaxTokens, #sg_summaryCustomStream, #sg_summaryToWorldInfo, #sg_summaryWorldInfoFile, #sg_summaryWorldInfoCommentPrefix, #sg_summaryWorldInfoKeyMode, #sg_summaryIndexPrefix, #sg_summaryIndexPad, #sg_summaryIndexStart, #sg_summaryIndexInComment, #sg_summaryToBlueWorldInfo, #sg_summaryBlueWorldInfoFile, #sg_wiTriggerEnabled, #sg_wiTriggerLookbackMessages, #sg_wiTriggerIncludeUserMessage, #sg_wiTriggerUserMessageWeight, #sg_wiTriggerStartAfterAssistantMessages, #sg_wiTriggerMaxEntries, #sg_wiTriggerMaxCharacters, #sg_wiTriggerMaxEquipments, #sg_wiTriggerMaxPlot, #sg_wiTriggerMinScore, #sg_wiTriggerMaxKeywords, #sg_wiTriggerInjectStyle, #sg_wiTriggerDebugLog, #sg_wiBlueIndexMode, #sg_wiBlueIndexFile, #sg_summaryMaxChars, #sg_summaryMaxTotalChars, #sg_wiTriggerMatchMode, #sg_wiIndexPrefilterTopK, #sg_wiIndexProvider, #sg_wiIndexTemperature, #sg_wiIndexSystemPrompt, #sg_wiIndexUserTemplate, #sg_wiIndexCustomEndpoint, #sg_wiIndexCustomApiKey, #sg_wiIndexCustomModel, #sg_wiIndexCustomMaxTokens, #sg_wiIndexTopP, #sg_wiIndexCustomStream, #sg_wiRollEnabled, #sg_wiRollStatSource, #sg_wiRollStatVarName, #sg_wiRollRandomWeight, #sg_wiRollDifficulty, #sg_wiRollInjectStyle, #sg_wiRollDebugLog, #sg_wiRollStatParseMode, #sg_wiRollProvider, #sg_wiRollCustomEndpoint, #sg_wiRollCustomApiKey, #sg_wiRollCustomModel, #sg_wiRollCustomMaxTokens, #sg_wiRollCustomTopP, #sg_wiRollCustomTemperature, #sg_wiRollCustomStream, #sg_wiRollSystemPrompt').on('change input', () => {
     pullUiToSettings();
     saveSettings();
     updateSummaryInfoLabel();
@@ -6363,6 +8335,28 @@ function ensureModal() {
   $('#sg_refreshModels').on('click', async () => {
     pullUiToSettings(); saveSettings();
     await refreshModels();
+  });
+
+  // 导出/导入全局预设
+  $('#sg_exportPreset').on('click', () => {
+    try {
+      exportPreset();
+    } catch (e) {
+      showToast(`导出失败: ${e.message}`, { kind: 'err' });
+    }
+  });
+
+  $('#sg_importPreset').on('click', () => {
+    $('#sg_importPresetFile').trigger('click');
+  });
+
+  $('#sg_importPresetFile').on('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      await importPreset(file);
+      // 清空 input 以便再次选择同一文件
+      e.target.value = '';
+    }
   });
 
   $('#sg_refreshSummaryModels').on('click', async () => {
@@ -6560,6 +8554,47 @@ function ensureModal() {
     pullUiToSettings();
     saveSettings();
     updateWorldbookInfoLabel();
+  });
+
+    // 地图功能事件处理
+    $('#sg_mapEnabled').on('change', () => {
+      pullUiToSettings();
+      saveSettings();
+    });
+
+    $('#sg_mapSystemPrompt').on('change input', () => {
+      pullUiToSettings();
+      saveSettings();
+    });
+
+    $('#sg_mapResetPrompt').on('click', () => {
+      $('#sg_mapSystemPrompt').val(String(DEFAULT_SETTINGS.mapSystemPrompt || ''));
+      pullUiToSettings();
+      saveSettings();
+      setStatus('已恢复默认地图提示词 ✅', 'ok');
+    });
+
+    bindMapEventPanelHandler();
+
+    $(document).on('click', (e) => {
+      const $t = $(e.target);
+      if ($t.closest('.sg-map-popover, .sg-map-location').length) return;
+      if (sgMapPopoverEl) sgMapPopoverEl.style.display = 'none';
+    });
+
+    $('#sg_resetMap').on('click', async () => {
+      try {
+        await setMapData(getDefaultMapData());
+      updateMapPreview();
+      setStatus('地图已重置 ✅', 'ok');
+    } catch (e) {
+      setStatus(`重置地图失败：${e?.message ?? e}`, 'err');
+    }
+  });
+
+  $('#sg_refreshMapPreview').on('click', () => {
+    updateMapPreview();
+    setStatus('地图预览已刷新', 'ok');
   });
   $('#sg_worldbookMaxChars, #sg_worldbookWindowMessages').on('input', () => {
     pullUiToSettings();
@@ -6780,6 +8815,20 @@ function pullSettingsToUi() {
   $('#sg_summaryTemperature').val(s.summaryTemperature);
   $('#sg_summarySystemPrompt').val(String(s.summarySystemPrompt || DEFAULT_SUMMARY_SYSTEM_PROMPT));
   $('#sg_summaryUserTemplate').val(String(s.summaryUserTemplate || DEFAULT_SUMMARY_USER_TEMPLATE));
+  $('#sg_summaryReadStatData').prop('checked', !!s.summaryReadStatData);
+  $('#sg_summaryStatVarName').val(String(s.summaryStatVarName || 'stat_data'));
+  $('#sg_structuredEntriesEnabled').prop('checked', !!s.structuredEntriesEnabled);
+  $('#sg_characterEntriesEnabled').prop('checked', !!s.characterEntriesEnabled);
+  $('#sg_equipmentEntriesEnabled').prop('checked', !!s.equipmentEntriesEnabled);
+  $('#sg_abilityEntriesEnabled').prop('checked', !!s.abilityEntriesEnabled);
+  $('#sg_characterEntryPrefix').val(String(s.characterEntryPrefix || '人物'));
+  $('#sg_equipmentEntryPrefix').val(String(s.equipmentEntryPrefix || '装备'));
+  $('#sg_abilityEntryPrefix').val(String(s.abilityEntryPrefix || '能力'));
+  $('#sg_structuredEntriesSystemPrompt').val(String(s.structuredEntriesSystemPrompt || DEFAULT_STRUCTURED_ENTRIES_SYSTEM_PROMPT));
+  $('#sg_structuredEntriesUserTemplate').val(String(s.structuredEntriesUserTemplate || DEFAULT_STRUCTURED_ENTRIES_USER_TEMPLATE));
+  $('#sg_structuredCharacterPrompt').val(String(s.structuredCharacterPrompt || DEFAULT_STRUCTURED_CHARACTER_PROMPT));
+  $('#sg_structuredEquipmentPrompt').val(String(s.structuredEquipmentPrompt || DEFAULT_STRUCTURED_EQUIPMENT_PROMPT));
+  $('#sg_structuredAbilityPrompt').val(String(s.structuredAbilityPrompt || DEFAULT_STRUCTURED_ABILITY_PROMPT));
   $('#sg_summaryCustomEndpoint').val(String(s.summaryCustomEndpoint || ''));
   $('#sg_summaryCustomApiKey').val(String(s.summaryCustomApiKey || ''));
   $('#sg_summaryCustomModel').val(String(s.summaryCustomModel || ''));
@@ -6803,12 +8852,20 @@ function pullSettingsToUi() {
   $('#sg_autoBindWorldInfoPrefix').val(String(s.autoBindWorldInfoPrefix || 'SG'));
   updateAutoBindUI();
 
+  // 地图功能
+  $('#sg_mapEnabled').prop('checked', !!s.mapEnabled);
+  $('#sg_mapSystemPrompt').val(String(s.mapSystemPrompt || DEFAULT_SETTINGS.mapSystemPrompt || ''));
+  setTimeout(() => updateMapPreview(), 100);
+
   $('#sg_wiTriggerEnabled').prop('checked', !!s.wiTriggerEnabled);
   $('#sg_wiTriggerLookbackMessages').val(s.wiTriggerLookbackMessages || 20);
   $('#sg_wiTriggerIncludeUserMessage').prop('checked', !!s.wiTriggerIncludeUserMessage);
   $('#sg_wiTriggerUserMessageWeight').val(s.wiTriggerUserMessageWeight ?? 1.6);
   $('#sg_wiTriggerStartAfterAssistantMessages').val(s.wiTriggerStartAfterAssistantMessages || 0);
   $('#sg_wiTriggerMaxEntries').val(s.wiTriggerMaxEntries || 4);
+  $('#sg_wiTriggerMaxCharacters').val(s.wiTriggerMaxCharacters ?? 2);
+  $('#sg_wiTriggerMaxEquipments').val(s.wiTriggerMaxEquipments ?? 2);
+  $('#sg_wiTriggerMaxPlot').val(s.wiTriggerMaxPlot ?? 3);
   $('#sg_wiTriggerMinScore').val(s.wiTriggerMinScore ?? 0.08);
   $('#sg_wiTriggerMaxKeywords').val(s.wiTriggerMaxKeywords || 24);
   $('#sg_wiTriggerInjectStyle').val(String(s.wiTriggerInjectStyle || 'hidden'));
@@ -7205,6 +9262,20 @@ function pullUiToSettings() {
   s.summaryTemperature = clampFloat($('#sg_summaryTemperature').val(), 0, 2, s.summaryTemperature || 0.4);
   s.summarySystemPrompt = String($('#sg_summarySystemPrompt').val() || '').trim() || DEFAULT_SUMMARY_SYSTEM_PROMPT;
   s.summaryUserTemplate = String($('#sg_summaryUserTemplate').val() || '').trim() || DEFAULT_SUMMARY_USER_TEMPLATE;
+  s.summaryReadStatData = $('#sg_summaryReadStatData').is(':checked');
+  s.summaryStatVarName = String($('#sg_summaryStatVarName').val() || 'stat_data').trim() || 'stat_data';
+  s.structuredEntriesEnabled = $('#sg_structuredEntriesEnabled').is(':checked');
+  s.characterEntriesEnabled = $('#sg_characterEntriesEnabled').is(':checked');
+  s.equipmentEntriesEnabled = $('#sg_equipmentEntriesEnabled').is(':checked');
+  s.abilityEntriesEnabled = $('#sg_abilityEntriesEnabled').is(':checked');
+  s.characterEntryPrefix = String($('#sg_characterEntryPrefix').val() || '人物').trim() || '人物';
+  s.equipmentEntryPrefix = String($('#sg_equipmentEntryPrefix').val() || '装备').trim() || '装备';
+  s.abilityEntryPrefix = String($('#sg_abilityEntryPrefix').val() || '能力').trim() || '能力';
+  s.structuredEntriesSystemPrompt = String($('#sg_structuredEntriesSystemPrompt').val() || '').trim() || DEFAULT_STRUCTURED_ENTRIES_SYSTEM_PROMPT;
+  s.structuredEntriesUserTemplate = String($('#sg_structuredEntriesUserTemplate').val() || '').trim() || DEFAULT_STRUCTURED_ENTRIES_USER_TEMPLATE;
+  s.structuredCharacterPrompt = String($('#sg_structuredCharacterPrompt').val() || '').trim() || DEFAULT_STRUCTURED_CHARACTER_PROMPT;
+  s.structuredEquipmentPrompt = String($('#sg_structuredEquipmentPrompt').val() || '').trim() || DEFAULT_STRUCTURED_EQUIPMENT_PROMPT;
+  s.structuredAbilityPrompt = String($('#sg_structuredAbilityPrompt').val() || '').trim() || DEFAULT_STRUCTURED_ABILITY_PROMPT;
   s.summaryCustomEndpoint = String($('#sg_summaryCustomEndpoint').val() || '').trim();
   s.summaryCustomApiKey = String($('#sg_summaryCustomApiKey').val() || '');
   s.summaryCustomModel = String($('#sg_summaryCustomModel').val() || '').trim() || 'gpt-4o-mini';
@@ -7226,12 +9297,19 @@ function pullUiToSettings() {
   s.autoBindWorldInfo = $('#sg_autoBindWorldInfo').is(':checked');
   s.autoBindWorldInfoPrefix = String($('#sg_autoBindWorldInfoPrefix').val() || 'SG').trim() || 'SG';
 
+  // 地图功能
+  s.mapEnabled = $('#sg_mapEnabled').is(':checked');
+  s.mapSystemPrompt = String($('#sg_mapSystemPrompt').val() || '').trim() || DEFAULT_SETTINGS.mapSystemPrompt;
+
   s.wiTriggerEnabled = $('#sg_wiTriggerEnabled').is(':checked');
   s.wiTriggerLookbackMessages = clampInt($('#sg_wiTriggerLookbackMessages').val(), 5, 120, s.wiTriggerLookbackMessages || 20);
   s.wiTriggerIncludeUserMessage = $('#sg_wiTriggerIncludeUserMessage').is(':checked');
   s.wiTriggerUserMessageWeight = clampFloat($('#sg_wiTriggerUserMessageWeight').val(), 0, 10, s.wiTriggerUserMessageWeight ?? 1.6);
   s.wiTriggerStartAfterAssistantMessages = clampInt($('#sg_wiTriggerStartAfterAssistantMessages').val(), 0, 200000, s.wiTriggerStartAfterAssistantMessages || 0);
   s.wiTriggerMaxEntries = clampInt($('#sg_wiTriggerMaxEntries').val(), 1, 20, s.wiTriggerMaxEntries || 4);
+  s.wiTriggerMaxCharacters = clampInt($('#sg_wiTriggerMaxCharacters').val(), 0, 10, s.wiTriggerMaxCharacters ?? 2);
+  s.wiTriggerMaxEquipments = clampInt($('#sg_wiTriggerMaxEquipments').val(), 0, 10, s.wiTriggerMaxEquipments ?? 2);
+  s.wiTriggerMaxPlot = clampInt($('#sg_wiTriggerMaxPlot').val(), 0, 10, s.wiTriggerMaxPlot ?? 3);
   s.wiTriggerMinScore = clampFloat($('#sg_wiTriggerMinScore').val(), 0, 1, (s.wiTriggerMinScore ?? 0.08));
   s.wiTriggerMaxKeywords = clampInt($('#sg_wiTriggerMaxKeywords').val(), 1, 200, s.wiTriggerMaxKeywords || 24);
   s.wiTriggerInjectStyle = String($('#sg_wiTriggerInjectStyle').val() || s.wiTriggerInjectStyle || 'hidden');
@@ -7593,12 +9671,13 @@ function createFloatingPanel() {
   panel.innerHTML = `
     <div class="sg-floating-header" style="cursor: move; touch-action: none;">
       <span class="sg-floating-title">📘 剧情指导</span>
-      <div class="sg-floating-actions">
-        <button class="sg-floating-action-btn" id="sg_floating_show_report" title="查看分析">📖</button>
-        <button class="sg-floating-action-btn" id="sg_floating_roll_logs" title="ROLL日志">🎲</button>
-        <button class="sg-floating-action-btn" id="sg_floating_settings" title="打开设置">⚙️</button>
-        <button class="sg-floating-action-btn" id="sg_floating_close" title="关闭">✕</button>
-      </div>
+        <div class="sg-floating-actions">
+          <button class="sg-floating-action-btn" id="sg_floating_show_report" title="查看分析">📖</button>
+          <button class="sg-floating-action-btn" id="sg_floating_show_map" title="查看地图">🗺️</button>
+          <button class="sg-floating-action-btn" id="sg_floating_roll_logs" title="ROLL日志">🎲</button>
+          <button class="sg-floating-action-btn" id="sg_floating_settings" title="打开设置">⚙️</button>
+          <button class="sg-floating-action-btn" id="sg_floating_close" title="关闭">✕</button>
+        </div>
     </div>
     <div class="sg-floating-body" id="sg_floating_body">
       <div style="padding:20px; text-align:center; color:#aaa;">
@@ -7630,20 +9709,42 @@ function createFloatingPanel() {
     hideFloatingPanel();
   });
 
-  $('#sg_floating_show_report').on('click', () => {
-    showFloatingReport();
-  });
+    $('#sg_floating_show_report').on('click', () => {
+      showFloatingReport();
+    });
 
-  // Delegate inner refresh click
-  $(document).on('click', '.sg-inner-refresh-btn', async (e) => {
-    // Only handle if inside our panel
-    if (!$(e.target).closest('#sg_floating_panel').length) return;
-    await refreshFloatingPanelContent();
-  });
+    $('#sg_floating_show_map').on('click', () => {
+      showFloatingMap();
+    });
 
-  $('#sg_floating_roll_logs').on('click', () => {
-    showFloatingRollLogs();
-  });
+    // Delegate inner refresh click
+    $(document).on('click', '.sg-inner-refresh-btn', async (e) => {
+      // Only handle if inside our panel
+      if (!$(e.target).closest('#sg_floating_panel').length) return;
+      await refreshFloatingPanelContent();
+    });
+
+    $(document).on('click', '.sg-inner-map-reset-btn', async (e) => {
+      if (!$(e.target).closest('#sg_floating_panel').length) return;
+      try {
+        await setMapData(getDefaultMapData());
+        showFloatingMap();
+      } catch (err) {
+        console.warn('[StoryGuide] map reset failed:', err);
+      }
+    });
+
+    $(document).on('click', '.sg-inner-map-toggle-btn', (e) => {
+      if (!$(e.target).closest('#sg_floating_panel').length) return;
+      const s = ensureSettings();
+      s.mapAutoUpdate = !isMapAutoUpdateEnabled(s);
+      saveSettings();
+      showFloatingMap();
+    });
+
+    $('#sg_floating_roll_logs').on('click', () => {
+      showFloatingRollLogs();
+    });
 
   $('#sg_floating_settings').on('click', () => {
     openModal();
@@ -7863,52 +9964,54 @@ function hideFloatingPanel() {
   }
 }
 
-async function refreshFloatingPanelContent() {
-  const $body = $('#sg_floating_body');
-  if (!$body.length) return;
+  async function refreshFloatingPanelContent() {
+    const $body = $('#sg_floating_body');
+    if (!$body.length) return;
 
-  $body.html('<div class="sg-floating-loading">正在分析剧情...</div>');
+    $body.html('<div class="sg-floating-loading">正在分析剧情...</div>');
 
-  try {
-    const s = ensureSettings();
-    const { snapshotText } = buildSnapshot();
-    const modules = getModules('panel');
+    try {
+      const s = ensureSettings();
+      const { snapshotText } = buildSnapshot();
+      const modules = getModules('panel');
 
-    if (!modules.length) {
-      $body.html('<div class="sg-floating-loading">没有配置模块</div>');
-      return;
-    }
+      if (!modules.length) {
+        $body.html('<div class="sg-floating-loading">没有配置模块</div>');
+        return;
+      }
 
-    const schema = buildSchemaFromModules(modules);
-    const messages = buildPromptMessages(snapshotText, s.spoilerLevel, modules, 'panel');
+      const schema = buildSchemaFromModules(modules);
+      const messages = buildPromptMessages(snapshotText, s.spoilerLevel, modules, 'panel');
 
-    let jsonText = '';
-    if (s.provider === 'custom') {
-      jsonText = await callViaCustom(s.customEndpoint, s.customApiKey, s.customModel, messages, s.temperature, s.customMaxTokens, s.customTopP, s.customStream);
-    } else {
-      jsonText = await callViaSillyTavern(messages, schema, s.temperature);
-      if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
-    }
+      let jsonText = '';
+      if (s.provider === 'custom') {
+        jsonText = await callViaCustom(s.customEndpoint, s.customApiKey, s.customModel, messages, s.temperature, s.customMaxTokens, s.customTopP, s.customStream);
+      } else {
+        jsonText = await callViaSillyTavern(messages, schema, s.temperature);
+        if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
+      }
 
-    const parsed = safeJsonParse(jsonText);
-    if (!parsed) {
-      $body.html('<div class="sg-floating-loading">解析失败</div>');
-      return;
-    }
+      const parsed = safeJsonParse(jsonText);
+      if (!parsed) {
+        $body.html('<div class="sg-floating-loading">解析失败</div>');
+        return;
+      }
 
-    // 合并静态模块
-    const mergedParsed = mergeStaticModulesIntoResult(parsed, modules);
-    updateStaticModulesCache(mergedParsed, modules).catch(() => void 0);
+      // 合并静态模块
+      const mergedParsed = mergeStaticModulesIntoResult(parsed, modules);
+      updateStaticModulesCache(mergedParsed, modules).catch(() => void 0);
 
-    // 渲染内容
-    // Filter out quick_actions from main Markdown body to avoid duplication
-    const bodyModules = modules.filter(m => m.key !== 'quick_actions');
-    const md = renderReportMarkdownFromModules(mergedParsed, bodyModules);
-    const html = renderMarkdownToHtml(md);
+      // 渲染内容
+      // Filter out quick_actions from main Markdown body to avoid duplication
+      const bodyModules = modules.filter(m => m.key !== 'quick_actions');
+      const md = renderReportMarkdownFromModules(mergedParsed, bodyModules);
+      const html = renderMarkdownToHtml(md);
 
-    // 添加快捷选项
-    const quickActions = Array.isArray(mergedParsed.quick_actions) ? mergedParsed.quick_actions : [];
-    const optionsHtml = renderDynamicQuickActionsHtml(quickActions, 'panel');
+      await updateMapFromSnapshot(snapshotText);
+
+      // 添加快捷选项
+      const quickActions = Array.isArray(mergedParsed.quick_actions) ? mergedParsed.quick_actions : [];
+      const optionsHtml = renderDynamicQuickActionsHtml(quickActions, 'panel');
 
     const refreshBtnHtml = `
       <div style="padding:2px 8px; border-bottom:1px solid rgba(128,128,128,0.2); margin-bottom:4px; text-align:right;">
@@ -7933,9 +10036,9 @@ function updateFloatingPanelBody(html) {
   }
 }
 
-function showFloatingRollLogs() {
-  const $body = $('#sg_floating_body');
-  if (!$body.length) return;
+  function showFloatingRollLogs() {
+    const $body = $('#sg_floating_body');
+    if (!$body.length) return;
 
   const meta = getSummaryMeta();
   const logs = Array.isArray(meta?.rollLogs) ? meta.rollLogs : [];
@@ -7974,12 +10077,32 @@ function showFloatingRollLogs() {
     `;
   }).join('');
 
-  $body.html(`<div style="padding:10px; overflow-y:auto; max-height:100%; box-sizing:border-box;">${html}</div>`);
-}
+    $body.html(`<div style="padding:10px; overflow-y:auto; max-height:100%; box-sizing:border-box;">${html}</div>`);
+  }
 
-function showFloatingReport() {
-  const $body = $('#sg_floating_body');
-  if (!$body.length) return;
+  function showFloatingMap() {
+    const $body = $('#sg_floating_body');
+    if (!$body.length) return;
+    const s = ensureSettings();
+    if (!s.mapEnabled) {
+      $body.html('<div class="sg-floating-loading">地图功能未启用</div>');
+      return;
+    }
+    const mapData = getMapData();
+    const html = renderGridMap(mapData);
+    const autoLabel = isMapAutoUpdateEnabled(s) ? '自动更新：开' : '自动更新：关';
+    const tools = `
+      <div style="padding:2px 8px; border-bottom:1px solid rgba(128,128,128,0.2); margin-bottom:4px; text-align:right;">
+        <button class="sg-inner-map-toggle-btn" title="切换自动更新" style="background:none; border:none; cursor:pointer; font-size:0.95em; opacity:0.85; margin-right:6px;">${autoLabel}</button>
+        <button class="sg-inner-map-reset-btn" title="重置地图" style="background:none; border:none; cursor:pointer; font-size:1.1em; opacity:0.8;">🗑</button>
+      </div>
+    `;
+    $body.html(`${tools}<div style="padding:10px; overflow:auto; max-height:100%; box-sizing:border-box;">${html}</div>`);
+  }
+
+  function showFloatingReport() {
+    const $body = $('#sg_floating_body');
+    if (!$body.length) return;
 
   // Use last cached content if available, otherwise show empty state
   if (lastFloatingContent) {
@@ -8083,6 +10206,7 @@ function injectFixedInputButton() {
 
 function init() {
   ensureSettings();
+  bindMapEventPanelHandler();
   setupEventListeners();
 
   const ctx = SillyTavern.getContext();
