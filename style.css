@@ -1385,30 +1385,228 @@ body.sg-zoom-lock {
 
 .sg-floating-panel {
   position: fixed;
-  bottom: 140px;
-  right: 20px;
-  width: 380px;
-  max-width: calc(100vw - 40px);
-  max-height: 60vh;
-  background: linear-gradient(180deg, rgba(30, 38, 48, 0.98) 0%, rgba(22, 28, 36, 0.99) 100%);
-  border: 1px solid rgba(100, 130, 160, 0.35);
+  right: 22px;
+  bottom: 22px;
+  width: min(430px, 92vw);
+  max-height: 78vh;
+  background: rgba(18, 18, 22, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 16px;
-  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
-  z-index: 2147483641;
-  display: flex;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+  overflow: hidden;
+  z-index: 99998;
+  display: none;
   flex-direction: column;
+  backdrop-filter: blur(10px);
+}
+
+.sg-floating-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.sg-floating-title-sm {
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.sg-floating-actions-mini {
+  display: flex;
+  gap: 6px;
+}
+
+.sg-floating-mini-btn {
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  padding: 4px 8px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.sg-floating-mini-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.sg-floating-section {
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.sg-floating-status {
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+
+.sg-floating-prompt {
+  padding: 8px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.25);
+  font-size: 0.85rem;
+  line-height: 1.4;
+  margin-bottom: 8px;
+  max-height: 120px;
+  overflow: auto;
+}
+
+.sg-floating-params {
+  padding: 8px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.18);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  margin-bottom: 8px;
+  opacity: 0.9;
+}
+
+.sg-floating-preview-collapsed {
+  display: none;
+}
+
+.sg-profile-row {
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.18);
+  margin-bottom: 10px;
+}
+
+.sg-profile-row .sg-field label {
+  font-size: 0.82rem;
+}
+
+#sg_imageGenProfiles {
+  margin-top: 8px;
+}
+
+.sg-profile-scale-controls .sg-btn {
+  min-width: 72px;
+  padding: 2px 8px;
+}
+
+
+.sg-profiles-collapsed {
+  max-height: 180px;
+  overflow: hidden;
+  position: relative;
+}
+
+.sg-profiles-collapsed::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 36px;
+  background: linear-gradient(to bottom, rgba(10, 12, 18, 0), rgba(10, 12, 18, 0.85));
+}
+
+.sg-floating-row-actions {
+  align-items: center;
+}
+
+.sg-floating-spacer {
+  flex: 1;
+}
+
+.sg-floating-image-wrap {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 140px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.sg-floating-image {
+  max-width: 100%;
+  max-height: 240px;
+  border-radius: 12px;
+}
+
+.sg-image-zoom {
+  cursor: zoom-in;
+}
+
+.sg-image-preview-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 12, 18, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
   opacity: 0;
   visibility: hidden;
-  transform: translateY(20px) scale(0.95);
-  transform: translateY(20px) scale(0.95);
-  transition: opacity 0.25s ease, transform 0.25s ease, visibility 0.25s ease;
+  transition: opacity 0.2s ease, visibility 0.2s ease;
+  z-index: 99999;
 }
+
+.sg-image-preview-backdrop.show {
+  opacity: 1;
+  visibility: visible;
+}
+
+.sg-image-preview-panel {
+  position: relative;
+  max-width: min(92vw, 1200px);
+  max-height: 92vh;
+  background: rgba(18, 20, 28, 0.92);
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
+}
+
+.sg-image-preview-panel img {
+  display: block;
+  max-width: 88vw;
+  max-height: 82vh;
+  border-radius: 10px;
+}
+
+.sg-image-preview-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 32px;
+  height: 32px;
+  border-radius: 16px;
+  border: none;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font-size: 20px;
+  line-height: 32px;
+  cursor: pointer;
+}
+
+.sg-image-preview-close:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+body.sg-image-preview-open {
+  overflow: hidden;
+}
+
+.sg-floating-empty {
+  padding: 12px;
+  opacity: 0.7;
+  text-align: center;
+}
+
 
 .sg-floating-panel.visible {
   opacity: 1;
   visibility: visible;
   transform: translateY(0) scale(1);
+  display: flex;
 }
+
 
 .sg-floating-header {
   display: flex;

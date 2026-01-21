@@ -28,6 +28,12 @@
 const SG_VERSION = '0.10.0';
 
 const MODULE_NAME = 'storyguide';
+const EXT_BASE_URL = (() => {
+  const src = document.currentScript?.src || '';
+  if (!src) return '';
+  return src.slice(0, src.lastIndexOf('/') + 1);
+})();
+
 
 /**
  * 模块配置格式（JSON 数组）示例：
@@ -62,6 +68,14 @@ const DEFAULT_SUMMARY_SYSTEM_PROMPT = `你是一个“剧情总结/世界书记�
 
 const DEFAULT_SUMMARY_USER_TEMPLATE = `【楼层范围】{{fromFloor}}-{{toFloor}}\n\n【对话片段】\n{{chunk}}`;
 
+const DEFAULT_MEGA_SUMMARY_SYSTEM_PROMPT = `你是一个“剧情大总结”助手。
+
+任务：
+1) 阅读多条剧情总结，输出一段更高层级的归纳（中文，200~600字，强调阶段性进展/主线变化/关键转折）。
+2) 提取 8~16 个关键词（人物/地点/势力/事件/关系等），用于世界书条目触发词。
+3) 只输出 JSON。`;
+const DEFAULT_MEGA_SUMMARY_USER_TEMPLATE = `【待汇总条目】\n{{items}}`;
+
 // 无论用户怎么自定义提示词，仍会强制追加 JSON 输出结构要求，避免写入世界书失败
 const SUMMARY_JSON_REQUIREMENT = `输出要求：\n- 只输出严格 JSON，不要 Markdown、不要代码块、不要任何多余文字。\n- JSON 结构必须为：{"title": string, "summary": string, "keywords": string[]}。\n- keywords 为 6~14 个词/短语，尽量去重、避免泛词。`;
 
@@ -85,7 +99,7 @@ const DEFAULT_INDEX_SYSTEM_PROMPT = `你是一个"剧情索引匹配"助手。
 
 【返回要求】
 - 返回条目数量应 <= maxPick
-- 分类控制：人物条目 <= maxCharacters，装备条目 <= maxEquipments，剧情条目 <= maxPlot`;
+- 分类控制：人物 <= maxCharacters，装备 <= maxEquipments，势力 <= maxFactions，成就 <= maxAchievements，副职业 <= maxSubProfessions，任务 <= maxQuests，剧情 <= maxPlot`;
 
 const DEFAULT_INDEX_USER_TEMPLATE = `【用户当前输入】
 {{userMessage}}
@@ -100,6 +114,10 @@ const DEFAULT_INDEX_USER_TEMPLATE = `【用户当前输入】
 - 总数不超过 {{maxPick}} 条
 - 人物条目不超过 {{maxCharacters}} 条
 - 装备条目不超过 {{maxEquipments}} 条
+- 势力条目不超过 {{maxFactions}} 条
+- 成就条目不超过 {{maxAchievements}} 条
+- 副职业条目不超过 {{maxSubProfessions}} 条
+- 任务条目不超过 {{maxQuests}} 条
 - 剧情条目不超过 {{maxPlot}} 条
 
 请从候选中选出与当前剧情最相关的条目，优先选择：与当前提到的人物/装备相关的条目、时间较久远的相关剧情。仅输出 JSON。`;
@@ -117,16 +135,19 @@ const DEFAULT_STRUCTURED_ENTRIES_SYSTEM_PROMPT = `你是一个"剧情记忆管�
 【任务】
 1. 识别本次对话中出现的重要 NPC（不含主角）
 2. 识别主角当前持有/装备的关键物品
-3. 识别主角新增或变化的能力
-4. 识别需要删除的条目（死亡的角色、卖掉/分解的装备等）
-5. 生成档案式的客观第三人称描述
+3. 识别剧情中出现/变化的重要势力
+4. 识别剧情中的成就记录
+5. 识别主角的副职业变化
+6. 识别当前或新增的任务记录
+7. 识别需要删除的条目（死亡的角色、卖掉/分解的装备等）
+8. 生成档案式的客观第三人称描述
 
 【筛选标准】
 - NPC：只记录有名有姓的角色，忽略杂兵、无名NPC、普通敌人
 - 装备：只记录绿色品质以上的装备，或紫色品质以上的重要物品
 
 【去重规则（重要）】
-- 仔细检查【已知人物列表】和【已知装备列表】，避免重复创建条目
+- 仔细检查【已知人物列表】、【已知装备列表】、【已知势力列表】、【已知成就列表】、【已知副职业列表】、【已知任务列表】，避免重复创建条目
 - 同一角色可能有多种写法（如繁体/简体、英文/中文翻译），必须识别为同一人
 - 如果发现角色已存在于列表中，使用 isUpdated=true 更新而不是创建新条目
 - 将不同名称写法添加到 aliases 数组中
@@ -134,7 +155,10 @@ const DEFAULT_STRUCTURED_ENTRIES_SYSTEM_PROMPT = `你是一个"剧情记忆管�
 【删除条目规则】
 - 若角色在对话中明确死亡/永久离开，将其加入 deletedCharacters 数组
 - 若装备被卖掉/分解/丢弃/彻底损坏，将其加入 deletedEquipments 数组
-- 若能力被遗忘/剥夺/彻底失效，将其加入 deletedAbilities 数组
+- 若势力解散/覆灭/被吞并，将其加入 deletedFactions 数组
+- 若成就被撤销/失效，将其加入 deletedAchievements 数组
+- 若副职业被放弃/失去，将其加入 deletedSubProfessions 数组
+- 若任务完成/失败/取消，将其加入 deletedQuests 数组
 
 【重要】
 - 若提供了 statData，请从中提取该角色/物品的**关键数值**（如属性、等级、状态），精简为1-2行
@@ -145,7 +169,9 @@ const DEFAULT_STRUCTURED_ENTRIES_SYSTEM_PROMPT = `你是一个"剧情记忆管�
 - 为每个重要NPC提取「核心性格」：不会因剧情发展而轻易改变的根本特质
 - 提取「角色动机」：该角色自己的目标/追求，不是围绕主角转
 - 评估「关系阶段」：陌生/初识/熟悉/信任/亲密，关系发展应循序渐进`;
-const DEFAULT_STRUCTURED_ENTRIES_USER_TEMPLATE = `【楼层范围】{{fromFloor}}-{{toFloor}}\\n【对话片段】\\n{{chunk}}\\n【已知人物列表】\\n{{knownCharacters}}\\n【已知装备列表】\\n{{knownEquipments}}`;
+const LEGACY_STRUCTURED_ENTRIES_USER_TEMPLATE_V1 = `【楼层范围】{{fromFloor}}-{{toFloor}}\\n【对话片段】\\n{{chunk}}\\n【已知人物列表】\\n{{knownCharacters}}\\n【已知装备列表】\\n{{knownEquipments}}`;
+const LEGACY_STRUCTURED_ENTRIES_USER_TEMPLATE_V2 = `【楼层范围】{{fromFloor}}-{{toFloor}}\\n【对话片段】\\n{{chunk}}\\n【已知人物列表】\\n{{knownCharacters}}\\n【已知装备列表】\\n{{knownEquipments}}\\n【已知势力列表】\\n{{knownFactions}}`;
+const DEFAULT_STRUCTURED_ENTRIES_USER_TEMPLATE = `【楼层范围】{{fromFloor}}-{{toFloor}}\\n【对话片段】\\n{{chunk}}\\n【已知人物列表】\\n{{knownCharacters}}\\n【已知装备列表】\\n{{knownEquipments}}\\n【已知势力列表】\\n{{knownFactions}}\\n【已知成就列表】\\n{{knownAchievements}}\\n【已知副职业列表】\\n{{knownSubProfessions}}\\n【已知任务列表】\\n{{knownQuests}}`;
 const DEFAULT_STRUCTURED_CHARACTER_PROMPT = `只记录有名有姓的重要NPC（不含主角），忽略杂兵、无名敌人、路人。
 
 【必填字段】阵营身份、性格特点、背景故事、与主角关系及发展、关键事件
@@ -157,16 +183,25 @@ const DEFAULT_STRUCTURED_CHARACTER_PROMPT = `只记录有名有姓的重要NPC�
 
 若角色死亡/永久离开，将其名字加入 deletedCharacters。若有 statData，在 statInfo 中精简总结。信息不足写"待确认"。`;
 const DEFAULT_STRUCTURED_EQUIPMENT_PROMPT = `只记录绿色品质以上的装备，或紫色品质以上的重要物品（忽略白色/灰色普通物品）。必须记录：获得时间、获得地点、来源（掉落/购买/锻造/奖励等）、当前状态。若有强化/升级，描述主角如何培养这件装备。若装备被卖掉/分解/丢弃/损坏，将其名字加入 deletedEquipments。若有 statData，精简总结其属性。`;
-const DEFAULT_STRUCTURED_ABILITY_PROMPT = `记录主角的能力/技能。说明类型、效果、触发条件、代价。若能力被遗忘/剥夺/失效，将其名字加入 deletedAbilities。若有 statData，精简总结其数值。`;
+const DEFAULT_STRUCTURED_FACTION_PROMPT = `记录重要势力/组织/阵营。说明性质、范围、领导者、理念、与主角关系、当前状态。若势力解散/覆灭/被吞并，将其名字加入 deletedFactions。若有 statData，精简总结其数值。`;
+const DEFAULT_STRUCTURED_ACHIEVEMENT_PROMPT = `记录主角获得的成就。说明达成条件、影响、获得时间与当前状态。若成就被撤销/失效，将其名字加入 deletedAchievements。若有 statData，精简总结其数值。`;
+const DEFAULT_STRUCTURED_SUBPROFESSION_PROMPT = `记录主角的副职业/第二职业。说明定位、等级/进度、核心技能、获得方式、当前状态。若副职业被放弃/失去，将其名字加入 deletedSubProfessions。若有 statData，精简总结其数值。`;
+const DEFAULT_STRUCTURED_QUEST_PROMPT = `记录任务/委托。说明目标、发布者、进度、奖励、期限/地点。若任务完成/失败/取消，将其名字加入 deletedQuests。若有 statData，精简总结其数值。`;
 const STRUCTURED_ENTRIES_JSON_REQUIREMENT = `输出要求：只输出严格 JSON。各字段要填写完整，statInfo 只填关键数值的精简总结（1-2行）。
 
-结构：{"characters":[...],"equipments":[...],"abilities":[...],"deletedCharacters":[...],"deletedEquipments":[...],"deletedAbilities":[...]}
+结构：{"characters":[...],"equipments":[...],"factions":[...],"achievements":[...],"subProfessions":[...],"quests":[...],"deletedCharacters":[...],"deletedEquipments":[...],"deletedFactions":[...],"deletedAchievements":[...],"deletedSubProfessions":[...],"deletedQuests":[...]}
 
 characters 条目结构：{name,uid,aliases[],faction,status,personality,corePersonality:"核心性格锚点（不轻易改变）",motivation:"角色独立动机/目标",relationshipStage:"陌生|初识|熟悉|信任|亲密",background,relationToProtagonist,keyEvents[],statInfo,isNew,isUpdated}
 
 equipments 条目结构：{name,uid,type,rarity,effects,source,currentState,statInfo,boundEvents[],isNew}
 
-abilities 条目结构：{name,uid,type,effects,trigger,cost,statInfo,boundEvents[],isNegative,isNew}`;
+factions 条目结构：{name,uid,aliases[],type,scope,leader,ideology,relationToProtagonist,status,keyEvents[],statInfo,isNew,isUpdated}
+
+achievements 条目结构：{name,uid,description,requirements,obtainedAt,status,effects,keyEvents[],statInfo,isNew,isUpdated}
+
+subProfessions 条目结构：{name,uid,role,level,progress,skills,source,status,keyEvents[],statInfo,isNew,isUpdated}
+
+quests 条目结构：{name,uid,goal,progress,status,issuer,reward,deadline,location,keyEvents[],statInfo,isNew,isUpdated}`;
 
 // ===== ROLL 判定默认配置 =====
 const DEFAULT_ROLL_ACTIONS = Object.freeze([
@@ -299,6 +334,9 @@ const DEFAULT_SETTINGS = Object.freeze({
 
   // 预设导入/导出
   presetIncludeApiKey: false,
+  imageGenPresetList: '[]',
+  imageGenPresetActive: '',
+
 
   // 世界书（World Info/Lorebook）导入与注入
   worldbookEnabled: false,
@@ -327,6 +365,13 @@ const DEFAULT_SETTINGS = Object.freeze({
   summaryProvider: 'st',
   summaryTemperature: 0.4,
 
+  // ===== 大总结 =====
+  megaSummaryEnabled: false,
+  megaSummaryEvery: 40,
+  megaSummarySystemPrompt: '',
+  megaSummaryUserTemplate: '',
+  megaSummaryCommentPrefix: '大总结',
+
   // 自定义总结提示词（可选）
   // - system：决定总结风格/重点
   // - userTemplate：决定如何把楼层范围/对话片段塞给模型（支持占位符）
@@ -342,8 +387,8 @@ const DEFAULT_SETTINGS = Object.freeze({
   // 总结结果写入世界书（Lorebook / World Info）
   // —— 绿灯世界书（关键词触发）——
   summaryToWorldInfo: true,
-  // chatbook=写入当前聊天绑定世界书；file=写入指定世界书文件名
-  summaryWorldInfoTarget: 'chatbook',
+  // 写入指定世界书文件名
+  summaryWorldInfoTarget: 'file',
   summaryWorldInfoFile: '',
   summaryWorldInfoCommentPrefix: '剧情总结',
 
@@ -360,7 +405,7 @@ const DEFAULT_SETTINGS = Object.freeze({
 
   // —— 蓝灯世界书（常开索引：给本插件做检索用）——
   // 注意：蓝灯世界书建议写入“指定世界书文件名”，因为 chatbook 通常只有一个。
-  summaryToBlueWorldInfo: false,
+  summaryToBlueWorldInfo: true,
   summaryBlueWorldInfoFile: '',
   summaryBlueWorldInfoCommentPrefix: '剧情总结',
 
@@ -407,6 +452,10 @@ const DEFAULT_SETTINGS = Object.freeze({
   // 分类最大索引数
   wiTriggerMaxCharacters: 2, // 最多索引多少个人物条目
   wiTriggerMaxEquipments: 2, // 最多索引多少个装备条目
+  wiTriggerMaxFactions: 2,
+  wiTriggerMaxAchievements: 2,
+  wiTriggerMaxSubProfessions: 2,
+  wiTriggerMaxQuests: 2,
   wiTriggerMaxPlot: 3,       // 最多索引多少个剧情条目（优先较久远的）
   // 相关度阈值（0~1，越大越严格）
   wiTriggerMinScore: 0.08,
@@ -457,19 +506,29 @@ const DEFAULT_SETTINGS = Object.freeze({
   customSystemPreamble: '',     // 附加在默认 system 之后
   customConstraints: '',        // 附加在默认 constraints 之后
 
-  // ===== 结构化世界书条目（人物/装备/能力） =====
+  // ===== 结构化世界书条目（人物/装备/势力/成就/副职业/任务） =====
   structuredEntriesEnabled: true,
   characterEntriesEnabled: true,
   equipmentEntriesEnabled: true,
-  abilityEntriesEnabled: false, // 默认关闭
+  factionEntriesEnabled: false, // 默认关闭
+  structuredReenableEntriesEnabled: false,
+  achievementEntriesEnabled: false,
+  subProfessionEntriesEnabled: false,
+  questEntriesEnabled: false,
   characterEntryPrefix: '人物',
   equipmentEntryPrefix: '装备',
-  abilityEntryPrefix: '能力',
+  factionEntryPrefix: '势力',
+  achievementEntryPrefix: '成就',
+  subProfessionEntryPrefix: '副职业',
+  questEntryPrefix: '任务',
   structuredEntriesSystemPrompt: '',
   structuredEntriesUserTemplate: '',
   structuredCharacterPrompt: '',
   structuredEquipmentPrompt: '',
-  structuredAbilityPrompt: '',
+  structuredFactionPrompt: '',
+  structuredAchievementPrompt: '',
+  structuredSubProfessionPrompt: '',
+  structuredQuestPrompt: '',
 
   // ===== 快捷选项功能 =====
   quickOptionsEnabled: true,
@@ -511,6 +570,92 @@ const DEFAULT_SETTINGS = Object.freeze({
       { "location": "地点名", "event": "事件描述", "tags": ["任务"] }
     ]
   }`,
+
+  // ===== 图像生成模块 =====
+  imageGenEnabled: false,
+  novelaiApiKey: '',
+  novelaiModel: 'nai-diffusion-4-5-full', // V4.5 Full | V4 Full | V4 Curated | V3
+  novelaiResolution: '832x1216', // 默认立绘尺寸
+  novelaiSteps: 28,
+  novelaiScale: 5,
+  novelaiSampler: 'k_euler',
+  novelaiFixedSeedEnabled: false,
+  novelaiFixedSeed: 0,
+  novelaiLegacy: true,
+  novelaiCfgRescale: 0,
+  novelaiNoiseSchedule: 'native',
+  novelaiVarietyBoost: false,
+  novelaiNegativePrompt: 'lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry',
+
+  imageGenAutoSave: false,
+  imageGenSavePath: '',
+  imageGenLookbackMessages: 5,
+  imageGenReadStatData: false,
+  imageGenStatVarName: 'stat_data',
+  imageGenLlmProvider: 'custom', // custom
+  imageGenCustomEndpoint: '',
+  imageGenCustomApiKey: '',
+  imageGenCustomModel: 'gpt-4o-mini',
+  imageGenCustomMaxTokens: 1024,
+
+  imageGenSystemPrompt: `你是专业的 AI 绘画提示词生成器。根据提供的故事内容，分析场景或角色，只输出 Novel AI 可用的 Danbooru 标签。
+
+目标：尽可能完整地还原正文中出现的角色/场景细节，让标签更丰富、更具体。
+
+要求：
+1. 仅输出英文标签，逗号分隔；不要解释、不要额外文字
+2. positive / negative 字段必须是标签串（只给 Novel AI 看）
+3. 标签要“多且具体”，优先补齐以下信息：
+   - 角色：发色/瞳色/发型/发长、体型、年龄段、肤色、表情、动作、姿势、服装材质/风格/配饰、鞋袜、武器/道具
+   - 场景：地点类型、建筑/室内外、时间(白天/夜晚/黄昏)、天气、光照/光影、氛围、主色调、构图视角/镜头距离
+4. 若正文信息不足，使用常见合理标签补全（如 light rays, depth of field, cinematic lighting），但不要臆造关键设定
+5. 标签按重要性排序，重要的放前面；避免重复
+6. 如果是角色，以 "1girl" 或 "1boy" 等人数标签开头
+7. 如果是场景，以场景类型标签开头（如 scenery, landscape, indoor）
+8. 输出严格 JSON，不要 Markdown、不要代码块
+
+输出格式：
+{
+  "type": "character" 或 "scene",
+  "subject": "简短中文描述生成对象（如：黑发少女战斗姿态）",
+  "positive": "1girl, long black hair, red eyes, ...",
+  "negative": "额外的负面标签（可选，留空则使用默认）"
+}`,
+  imageGenArtistPromptEnabled: true,
+  imageGenArtistPrompt: '5::masterpiece, best quality ::, 3.65::3D, realistic, photorealistic ::,2.25::Artist:bm94199 ::,1.85::Artist:yueko (jiayue wu) ::,1.35::Artist:ruanjia ::,1.35::Artist:wo_jiushi_kanbudong ::,1.05::artist:seven_(sixplusone) ::,1.05::Artist:slash (slash-soft) ::,0.85::Artist:shal.e ::,0.75::Artist:nixeu ::,0.55::Artist:billyhhyb ::,-5::2D ::,-1::vivid::, year2025, cinematic , 0.9::lighting, volumetric lighting, no text, realistic, photo, real, artbook ::, 0.2::monochrome ::, 1.2::small eyes ::, 0.8::clean, normal ::,',
+  imageGenPromptRulesEnabled: false,
+  imageGenPromptRules: '',
+  imageGenCharacterProfilesEnabled: false,
+  imageGenCharacterProfiles: [],
+  imageGenProfilesExpanded: false,
+  imageGenBatchEnabled: true,
+  imageGenBatchPatterns: JSON.stringify([
+    { label: '剧情-1', type: 'story', detail: '正文第一段的代表性画面' },
+    { label: '剧情-2', type: 'story', detail: '正文第二段的代表性画面' },
+    { label: '剧情-3', type: 'story', detail: '正文第三段的代表性画面' },
+    { label: '剧情-4', type: 'story', detail: '正文第四段的代表性画面' },
+    { label: '剧情-5', type: 'story', detail: '正文第五段的代表性画面' },
+    { label: '单人-近景', type: 'character_close', detail: '单人女性近景特写，强调脸部与表情' },
+    { label: '单人-全身', type: 'character_full', detail: '单人女性全身立绘，展示服装与姿态' },
+    { label: '双人', type: 'duo', detail: '双人同框互动，突出动作关系与情绪交流' },
+    { label: '场景', type: 'scene', detail: '场景为主，强调空间、环境细节与氛围光影' },
+    { label: '彩蛋', type: 'bonus', detail: '当前角色/场景做与剧情无关的轻松行为，自由发挥' },
+    { label: '自定义-1', type: 'custom_female_1', detail: '使用自定义女性提示词 1' },
+    { label: '自定义-2', type: 'custom_female_2', detail: '使用自定义女性提示词 2' }
+  ], null, 2),
+
+
+
+  // 在线图库设置
+  imageGalleryEnabled: false,
+  imageGalleryUrl: '',
+  imageGalleryCache: [],
+  imageGalleryCacheTime: 0,
+  imageGalleryMatchPrompt: '你是图片选择助手。根据故事内容，从图库中选择最合适的图片。规则：1.优先匹配角色名称 2.其次匹配场景类型 3.再匹配情绪/氛围。输出JSON：{"matchedId":"图片id","reason":"匹配原因"}',
+
+  imageGenCharacterProfilesEnabled: false,
+  imageGenCharacterProfiles: [],
+
 });
 
 const META_KEYS = Object.freeze({
@@ -534,6 +679,18 @@ let summaryTimer = null;
 let isSummarizing = false;
 let summaryCancelled = false;
 let sgToastTimer = null;
+
+// 图像生成批次状态（悬浮面板）
+let imageGenBatchPrompts = [];
+let imageGenBatchIndex = 0;
+let imageGenImageUrls = [];
+let imageGenPreviewIndex = 0;
+let imageGenBatchStatus = '';
+let imageGenBatchBusy = false;
+let lastNovelaiPayload = null;
+let imageGenPreviewExpanded = true;
+
+
 
 // 蓝灯索引“实时读取”缓存（防止每条消息都请求一次）
 let blueIndexLiveCache = { file: '', loadedAt: 0, entries: [], lastError: '' };
@@ -612,6 +769,53 @@ function ensureSettings() {
       saveSettingsDebounced();
     }
   }
+  // 迁移：删除了 chatbook 选项，强制使用 file 模式
+  if (extensionSettings[MODULE_NAME].summaryWorldInfoTarget === 'chatbook') {
+    extensionSettings[MODULE_NAME].summaryWorldInfoTarget = 'file';
+    saveSettingsDebounced();
+  }
+  // 迁移：蓝灯世界书默认开启
+  if (extensionSettings[MODULE_NAME].summaryToBlueWorldInfo === false) {
+    extensionSettings[MODULE_NAME].summaryToBlueWorldInfo = true;
+    saveSettingsDebounced();
+  }
+
+  // 迁移：结构化条目从“能力”改为“势力”
+  let factionSettingsMigrated = false;
+  if (extensionSettings[MODULE_NAME].factionEntriesEnabled === undefined && extensionSettings[MODULE_NAME].abilityEntriesEnabled !== undefined) {
+    extensionSettings[MODULE_NAME].factionEntriesEnabled = extensionSettings[MODULE_NAME].abilityEntriesEnabled;
+    factionSettingsMigrated = true;
+  }
+  if (extensionSettings[MODULE_NAME].factionEntryPrefix === undefined && extensionSettings[MODULE_NAME].abilityEntryPrefix) {
+    extensionSettings[MODULE_NAME].factionEntryPrefix = extensionSettings[MODULE_NAME].abilityEntryPrefix;
+    factionSettingsMigrated = true;
+  }
+  if (!extensionSettings[MODULE_NAME].structuredFactionPrompt && extensionSettings[MODULE_NAME].structuredAbilityPrompt) {
+    extensionSettings[MODULE_NAME].structuredFactionPrompt = extensionSettings[MODULE_NAME].structuredAbilityPrompt;
+    factionSettingsMigrated = true;
+  }
+  if (factionSettingsMigrated) saveSettingsDebounced();
+
+  // 迁移：批量提示词模板更新（仅在仍为旧模板或为空时）
+  const batchRaw = String(extensionSettings[MODULE_NAME].imageGenBatchPatterns || '').trim();
+  const isOldBatch = batchRaw && batchRaw.includes('单人-1') && !batchRaw.includes('单人-近景');
+  if (!batchRaw || isOldBatch) {
+    extensionSettings[MODULE_NAME].imageGenBatchPatterns = DEFAULT_SETTINGS.imageGenBatchPatterns;
+    saveSettingsDebounced();
+  }
+
+  // 迁移：结构化提取模板补充更多条目列表
+  const structuredTpl = String(extensionSettings[MODULE_NAME].structuredEntriesUserTemplate || '').trim();
+  const isLegacyStructuredTpl = (
+    !structuredTpl
+    || structuredTpl === LEGACY_STRUCTURED_ENTRIES_USER_TEMPLATE_V1
+    || structuredTpl === LEGACY_STRUCTURED_ENTRIES_USER_TEMPLATE_V2
+  );
+  if (isLegacyStructuredTpl) {
+    extensionSettings[MODULE_NAME].structuredEntriesUserTemplate = DEFAULT_STRUCTURED_ENTRIES_USER_TEMPLATE;
+    saveSettingsDebounced();
+  }
+
   return extensionSettings[MODULE_NAME];
 }
 
@@ -739,7 +943,7 @@ function renderTemplate(tpl, vars = {}) {
 function safeJsonParse(maybeJson) {
   if (!maybeJson) return null;
   let t = String(maybeJson).trim();
-  t = t.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+  t = t.replace(/^```(?: json) ? /i, '').replace(/```$/i, '').trim();
   const first = t.indexOf('{');
   const last = t.lastIndexOf('}');
   if (first !== -1 && last !== -1 && last > first) t = t.slice(first, last + 1);
@@ -756,6 +960,51 @@ function parseJsonArrayAttr(maybeJsonArray) {
     return [];
   }
 }
+
+function applyPromptRules(text, rulesText) {
+  const input = String(text || '');
+  const raw = String(rulesText || '').trim();
+  if (!raw) return input;
+
+  const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#') && !l.startsWith('//'));
+  if (!lines.length) return input;
+
+  let output = input;
+  for (const line of lines) {
+    const eq = line.indexOf('=');
+    if (eq === -1) continue;
+    const trigger = line.slice(0, eq).trim();
+    const rest = line.slice(eq + 1).trim();
+    if (!trigger || !rest) continue;
+
+    const pipe = rest.indexOf('|');
+    const action = pipe === -1 ? 'replace' : rest.slice(0, pipe).trim();
+    const payload = pipe === -1 ? rest : rest.slice(pipe + 1).trim();
+    if (!payload) continue;
+
+    const escapedTrigger = trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(escapedTrigger, 'gi');
+
+    if (action === '前置前') {
+      output = output.replace(re, (match) => `${payload}, ${match}`);
+    } else if (action === '前置后') {
+      output = output.replace(re, (match) => `${match}, ${payload}`);
+    } else if (action === '后置前') {
+      output = output.replace(re, (match) => `${payload}, ${match}`);
+    } else if (action === '后置后') {
+      output = output.replace(re, (match) => `${match}, ${payload}`);
+    } else if (action === '最后置' || action === '末尾') {
+      if (re.test(output)) output = `${output}, ${payload}`;
+    } else if (action === '替换') {
+      output = output.replace(re, payload);
+    } else {
+      output = output.replace(re, payload);
+    }
+  }
+
+  return output;
+}
+
 
 function normalizeMapName(name) {
   let out = String(name || '').replace(/\s+/g, ' ').trim();
@@ -869,14 +1118,14 @@ function bindMapEventPanelHandler() {
   if (sgMapEventHandlerBound) return;
   sgMapEventHandlerBound = true;
 
-    $(document).on('click', '.sg-map-location', (e) => {
-      const $cell = $(e.currentTarget);
-      const $wrap = $cell.closest('.sg-map-wrapper');
-      let $panel = $wrap.find('.sg-map-event-panel');
-      if (!$panel.length) {
-        $wrap.append('<div class="sg-map-event-panel"></div>');
-        $panel = $wrap.find('.sg-map-event-panel');
-      }
+  $(document).on('click', '.sg-map-location', (e) => {
+    const $cell = $(e.currentTarget);
+    const $wrap = $cell.closest('.sg-map-wrapper');
+    let $panel = $wrap.find('.sg-map-event-panel');
+    if (!$panel.length) {
+      $wrap.append('<div class="sg-map-event-panel"></div>');
+      $panel = $wrap.find('.sg-map-event-panel');
+    }
 
     const name = String($cell.attr('data-name') || '').trim();
     const desc = String($cell.attr('data-desc') || '').trim();
@@ -885,65 +1134,65 @@ function bindMapEventPanelHandler() {
     const events = parseJsonArrayAttr($cell.attr('data-events'));
 
     const headerBits = [];
-    if (name) headerBits.push(`<span class="sg-map-event-title">${escapeHtml(name)}</span>`);
-    if (layer) headerBits.push(`<span class="sg-map-event-chip">${escapeHtml(layer)}</span>`);
-    if (group) headerBits.push(`<span class="sg-map-event-chip">${escapeHtml(group)}</span>`);
-      const header = headerBits.length ? `<div class="sg-map-event-header">${headerBits.join('')}</div>` : '';
-      const descHtml = desc ? `<div class="sg-map-event-desc">${escapeHtml(desc)}</div>` : '';
+    if (name) headerBits.push(`<span class= "sg-map-event-title" > ${escapeHtml(name)}</span> `);
+    if (layer) headerBits.push(`<span class= "sg-map-event-chip" > ${escapeHtml(layer)}</span> `);
+    if (group) headerBits.push(`<span class= "sg-map-event-chip" > ${escapeHtml(group)}</span> `);
+    const header = headerBits.length ? `<div class= "sg-map-event-header" > ${headerBits.join('')}</div> ` : '';
+    const descHtml = desc ? `<div class= "sg-map-event-desc" > ${escapeHtml(desc)}</div> ` : '';
 
-      let listHtml = '';
-      if (events.length) {
+    let listHtml = '';
+    if (events.length) {
       const items = events.map((ev) => {
         const text = escapeHtml(String(ev?.text || ev?.event || ev || '').trim());
         const tags = Array.isArray(ev?.tags) ? ev.tags : [];
         const tagsHtml = tags.length
-          ? `<span class="sg-map-event-tags">${tags.map(t => `<span class="sg-map-event-tag">${escapeHtml(String(t || ''))}</span>`).join('')}</span>`
+          ? `<span class= "sg-map-event-tags" > ${tags.map(t => `<span class="sg-map-event-tag">${escapeHtml(String(t || ''))}</span>`).join('')}</span> `
           : '';
-        return `<li><span class="sg-map-event-text">${text || '（无内容）'}</span>${tagsHtml}</li>`;
+        return `<li > <span class="sg-map-event-text">${text || '（无内容）'}</span>${tagsHtml}</li> `;
       }).join('');
-      listHtml = `<ul class="sg-map-event-list">${items}</ul>`;
+      listHtml = `<ul class= "sg-map-event-list" > ${items}</ul> `;
     } else {
       listHtml = '<div class="sg-map-event-empty">暂无事件</div>';
     }
 
-      const deleteBtn = name
-        ? `<button class="sg-map-event-delete" data-name="${escapeHtml(name)}">删除地点</button>`
-        : '';
-      $panel.html(`${header}${descHtml}${listHtml}${deleteBtn}`);
-      $panel.addClass('sg-map-event-panel--floating');
-    });
+    const deleteBtn = name
+      ? `<button class= "sg-map-event-delete" data-name="${escapeHtml(name)}" > 删除地点</button> `
+      : '';
+    $panel.html(`${header}${descHtml}${listHtml}${deleteBtn}`);
+    $panel.addClass('sg-map-event-panel--floating');
+  });
 
-    $(document).on('click', '.sg-map-wrapper', (e) => {
-      if ($(e.target).closest('.sg-map-location, .sg-map-event-panel').length) return;
-      const $wrap = $(e.currentTarget);
-      $wrap.find('.sg-map-event-panel').remove();
-    });
+  $(document).on('click', '.sg-map-wrapper', (e) => {
+    if ($(e.target).closest('.sg-map-location, .sg-map-event-panel').length) return;
+    const $wrap = $(e.currentTarget);
+    $wrap.find('.sg-map-event-panel').remove();
+  });
 
-    $(document).on('click', '.sg-map-event-delete', async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const name = String($(e.currentTarget).attr('data-name') || '').trim();
-      if (!name) return;
-      try {
-        const map = getMapData();
-        const key = map.locations?.[name] ? name : (normalizeMapName(name) ? Array.from(Object.keys(map.locations || {})).find(k => normalizeMapName(k) === normalizeMapName(name)) : null);
-        if (key && map.locations && map.locations[key]) {
-          delete map.locations[key];
-        }
-        for (const loc of Object.values(map.locations || {})) {
-          if (!Array.isArray(loc.connections)) continue;
-          loc.connections = loc.connections.filter(c => normalizeMapName(c) !== normalizeMapName(name));
-        }
-        if (map.protagonistLocation && normalizeMapName(map.protagonistLocation) === normalizeMapName(name)) {
-          map.protagonistLocation = '';
-        }
-        await setMapData(map);
-        updateMapPreview();
-      } catch (err) {
-        console.warn('[StoryGuide] delete map location failed:', err);
+  $(document).on('click', '.sg-map-event-delete', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const name = String($(e.currentTarget).attr('data-name') || '').trim();
+    if (!name) return;
+    try {
+      const map = getMapData();
+      const key = map.locations?.[name] ? name : (normalizeMapName(name) ? Array.from(Object.keys(map.locations || {})).find(k => normalizeMapName(k) === normalizeMapName(name)) : null);
+      if (key && map.locations && map.locations[key]) {
+        delete map.locations[key];
       }
-    });
-  }
+      for (const loc of Object.values(map.locations || {})) {
+        if (!Array.isArray(loc.connections)) continue;
+        loc.connections = loc.connections.filter(c => normalizeMapName(c) !== normalizeMapName(name));
+      }
+      if (map.protagonistLocation && normalizeMapName(map.protagonistLocation) === normalizeMapName(name)) {
+        map.protagonistLocation = '';
+      }
+      await setMapData(map);
+      updateMapPreview();
+    } catch (err) {
+      console.warn('[StoryGuide] delete map location failed:', err);
+    }
+  });
+}
 
 function showMapPopover($cell) {
   const name = String($cell.attr('data-name') || '').trim();
@@ -951,11 +1200,11 @@ function showMapPopover($cell) {
   const events = parseJsonArrayAttr($cell.attr('data-events'));
 
   const parts = [];
-  if (name) parts.push(`<div class="sg-map-popover-title">${escapeHtml(name)}</div>`);
-  if (desc) parts.push(`<div class="sg-map-popover-desc">${escapeHtml(desc)}</div>`);
+  if (name) parts.push(`<div class= "sg-map-popover-title" > ${escapeHtml(name)}</div> `);
+  if (desc) parts.push(`<div class= "sg-map-popover-desc" > ${escapeHtml(desc)}</div> `);
   if (events.length) {
-    const items = events.map(e => `<li>${escapeHtml(String(e || ''))}</li>`).join('');
-    parts.push(`<div class="sg-map-popover-events"><div class="sg-map-popover-label">事件</div><ul>${items}</ul></div>`);
+    const items = events.map(e => `<li > ${escapeHtml(String(e || ''))}</li> `).join('');
+    parts.push(`<div class="sg-map-popover-events" ><div class="sg-map-popover-label">事件</div><ul>${items}</ul></div> `);
   } else {
     parts.push('<div class="sg-map-popover-empty">暂无事件</div>');
   }
@@ -995,16 +1244,16 @@ function showMapPopover($cell) {
     if (left > maxLeft) left = maxLeft;
     if (top < 8) top = 8;
     if (top > maxTop) top = maxTop;
-    pop.style.left = `${Math.round(left)}px`;
-    pop.style.top = `${Math.round(top)}px`;
+    pop.style.left = `${Math.round(left)} px`;
+    pop.style.top = `${Math.round(top)} px`;
   } else {
     let left = rect.left + rect.width / 2 - popRect.width / 2;
     let top = rect.top - popRect.height - 8;
     if (top < 8) top = rect.bottom + 8;
     if (left < 8) left = 8;
     if (left + popRect.width > window.innerWidth - 8) left = window.innerWidth - popRect.width - 8;
-    pop.style.left = `${Math.round(left)}px`;
-    pop.style.top = `${Math.round(top)}px`;
+    pop.style.left = `${Math.round(left)} px`;
+    pop.style.top = `${Math.round(top)} px`;
   }
 
   pop.style.visibility = 'visible';
@@ -1025,10 +1274,10 @@ function getQuickOptions() {
     if (!Array.isArray(arr)) return [];
     return arr.map((item, i) => {
       if (Array.isArray(item)) {
-        return { label: String(item[0] || `选项${i + 1}`), prompt: String(item[1] || '') };
+        return { label: String(item[0] || `选项${i + 1} `), prompt: String(item[1] || '') };
       }
       if (item && typeof item === 'object') {
-        return { label: String(item.label || `选项${i + 1}`), prompt: String(item.prompt || '') };
+        return { label: String(item.label || `选项${i + 1} `), prompt: String(item.prompt || '') };
       }
       return null;
     }).filter(Boolean);
@@ -1081,12 +1330,12 @@ function renderQuickOptionsHtml(context = 'inline') {
   if (!options.length) return '';
 
   const buttons = options.map((opt, i) => {
-    const label = escapeHtml(opt.label || `选项${i + 1}`);
+    const label = escapeHtml(opt.label || `选项${i + 1} `);
     const prompt = escapeHtml(opt.prompt || '');
     return `<button class="sg-quick-option" data-sg-prompt="${prompt}" title="${prompt}">${label}</button>`;
   }).join('');
 
-  return `<div class="sg-quick-options">${buttons}</div>`;
+  return `<div class="sg-quick-options" > ${buttons}</div> `;
 }
 
 // 渲染AI生成的动态快捷选项（从分析结果的quick_actions数组生成按钮，直接显示选项内容）
@@ -1113,10 +1362,10 @@ function renderDynamicQuickActionsHtml(quickActions, context = 'inline') {
 
   if (!buttons) return '';
 
-  return `<div class="sg-quick-options sg-dynamic-options">
-    <div class="sg-quick-options-title">💡 快捷选项（点击输入）</div>
+  return `<div class="sg-quick-options sg-dynamic-options" >
+  <div class="sg-quick-options-title">💡 快捷选项（点击输入）</div>
     ${buttons}
-  </div>`;
+  </div> `;
 }
 
 function installQuickOptionsClickHandler() {
@@ -1163,16 +1412,23 @@ function getDefaultSummaryMeta() {
     lastChatLen: 0,
     // 用于“索引编号触发”（A-001/A-002…）的递增计数器（按聊天存储）
     nextIndex: 1,
+    megaSummaryCount: 0,
     history: [], // [{title, summary, keywords, createdAt, range:{fromFloor,toFloor,fromIdx,toIdx}, worldInfo:{file,uid}}]
     wiTriggerLogs: [], // [{ts,userText,picked:[{title,score,keywordsPreview}], injectedKeywords, lookback, style, tag}]
     rollLogs: [], // [{ts, action, summary, final, success, userText}]
     // 结构化条目缓存（用于去重与更新 - 方案C混合策略）
     characterEntries: {}, // { uid: { name, aliases, lastUpdated, wiEntryUid, content } }
     equipmentEntries: {}, // { uid: { name, aliases, lastUpdated, wiEntryUid, content } }
-    abilityEntries: {}, // { uid: { name, lastUpdated, wiEntryUid, content } }
+    factionEntries: {}, // { uid: { name, lastUpdated, wiEntryUid, content } }
+    achievementEntries: {}, // { uid: { name, lastUpdated, wiEntryUid, content } }
+    subProfessionEntries: {}, // { uid: { name, lastUpdated, wiEntryUid, content } }
+    questEntries: {}, // { uid: { name, lastUpdated, wiEntryUid, content } }
     nextCharacterIndex: 1, // NPC-001, NPC-002...
     nextEquipmentIndex: 1, // EQP-001, EQP-002...
-    nextAbilityIndex: 1, // ABL-001, ABL-002...
+    nextFactionIndex: 1, // FCT-001, FCT-002...
+    nextAchievementIndex: 1, // ACH-001, ACH-002...
+    nextSubProfessionIndex: 1, // SUB-001, SUB-002...
+    nextQuestIndex: 1, // QUE-001, QUE-002...
   };
 }
 
@@ -1182,13 +1438,20 @@ function getSummaryMeta() {
   try {
     const data = JSON.parse(raw);
     if (!data || typeof data !== 'object') return getDefaultSummaryMeta();
-    return {
+    const merged = {
       ...getDefaultSummaryMeta(),
       ...data,
       history: Array.isArray(data.history) ? data.history : [],
       wiTriggerLogs: Array.isArray(data.wiTriggerLogs) ? data.wiTriggerLogs : [],
       rollLogs: Array.isArray(data.rollLogs) ? data.rollLogs : [],
     };
+    if (!Object.hasOwn(data, 'factionEntries') && data.abilityEntries) {
+      merged.factionEntries = data.abilityEntries;
+    }
+    if (!Object.hasOwn(data, 'nextFactionIndex') && data.nextAbilityIndex) {
+      merged.nextFactionIndex = data.nextAbilityIndex;
+    }
+    return merged;
   } catch {
     return getDefaultSummaryMeta();
   }
@@ -1270,15 +1533,15 @@ function getMapSchema() {
         type: 'array',
         items: {
           type: 'object',
-            properties: {
-              name: { type: 'string' },
-              description: { type: 'string' },
-              connectedTo: { type: 'array', items: { type: 'string' } },
-              group: { type: 'string' },
-              layer: { type: 'string' },
-              row: { type: 'number' },
-              col: { type: 'number' },
-            },
+          properties: {
+            name: { type: 'string' },
+            description: { type: 'string' },
+            connectedTo: { type: 'array', items: { type: 'string' } },
+            group: { type: 'string' },
+            layer: { type: 'string' },
+            row: { type: 'number' },
+            col: { type: 'number' },
+          },
           required: ['name'],
           additionalProperties: true,
         },
@@ -1287,11 +1550,11 @@ function getMapSchema() {
         type: 'array',
         items: {
           type: 'object',
-            properties: {
-              location: { type: 'string' },
-              event: { type: 'string' },
-              tags: { type: 'array', items: { type: 'string' } },
-            },
+          properties: {
+            location: { type: 'string' },
+            event: { type: 'string' },
+            tags: { type: 'array', items: { type: 'string' } },
+          },
           required: ['location', 'event'],
           additionalProperties: true,
         },
@@ -1340,14 +1603,14 @@ async function updateMapFromSnapshot(snapshotText) {
         parsed = parseMapLLMResponse(retryText);
       } catch { /* ignore */ }
     }
-      if (!parsed) return;
+    if (!parsed) return;
 
-      if (parsed?.newLocations) {
-        parsed.newLocations = normalizeNewLocations(parsed.newLocations);
-      }
-      parsed = ensureMapMinimums(parsed);
+    if (parsed?.newLocations) {
+      parsed.newLocations = normalizeNewLocations(parsed.newLocations);
+    }
+    parsed = ensureMapMinimums(parsed);
 
-      const merged = mergeMapData(getMapData(), parsed);
+    const merged = mergeMapData(getMapData(), parsed);
     await setMapData(merged);
     updateMapPreview();
   } catch (e) {
@@ -1432,11 +1695,11 @@ function ensureMapMinimums(parsed) {
   if (addCount > 0) {
     const baseName = out.currentLocation ? `${out.currentLocation}·待探索` : '待探索地点';
     for (let i = 0; i < addCount; i++) {
-      let name = `${baseName}${i + 1}`;
+      let name = `${baseName}${i + 1} `;
       let n = 1;
       while (existingNames.has(name)) {
         n += 1;
-        name = `${baseName}${i + 1}-${n}`;
+        name = `${baseName}${i + 1} -${n} `;
       }
       existingNames.add(name);
       out.newLocations.push({
@@ -1505,7 +1768,7 @@ function formatMapEventText(evt) {
   const text = typeof evt === 'string' ? evt : String(evt?.text || evt?.event || '').trim();
   const tags = Array.isArray(evt?.tags) ? evt.tags : [];
   const tagText = tags.length ? ` [${tags.join('/')}]` : '';
-  return `${text}${tagText}`.trim();
+  return `${text}${tagText} `.trim();
 }
 
 
@@ -1624,7 +1887,7 @@ function mergeMapData(existingMap, newData) {
 function findAdjacentGridPosition(map, baseRow, baseCol) {
   const occupied = new Set();
   for (const loc of Object.values(map.locations)) {
-    occupied.add(`${loc.row},${loc.col}`);
+    occupied.add(`${loc.row},${loc.col} `);
   }
   const candidates = [
     { row: baseRow - 1, col: baseCol },
@@ -1638,7 +1901,7 @@ function findAdjacentGridPosition(map, baseRow, baseCol) {
   ];
   for (const pos of candidates) {
     if (pos.row < 0 || pos.col < 0) continue;
-    if (!occupied.has(`${pos.row},${pos.col}`)) return pos;
+    if (!occupied.has(`${pos.row},${pos.col} `)) return pos;
   }
   return findNextGridPosition(map);
 }
@@ -1656,12 +1919,12 @@ function ensureGridSize(map, row, col) {
 function findNextGridPosition(map) {
   const occupied = new Set();
   for (const loc of Object.values(map.locations)) {
-    occupied.add(`${loc.row},${loc.col}`);
+    occupied.add(`${loc.row},${loc.col} `);
   }
 
   for (let r = 0; r < map.gridSize.rows; r++) {
     for (let c = 0; c < map.gridSize.cols; c++) {
-      if (!occupied.has(`${r},${c}`)) {
+      if (!occupied.has(`${r},${c} `)) {
         return { row: r, col: c };
       }
     }
@@ -1674,7 +1937,7 @@ function findNextGridPosition(map) {
 // 渲染网格地图为 HTML（纯 HTML/CSS 网格）
 function renderGridMap(mapData) {
   if (!mapData || Object.keys(mapData.locations).length === 0) {
-    return `<div class="sg-map-empty">暂无地图数据。开启地图功能并进行剧情分析后，地图将自动生成。</div>`;
+    return `<div class="sg-map-empty" > 暂无地图数据。开启地图功能并进行剧情分析后，地图将自动生成。</div> `;
   }
 
   const locList = Object.values(mapData.locations);
@@ -1728,13 +1991,13 @@ function renderGridMap(mapData) {
   }
 
   // 渲染 HTML（使用 CSS Grid）
-  const gridInlineStyle = `display:grid;grid-template-columns:repeat(${cols},80px);grid-auto-rows:50px;gap:4px;justify-content:center;`;
+  const gridInlineStyle = `display: grid; grid-template-columns: repeat(${cols}, 80px); grid-auto-rows: 50px; gap: 4px; justify-content: center; `;
   const baseCellStyle = 'width:80px;height:50px;border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:11px;text-align:center;position:relative;';
   const emptyCellStyle = baseCellStyle + 'background:rgba(255,255,255,0.03);border:1px dashed rgba(255,255,255,0.08);';
   const locationBaseStyle = baseCellStyle + 'background:rgba(100,150,200,0.2);border:1px solid rgba(100,150,200,0.35);';
 
-  let html = `<div class="sg-map-wrapper">`;
-  html += `<div class="sg-map-grid" style="--sg-map-cols:${cols};${gridInlineStyle}">`;
+  let html = `<div class="sg-map-wrapper" > `;
+  html += `<div class="sg-map-grid" style= "--sg-map-cols:${cols};${gridInlineStyle}" > `;
 
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
@@ -1747,39 +2010,39 @@ function renderGridMap(mapData) {
         if (hasEvents) classes.push('sg-map-has-events');
         if (!cell.visited) classes.push('sg-map-unvisited');
 
-          const eventList = hasEvents ? cell.events.map(e => `• ${formatMapEventText(e)}`).join('\n') : '';
-          const tooltip = `${cell.name}${cell.description ? '\n' + cell.description : ''}${eventList ? '\n---\n' + eventList : ''}`;
+        const eventList = hasEvents ? cell.events.map(e => `• ${formatMapEventText(e)} `).join('\n') : '';
+        const tooltip = `${cell.name}${cell.description ? '\n' + cell.description : ''}${eventList ? '\n---\n' + eventList : ''} `;
 
         let inlineStyle = locationBaseStyle;
         if (isProtagonist) inlineStyle += 'background:rgba(100,200,100,0.25);border-color:rgba(100,200,100,0.5);box-shadow:0 0 8px rgba(100,200,100,0.3);';
         if (hasEvents) inlineStyle += 'border-color:rgba(255,180,80,0.5);';
         if (!cell.visited) inlineStyle += 'background:rgba(255,255,255,0.05);border-color:rgba(255,255,255,0.1);opacity:0.6;';
-          const eventsJson = escapeHtml(JSON.stringify(Array.isArray(cell.events) ? cell.events : []));
-          const descAttr = escapeHtml(String(cell.description || ''));
-          const nameAttr = escapeHtml(String(cell.name || ''));
-          const groupAttr = escapeHtml(String(cell.group || ''));
-          const layerAttr = escapeHtml(String(cell.layer || ''));
-          html += `<div class="${classes.join(' ')}" style="${inlineStyle}" title="${escapeHtml(tooltip)}" data-name="${nameAttr}" data-desc="${descAttr}" data-events="${eventsJson}" data-group="${groupAttr}" data-layer="${layerAttr}">`;
-          if (cell.layer || cell.group) {
-            html += `<div class="sg-map-badges">`;
-            if (cell.layer) html += `<span class="sg-map-badge sg-map-badge-layer" title="${escapeHtml(String(cell.layer))}">${escapeHtml(String(cell.layer || '').slice(0, 2))}</span>`;
-            if (cell.group) html += `<span class="sg-map-badge sg-map-badge-group" title="${escapeHtml(String(cell.group))}">${escapeHtml(String(cell.group || '').slice(0, 2))}</span>`;
-            html += `</div>`;
-          }
-          html += `<span class="sg-map-name">${escapeHtml(cell.name)}</span>`;
+        const eventsJson = escapeHtml(JSON.stringify(Array.isArray(cell.events) ? cell.events : []));
+        const descAttr = escapeHtml(String(cell.description || ''));
+        const nameAttr = escapeHtml(String(cell.name || ''));
+        const groupAttr = escapeHtml(String(cell.group || ''));
+        const layerAttr = escapeHtml(String(cell.layer || ''));
+        html += `<div class="${classes.join(' ')}" style= "${inlineStyle}" title= "${escapeHtml(tooltip)}" data-name="${nameAttr}" data-desc="${descAttr}" data-events="${eventsJson}" data-group="${groupAttr}" data-layer="${layerAttr}" > `;
+        if (cell.layer || cell.group) {
+          html += `<div class="sg-map-badges" > `;
+          if (cell.layer) html += `<span class="sg-map-badge sg-map-badge-layer" title= "${escapeHtml(String(cell.layer))}" > ${escapeHtml(String(cell.layer || '').slice(0, 2))}</span> `;
+          if (cell.group) html += `<span class="sg-map-badge sg-map-badge-group" title= "${escapeHtml(String(cell.group))}" > ${escapeHtml(String(cell.group || '').slice(0, 2))}</span> `;
+          html += `</div> `;
+        }
+        html += `<span class="sg-map-name" > ${escapeHtml(cell.name)}</span> `;
         if (isProtagonist) html += '<span class="sg-map-marker">★</span>';
         if (hasEvents) html += '<span class="sg-map-event-marker">⚔</span>';
         html += '</div>';
       } else {
-        html += `<div class="sg-map-cell sg-map-empty-cell" style="${emptyCellStyle}"></div>`;
+        html += `<div class="sg-map-cell sg-map-empty-cell" style= "${emptyCellStyle}" ></div> `;
       }
     }
   }
 
-    html += '</div>';
-    html += '<div class="sg-map-legend">★ 主角位置 | ⚔ 有事件 | 灰色 = 未探索</div>';
-    html += '<div class="sg-map-event-panel">点击地点查看事件列表</div>';
-    html += '</div>';
+  html += '</div>';
+  html += '<div class="sg-map-legend">★ 主角位置 | ⚔ 有事件 | 灰色 = 未探索</div>';
+  html += '<div class="sg-map-event-panel">点击地点查看事件列表</div>';
+  html += '</div>';
 
   return html;
 }
@@ -1789,15 +2052,21 @@ async function clearStaticModulesCache() {
   await setStaticModulesCache({});
 }
 
-// 清除结构化条目缓存（人物/装备/能力）
+// 清除结构化条目缓存（人物/装备/势力/成就/副职业/任务）
 async function clearStructuredEntriesCache() {
   const meta = getSummaryMeta();
   meta.characterEntries = {};
   meta.equipmentEntries = {};
-  meta.abilityEntries = {};
+  meta.factionEntries = {};
+  meta.achievementEntries = {};
+  meta.subProfessionEntries = {};
+  meta.questEntries = {};
   meta.nextCharacterIndex = 1;
   meta.nextEquipmentIndex = 1;
-  meta.nextAbilityIndex = 1;
+  meta.nextFactionIndex = 1;
+  meta.nextAchievementIndex = 1;
+  meta.nextSubProfessionIndex = 1;
+  meta.nextQuestIndex = 1;
   await setSummaryMeta(meta);
 }
 
@@ -1810,7 +2079,7 @@ function generateBoundWorldInfoName(type) {
     .slice(0, 20);
   const ts = Date.now().toString(36);
   const prefix = ensureSettings().autoBindWorldInfoPrefix || 'SG';
-  return `${prefix}_${charName}_${ts}_${type}`;
+  return `${prefix}_${charName}_${ts}_${type} `;
 }
 
 // 检查并确保当前聊天启用了自动绑定（使用 chatbook 模式）
@@ -1935,7 +2204,7 @@ async function createWorldInfoFile(fileName, initialContent = '初始化条目')
     const safeFileName = quoteSlashValue(fileName);
     const safeKey = quoteSlashValue('__SG_INIT__');
     const safeContent = quoteSlashValue(initialContent);
-    const cmd = `/createentry file=${safeFileName} key=${safeKey} ${safeContent}`;
+    const cmd = `/ createentry file = ${safeFileName} key = ${safeKey} ${safeContent} `;
     await execSlash(cmd);
     console.log('[StoryGuide] STscript 方式可能成功');
     return true;
@@ -1952,7 +2221,7 @@ async function createWorldInfoFile(fileName, initialContent = '初始化条目')
 async function resolveChatbookFileName() {
   const varName = '__sg_chatbook_name';
   try {
-    const out = await execSlash(`/getchatbook | /setvar key=${varName} | /getvar ${varName} | /flushvar ${varName}`);
+    const out = await execSlash(`/ getchatbook | /setvar key=${varName} | /getvar ${varName} | /flushvar ${varName}`);
     const raw = slashOutputToText(out).trim();
     if (!raw) return '';
     const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
@@ -2049,13 +2318,9 @@ async function onChatSwitched() {
   if (autoBindCreated || greenWI || blueWI) {
     console.log('[StoryGuide] 恢复已有绑定');
     await applyBoundWorldInfoToSettings();
-    const greenNow = String(getChatMetaValue(META_KEYS.boundGreenWI) || greenWI || '').trim();
-    showToast(`已切换到本聊天专属世界书\n绿灯：${greenNow || '(无)'}\n蓝灯：${blueWI || '(无)'}`, {
-      kind: 'info', spinner: false, sticky: false, duration: 2500
-    });
   } else {
-    console.log('[StoryGuide] 新聊天，需要创建绑定');
-    await ensureBoundWorldInfo();
+    // 不再自动为新聊天创建世界书（用户反馈：每次新对话都会创建）
+    console.log('[StoryGuide] 新聊天，跳过自动创建世界书');
   }
 }
 
@@ -2138,7 +2403,7 @@ function validateAndNormalizeModules(raw) {
     const type = String(m.type || 'text').trim();
     if (type !== 'text' && type !== 'list') return { ok: false, error: `模块 ${key} 的 type 必须是 "text" 或 "list"`, modules: null };
 
-    const title = String(m.title || key).trim();
+    const title= String(m.title || key).trim();
     const prompt = String(m.prompt || '').trim();
 
     const required = m.required !== false; // default true
@@ -2159,7 +2424,69 @@ function validateAndNormalizeModules(raw) {
 
 // -------------------- presets & worldbook --------------------
 
+function normalizeImageGenPresetName(name) {
+  const trimmed = String(name || '').trim();
+  if (!trimmed) return '';
+  return trimmed.slice(0, 64);
+}
+
+function getImageGenPresetList() {
+  const s = ensureSettings();
+  const raw = String(s.imageGenPresetList || '').trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function setImageGenPresetList(list) {
+  const s = ensureSettings();
+  s.imageGenPresetList = JSON.stringify(list || [], null, 2);
+  saveSettings();
+}
+
+function getImageGenPresetSnapshot() {
+  const s = ensureSettings();
+  return {
+    imageGenSystemPrompt: s.imageGenSystemPrompt,
+    imageGenArtistPromptEnabled: s.imageGenArtistPromptEnabled,
+    imageGenArtistPrompt: s.imageGenArtistPrompt,
+    imageGenPromptRulesEnabled: s.imageGenPromptRulesEnabled,
+    imageGenPromptRules: s.imageGenPromptRules,
+    imageGenBatchEnabled: s.imageGenBatchEnabled,
+    imageGenBatchPatterns: s.imageGenBatchPatterns,
+    imageGenCustomMaxTokens: s.imageGenCustomMaxTokens,
+    imageGenCharacterProfilesEnabled: s.imageGenCharacterProfilesEnabled,
+    imageGenCharacterProfiles: s.imageGenCharacterProfiles,
+    imageGenCustomFemalePrompt1: s.imageGenCustomFemalePrompt1,
+    imageGenCustomFemalePrompt2: s.imageGenCustomFemalePrompt2,
+  imageGenProfilesExpanded: s.imageGenProfilesExpanded
+
+
+  };
+}
+
+function applyImageGenPresetSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return;
+  const s = ensureSettings();
+  const keys = Object.keys(getImageGenPresetSnapshot());
+  for (const k of keys) {
+    if (!Object.hasOwn(snapshot, k)) continue;
+    if (k === 'imageGenCustomMaxTokens') {
+      s[k] = clampInt(snapshot[k], 128, 200000, s[k] || DEFAULT_SETTINGS.imageGenCustomMaxTokens || 1024);
+      continue;
+    }
+    s[k] = snapshot[k];
+  }
+  saveSettings();
+  pullSettingsToUi();
+}
+
 function downloadTextFile(filename, text, mime = 'application/json') {
+
   const blob = new Blob([text], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -2195,6 +2522,94 @@ function readFileText(file) {
     r.readAsText(file);
   });
 }
+
+function normalizeJsonPresetText(rawText) {
+  if (!rawText) return '';
+  let data = null;
+  try { data = JSON.parse(rawText); } catch { return ''; }
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch { return ''; }
+  }
+  for (let i = 0; i < 4; i += 1) {
+    if (!data || typeof data !== 'object') break;
+    const wrappers = ['data', 'payload', 'preset', 'result', 'settings'];
+    let changed = false;
+    for (const k of wrappers) {
+      const v = data?.[k];
+      if (typeof v === 'string') {
+        const t = v.trim();
+        if (t && (t.startsWith('{') || t.startsWith('['))) {
+          try { data = JSON.parse(t); changed = true; break; } catch { /* ignore */ }
+        }
+      } else if (v && typeof v === 'object') {
+        data = v;
+        changed = true;
+        break;
+      }
+    }
+    if (!changed) break;
+    if (typeof data === 'string') {
+      try { data = JSON.parse(data); } catch { break; }
+    }
+  }
+  if (!data || typeof data !== 'object') return '';
+  return JSON.stringify(data);
+}
+
+function findPromptPresetValue(data) {
+  if (!data || typeof data !== 'object') return null;
+  const directKeys = ['prompts', 'prompt', 'prompt_array', 'promptArray'];
+  for (const key of directKeys) {
+    if (!Object.hasOwn(data, key)) continue;
+    const v = data[key];
+    if (Array.isArray(v)) return v;
+  }
+  if (data.prompts && typeof data.prompts === 'object') {
+    const arr = Object.values(data.prompts).filter(item => item && typeof item === 'object');
+    if (arr.length) return arr;
+  }
+  return null;
+}
+
+function resolveImageGenPresetFromSillyPreset(rawText, nameFallback) {
+  const normalizedText = normalizeJsonPresetText(rawText);
+  if (!normalizedText) return null;
+  let data = null;
+  try { data = JSON.parse(normalizedText); } catch { return null; }
+  if (!data || typeof data !== 'object') return null;
+
+  const name = normalizeImageGenPresetName(
+    data.name || data.preset_name || data.title || data.presetTitle || nameFallback || '对话预设'
+  );
+  const snapshot = {
+    imageGenCustomMaxTokens: clampInt(
+      data.openai_max_tokens ?? data.max_tokens ?? data.maxTokens,
+      128,
+      200000,
+      DEFAULT_SETTINGS.imageGenCustomMaxTokens || 1024
+    )
+  };
+
+  if (data.temperature !== undefined && data.temperature !== null) {
+    snapshot.imageGenSystemPrompt = DEFAULT_SETTINGS.imageGenSystemPrompt;
+    snapshot.imageGenPromptRulesEnabled = false;
+    snapshot.imageGenPromptRules = '';
+  }
+
+  const prompts = findPromptPresetValue(data);
+  if (Array.isArray(prompts)) {
+    const systemParts = prompts
+      .filter(p => p && typeof p === 'object' && String(p.role || '').toLowerCase() === 'system')
+      .map(p => String(p.content || '').trim())
+      .filter(Boolean);
+    if (systemParts.length) {
+      snapshot.imageGenSystemPrompt = systemParts.join('\n\n');
+    }
+  }
+
+  return { name, snapshot };
+}
+
 
 // 尝试解析 SillyTavern 世界书导出 JSON（不同版本结构可能不同）
 // 返回：[{ title, keys: string[], content: string }]
@@ -2291,7 +2706,7 @@ function parseWorldbookJson(rawText) {
   for (const e of entries) {
     if (!e || typeof e !== 'object') continue;
 
-    const title = String(e.title ?? e.name ?? e.comment ?? e.uid ?? e.id ?? '').trim();
+    const title= String(e.title ?? e.name ?? e.comment ?? e.uid ?? e.id ?? '').trim();
 
     // keys can be stored in many variants in ST exports
     const kRaw =
@@ -3111,14 +3526,14 @@ async function runAnalysis() {
       throw new Error('模型输出无法解析为 JSON（已切到 JSON 标签，看看原文）');
     }
 
-      const md = renderReportMarkdownFromModules(parsed, modules);
-      lastReport = { json: parsed, markdown: md, createdAt: Date.now(), sourceSummary };
-      renderMarkdownInto($('#sg_md'), md);
+    const md = renderReportMarkdownFromModules(parsed, modules);
+    lastReport = { json: parsed, markdown: md, createdAt: Date.now(), sourceSummary };
+    renderMarkdownInto($('#sg_md'), md);
 
-      await updateMapFromSnapshot(snapshotText);
+    await updateMapFromSnapshot(snapshotText);
 
-      // 同步面板报告到聊天末尾
-      try { syncPanelOutputToChat(md, false); } catch { /* ignore */ }
+    // 同步面板报告到聊天末尾
+    try { syncPanelOutputToChat(md, false); } catch { /* ignore */ }
 
     updateButtonsEnabled();
     showPane('md');
@@ -3267,6 +3682,550 @@ function getSummarySchema() {
   };
 }
 
+function buildMegaSummaryItemsText(items) {
+  return items.map((h, idx) => {
+    const title = String(h.title || '').trim() || `条目${idx + 1}`;
+    const range = h?.range ? `（${h.range.fromFloor}-${h.range.toFloor}）` : '';
+    const kws = Array.isArray(h.keywords) ? h.keywords.filter(Boolean) : [];
+    const summary = String(h.summary || '').trim();
+    const lines = [`【${idx + 1}】${title}${range}`];
+    if (kws.length) lines.push(`关键词：${kws.join('、')}`);
+    if (summary) lines.push(`摘要：${summary}`);
+    return lines.join('\n');
+  }).join('\n\n');
+}
+
+function buildMegaSummaryPromptMessages(items, settings) {
+  const s = settings || ensureSettings();
+  let sys = String(s.megaSummarySystemPrompt || '').trim();
+  if (!sys) sys = DEFAULT_MEGA_SUMMARY_SYSTEM_PROMPT;
+  sys = sys + '\n\n' + SUMMARY_JSON_REQUIREMENT;
+
+  const itemsText = buildMegaSummaryItemsText(items);
+  let tpl = String(s.megaSummaryUserTemplate || '').trim();
+  if (!tpl) tpl = DEFAULT_MEGA_SUMMARY_USER_TEMPLATE;
+
+  let user = renderTemplate(tpl, { items: itemsText });
+  if (!/{{\s*items\s*}}/i.test(tpl) && !String(user).includes(itemsText.slice(0, 12))) {
+    user = String(user || '').trim() + `\n\n【待汇总条目】\n${itemsText}`;
+  }
+  return [
+    { role: 'system', content: sys },
+    { role: 'user', content: user },
+  ];
+}
+
+function parseSummaryIndexInput(input, settings) {
+  const s = settings || ensureSettings();
+  const raw = String(input || '').trim();
+  if (!raw) return 0;
+  const num = Number.parseInt(raw, 10);
+  if (Number.isFinite(num)) return num;
+  const prefix = String(s.summaryIndexPrefix || 'A-');
+  const re = new RegExp('^' + escapeRegExp(prefix) + '(\\d+)$', 'i');
+  const m = raw.match(re);
+  return m ? (Number.parseInt(m[1], 10) || 0) : 0;
+}
+
+function extractWorldbookEntriesDetailed(rawJson) {
+  if (!rawJson) return [];
+  let data = rawJson;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch { return []; }
+  }
+  for (let i = 0; i < 4; i++) {
+    if (!data || typeof data !== 'object') break;
+    const wrappers = ['data', 'world_info', 'worldInfo', 'lorebook', 'book', 'worldbook', 'worldBook', 'payload', 'result'];
+    let changed = false;
+    for (const k of wrappers) {
+      const v = data?.[k];
+      if (typeof v === 'string') {
+        const t = v.trim();
+        if (t && (t.startsWith('{') || t.startsWith('['))) {
+          try { data = JSON.parse(t); changed = true; break; } catch { /* ignore */ }
+        }
+      } else if (v && typeof v === 'object') {
+        if (v.entries || v.world_info || v.worldInfo || v.lorebook || v.items) {
+          data = v;
+          changed = true;
+          break;
+        }
+        if (typeof v.data === 'string') {
+          const t2 = String(v.data || '').trim();
+          if (t2 && (t2.startsWith('{') || t2.startsWith('['))) {
+            try { data = JSON.parse(t2); changed = true; break; } catch { /* ignore */ }
+          }
+        }
+      }
+    }
+    if (!changed) break;
+    if (typeof data === 'string') {
+      try { data = JSON.parse(data); } catch { break; }
+    }
+  }
+
+  function toArray(maybe) {
+    if (!maybe) return null;
+    if (Array.isArray(maybe)) return maybe;
+    if (typeof maybe === 'object') {
+      const vals = Object.values(maybe);
+      if (vals.length && vals.every(v => typeof v === 'object')) return vals;
+    }
+    return null;
+  }
+
+  const candidates = [
+    data?.entries,
+    data?.world_info?.entries,
+    data?.worldInfo?.entries,
+    data?.lorebook?.entries,
+    data?.data?.entries,
+    data?.items,
+    data?.world_info,
+    data?.worldInfo,
+    data?.lorebook,
+    Array.isArray(data) ? data : null,
+  ].filter(Boolean);
+
+  let entries = null;
+  for (const c of candidates) {
+    const arr = toArray(c);
+    if (arr && arr.length) { entries = arr; break; }
+    if (c && typeof c === 'object') {
+      const inner = toArray(c.entries);
+      if (inner && inner.length) { entries = inner; break; }
+    }
+  }
+  if (!entries) return [];
+
+  function splitKeys(str) {
+    return String(str || '')
+      .split(/[\n,，;；\|]+/g)
+      .map(s => s.trim())
+      .filter(Boolean);
+  }
+
+  const norm = [];
+  for (const e of entries) {
+    if (!e || typeof e !== 'object') continue;
+    const comment = String(e.comment ?? e.title ?? e.name ?? e.uid ?? e.id ?? '').trim();
+    const title = comment || (Array.isArray(e.keys) && e.keys[0] ? `条目：${e.keys[0]}` : '条目');
+    const kRaw =
+      e.keys ??
+      e.key ??
+      e.keywords ??
+      e.trigger ??
+      e.triggers ??
+      e.pattern ??
+      e.match ??
+      e.tags ??
+      e.primary_key ??
+      e.primaryKey ??
+      e.keyprimary ??
+      e.keyPrimary ??
+      null;
+    const k2Raw =
+      e.keysecondary ??
+      e.keySecondary ??
+      e.secondary_keys ??
+      e.secondaryKeys ??
+      e.keys_secondary ??
+      e.keysSecondary ??
+      null;
+    let keys = [];
+    if (Array.isArray(kRaw)) keys = kRaw.map(x => String(x || '').trim()).filter(Boolean);
+    else if (typeof kRaw === 'string') keys = splitKeys(kRaw);
+    if (Array.isArray(k2Raw)) keys = keys.concat(k2Raw.map(x => String(x || '').trim()).filter(Boolean));
+    else if (typeof k2Raw === 'string') keys = keys.concat(splitKeys(k2Raw));
+    keys = Array.from(new Set(keys)).filter(Boolean);
+
+    const content = String(
+      e.content ?? e.entry ?? e.text ?? e.description ?? e.desc ?? e.body ?? e.value ?? e.prompt ?? ''
+    ).trim();
+    if (!content) continue;
+
+    const disabledRaw = e.disable ?? e.disabled ?? e.isDisabled ?? e.disable_entry ?? e.disabled_entry;
+    const disabled = disabledRaw === true || String(disabledRaw) === '1';
+
+    norm.push({ title, comment, keys, content, disabled });
+  }
+  return norm;
+}
+
+function extractIndexFromText(text, settings) {
+  const s = settings || ensureSettings();
+  const prefix = String(s.summaryIndexPrefix || 'A-');
+  const re = new RegExp(escapeRegExp(prefix) + '(\\d+)', 'i');
+  const m = String(text || '').match(re);
+  return m ? `${prefix}${String(m[1]).padStart(3, '0')}` : '';
+}
+
+function extractIndexIdFromEntry(entry, settings) {
+  const s = settings || ensureSettings();
+  if (Array.isArray(entry.keys)) {
+    for (const k of entry.keys) {
+      const id = extractIndexFromText(k, s);
+      if (id) return id;
+    }
+  }
+  return extractIndexFromText(entry.comment || entry.title || '', s);
+}
+
+async function fetchBlueSummarySourceEntries(settings) {
+  const s = settings || ensureSettings();
+  const file = String(s.summaryBlueWorldInfoFile || '').trim();
+  if (!file) return [];
+  const prefix = String(s.summaryBlueWorldInfoCommentPrefix || s.summaryWorldInfoCommentPrefix || '剧情总结').trim() || '剧情总结';
+  const raw = await fetchWorldInfoFileJsonCompat(file);
+  const entries = extractWorldbookEntriesDetailed(raw);
+  return entries
+    .filter(e => e && e.content)
+    .filter(e => !e.disabled)
+    .filter(e => !String(e.comment || '').startsWith('[已汇总]'))
+    .filter(e => !String(e.comment || '').startsWith('[已删除]'))
+    .filter(e => {
+      if (!prefix) return true;
+      return String(e.comment || e.title || '').includes(prefix);
+    })
+    .map(e => {
+      const indexId = extractIndexIdFromEntry(e, s);
+      return {
+        title: String(e.title || '').trim(),
+        summary: String(e.content || '').trim(),
+        keywords: Array.isArray(e.keys) ? e.keys : [],
+        indexId,
+        sourceComment: String(e.comment || e.title || '').trim(),
+        sourcePrefix: prefix,
+      };
+    });
+}
+
+function filterMegaSummaryCandidates(meta, settings) {
+  const s = settings || ensureSettings();
+  const sourcePrefix = String(s.summaryWorldInfoCommentPrefix || '剧情总结').trim() || '剧情总结';
+  const indexPrefix = String(s.summaryIndexPrefix || 'A-');
+  const indexRe = new RegExp('^' + escapeRegExp(indexPrefix) + '(\\d+)$');
+  const parseIndex = (id) => {
+    const m = String(id || '').trim().match(indexRe);
+    return m ? (Number.parseInt(m[1], 10) || 0) : 0;
+  };
+  return (Array.isArray(meta.history) ? meta.history : [])
+    .filter(h => h && !h.isMega && !h.megaArchived && String(h.commentPrefix || '').trim() === sourcePrefix)
+    .sort((a, b) => {
+      const ai = parseIndex(a.indexId);
+      const bi = parseIndex(b.indexId);
+      if (ai && bi) return ai - bi;
+      return (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0);
+    });
+}
+
+async function createMegaSummaryForSlice(slice, meta, settings) {
+  const s = settings || ensureSettings();
+  if (!slice.length) return false;
+
+  const messages = buildMegaSummaryPromptMessages(slice, s);
+  const schema = getSummarySchema();
+
+  let jsonText = '';
+  if (String(s.summaryProvider || 'st') === 'custom') {
+    jsonText = await callViaCustom(s.summaryCustomEndpoint, s.summaryCustomApiKey, s.summaryCustomModel, messages, s.summaryTemperature, s.summaryCustomMaxTokens, 0.95, s.summaryCustomStream);
+    const parsedTry = safeJsonParse(jsonText);
+    if (!parsedTry || !parsedTry.summary) {
+      try { jsonText = await fallbackAskJsonCustom(s.summaryCustomEndpoint, s.summaryCustomApiKey, s.summaryCustomModel, messages, s.summaryTemperature, s.summaryCustomMaxTokens, 0.95, s.summaryCustomStream); }
+      catch { /* ignore */ }
+    }
+  } else {
+    jsonText = await callViaSillyTavern(messages, schema, s.summaryTemperature);
+    if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
+    const parsedTry = safeJsonParse(jsonText);
+    if (!parsedTry || !parsedTry.summary) jsonText = await fallbackAskJson(messages, s.summaryTemperature);
+  }
+
+  const parsed = safeJsonParse(jsonText);
+  if (!parsed || !parsed.summary) return false;
+
+  const megaPrefix = String(s.megaSummaryCommentPrefix || '大总结').trim() || '大总结';
+  const rawTitle = String(parsed.title || '').trim();
+  const summary = String(parsed.summary || '').trim();
+  const modelKeywords = sanitizeKeywords(parsed.keywords);
+  let indexId = '';
+  let keywords = modelKeywords;
+
+  if (String(s.summaryWorldInfoKeyMode || 'keywords') === 'indexId') {
+    if (!Number.isFinite(Number(meta.nextIndex))) {
+      let maxN = 0;
+      const pref = String(s.summaryIndexPrefix || 'A-');
+      const re = new RegExp('^' + escapeRegExp(pref) + '(\\d+)$');
+      for (const h of (Array.isArray(meta.history) ? meta.history : [])) {
+        const id0 = String(h?.indexId || '').trim();
+        const m = id0.match(re);
+        if (m) maxN = Math.max(maxN, Number.parseInt(m[1], 10) || 0);
+      }
+      meta.nextIndex = Math.max(clampInt(s.summaryIndexStart, 1, 1000000, 1), maxN + 1);
+    }
+    const pref = String(s.summaryIndexPrefix || 'A-');
+    const pad = clampInt(s.summaryIndexPad, 1, 12, 3);
+    const n = clampInt(meta.nextIndex, 1, 100000000, 1);
+    indexId = `${pref}${String(n).padStart(pad, '0')}`;
+    keywords = [indexId];
+    meta.nextIndex = clampInt(Number(meta.nextIndex) + 1, 1, 1000000000, Number(meta.nextIndex) + 1);
+  }
+
+  const range = {
+    fromFloor: slice[0]?.range?.fromFloor ?? 0,
+    toFloor: slice[slice.length - 1]?.range?.toFloor ?? 0,
+  };
+  const rec = {
+    title: rawTitle || megaPrefix,
+    summary,
+    keywords,
+    indexId: indexId || undefined,
+    modelKeywords: (String(s.summaryWorldInfoKeyMode || 'keywords') === 'indexId') ? modelKeywords : undefined,
+    createdAt: Date.now(),
+    range,
+    isMega: true,
+    megaSourceCount: slice.length,
+    commentPrefix: megaPrefix,
+    commentPrefixBlue: megaPrefix,
+  };
+
+  meta.history = Array.isArray(meta.history) ? meta.history : [];
+  meta.history.push(rec);
+  meta.megaSummaryCount = clampInt(Number(meta.megaSummaryCount || 0) + 1, 0, 1000000, Number(meta.megaSummaryCount || 0) + 1);
+  await setSummaryMeta(meta);
+
+  if (s.summaryToWorldInfo) {
+    try {
+      await writeSummaryToWorldInfoEntry(rec, meta, {
+        target: String(s.summaryWorldInfoTarget || 'chatbook'),
+        file: String(s.summaryWorldInfoFile || ''),
+        commentPrefix: megaPrefix,
+        constant: 0,
+      });
+    } catch (e) {
+      console.warn('[StoryGuide] write mega summary (green) failed:', e);
+    }
+  }
+  if (s.summaryToBlueWorldInfo) {
+    try {
+      await writeSummaryToWorldInfoEntry(rec, meta, {
+        target: 'file',
+        file: String(s.summaryBlueWorldInfoFile || ''),
+        commentPrefix: megaPrefix,
+        constant: 1,
+      });
+    } catch (e) {
+      console.warn('[StoryGuide] write mega summary (blue) failed:', e);
+    }
+  }
+
+  const hist = Array.isArray(meta.history) ? meta.history : [];
+  for (const h of slice) {
+    const histHit = h.indexId ? hist.find(x => x && x.indexId === h.indexId && !x.isMega) : null;
+    if (histHit) {
+      histHit.megaArchived = true;
+      histHit.megaArchivedAt = Date.now();
+    }
+
+    const blueComment = String(h.sourceComment || '').trim();
+    const bluePrefix = String(h.sourcePrefix || s.summaryBlueWorldInfoCommentPrefix || s.summaryWorldInfoCommentPrefix || '剧情总结').trim();
+    const greenPrefix = String(s.summaryWorldInfoCommentPrefix || '剧情总结').trim();
+    let greenComment = blueComment;
+    if (blueComment && bluePrefix && greenPrefix && blueComment.startsWith(bluePrefix)) {
+      greenComment = greenPrefix + blueComment.slice(bluePrefix.length);
+    }
+
+    const blueFile = String(s.summaryBlueWorldInfoFile || '').trim();
+    if (blueComment && blueFile) {
+      try {
+        await disableWorldInfoEntryByComment(blueComment, s, {
+          target: 'file',
+          file: blueFile,
+        });
+      } catch (e) {
+        console.warn('[StoryGuide] disable summary entry (blue) failed:', e);
+      }
+    }
+    if (greenComment) {
+      try {
+        await disableWorldInfoEntryByComment(greenComment, s, {
+          target: String(s.summaryWorldInfoTarget || 'chatbook'),
+          file: String(s.summaryWorldInfoFile || ''),
+        });
+      } catch (e) {
+        console.warn('[StoryGuide] disable summary entry failed:', e);
+      }
+    }
+  }
+
+  await setSummaryMeta(meta);
+  return true;
+}
+
+async function runMegaSummaryManual(fromIndex, toIndex) {
+  const s = ensureSettings();
+  const meta = getSummaryMeta();
+  const fromNum = parseSummaryIndexInput(fromIndex, s);
+  const toNum = parseSummaryIndexInput(toIndex, s);
+  if (!fromNum || !toNum || fromNum > toNum) {
+    setStatus('大总结范围无效，请填写正确索引号', 'warn');
+    return 0;
+  }
+
+  let candidates = [];
+  try {
+    candidates = await fetchBlueSummarySourceEntries(s);
+  } catch (e) {
+    setStatus(`读取蓝灯世界书失败：${e?.message ?? e}`, 'err');
+    return 0;
+  }
+  candidates = candidates.filter(h => {
+    const idx = parseSummaryIndexInput(h.indexId, s);
+    return idx >= fromNum && idx <= toNum;
+  });
+  if (!candidates.length) {
+    setStatus('大总结范围内无可用条目', 'warn');
+    return 0;
+  }
+
+  const every = clampInt(s.megaSummaryEvery, 5, 5000, 40);
+  let created = 0;
+  for (let i = 0; i < candidates.length; i += every) {
+    const slice = candidates.slice(i, i + every);
+    const ok = await createMegaSummaryForSlice(slice, meta, s);
+    if (!ok) break;
+    created += 1;
+  }
+
+  renderSummaryPaneFromMeta();
+  if (created > 0) {
+    setStatus(`已生成大总结 ${created} 条 ✅`, 'ok');
+  }
+  return created;
+}
+
+function buildSummaryComment(rec, settings, commentPrefix = '') {
+  const s = settings || ensureSettings();
+  const range = rec?.range ? `${rec.range.fromFloor}-${rec.range.toFloor}` : '';
+  const prefix = String(commentPrefix || s.summaryWorldInfoCommentPrefix || '剧情总结').trim() || '剧情总结';
+  const rawTitle = String(rec.title || '').trim();
+  const keyMode = String(s.summaryWorldInfoKeyMode || 'keywords');
+  const indexId = String(rec?.indexId || '').trim();
+  const indexInComment = (keyMode === 'indexId') && !!s.summaryIndexInComment && !!indexId;
+
+  let commentTitle = rawTitle;
+  if (prefix) {
+    if (!commentTitle) commentTitle = prefix;
+    else if (!commentTitle.startsWith(prefix)) commentTitle = `${prefix}｜${commentTitle}`;
+  }
+  if (indexInComment) {
+    if (!commentTitle.includes(indexId)) {
+      if (commentTitle === prefix) commentTitle = `${prefix}｜${indexId}`;
+      else if (commentTitle.startsWith(`${prefix}｜`)) commentTitle = commentTitle.replace(`${prefix}｜`, `${prefix}｜${indexId}｜`);
+      else commentTitle = `${prefix}｜${indexId}｜${commentTitle}`;
+      commentTitle = commentTitle.replace(/｜｜+/g, '｜');
+    }
+  }
+  if (!commentTitle) commentTitle = prefix || '剧情总结';
+  return `${commentTitle}${range ? `（${range}）` : ''}`;
+}
+
+async function disableSummaryWorldInfoEntry(rec, settings, {
+  target = 'file',
+  file = '',
+  commentPrefix = '',
+} = {}) {
+  const s = settings || ensureSettings();
+  const comment = buildSummaryComment(rec, s, commentPrefix || rec?.commentPrefix || s.summaryWorldInfoCommentPrefix || '剧情总结');
+  if (!comment) return null;
+  return disableWorldInfoEntryByComment(comment, settings, { target, file });
+}
+
+async function disableWorldInfoEntryByComment(comment, settings, {
+  target = 'file',
+  file = '',
+} = {}) {
+  const s = settings || ensureSettings();
+  const targetMode = String(target || 'file');
+  const fileName = String(file || '').trim();
+  if (targetMode === 'file' && !fileName) return null;
+
+  let findExpr;
+  const findFileVar = 'sgTmpFindSummaryFile';
+  if (targetMode === 'chatbook') {
+    await execSlash(`/getchatbook | /setvar key=${findFileVar}`);
+    findExpr = `/findentry file={{getvar::${findFileVar}}} field=comment ${quoteSlashValue(comment)}`;
+  } else {
+    findExpr = `/findentry file=${quoteSlashValue(fileName)} field=comment ${quoteSlashValue(comment)}`;
+  }
+
+  const findResult = await execSlash(findExpr);
+  const findText = slashOutputToText(findResult);
+
+  if (targetMode === 'chatbook') {
+    await execSlash(`/flushvar ${findFileVar}`);
+  }
+
+  let uid = null;
+  if (findText && findText !== 'null' && findText !== 'undefined') {
+    const parsed = safeJsonParse(findText);
+    if (parsed && parsed.uid) uid = parsed.uid;
+    else if (/^\d+$/.test(findText.trim())) uid = findText.trim();
+  }
+  if (!uid) return null;
+
+  let fileExpr;
+  const fileVar = 'sgTmpDisableSummaryFile';
+  if (targetMode === 'chatbook') {
+    await execSlash(`/getchatbook | /setvar key=${fileVar}`);
+    fileExpr = `{{getvar::${fileVar}}}`;
+  } else {
+    fileExpr = quoteSlashValue(fileName);
+  }
+
+  await execSlash(`/setentryfield file=${fileExpr} uid=${uid} field=disable 1`);
+  const archivedComment = `[已汇总] ${comment}`;
+  await execSlash(`/setentryfield file=${fileExpr} uid=${uid} field=comment ${quoteSlashValue(archivedComment)}`);
+  await execSlash(`/setentryfield file=${fileExpr} uid=${uid} field=key ""`);
+
+  if (targetMode === 'chatbook') {
+    await execSlash(`/flushvar ${fileVar}`);
+  }
+
+  return { uid };
+}
+
+async function maybeGenerateMegaSummary(meta, settings) {
+  const s = settings || ensureSettings();
+  if (!s.megaSummaryEnabled) return 0;
+
+  const every = clampInt(s.megaSummaryEvery, 5, 5000, 40);
+  let created = 0;
+  while (true) {
+    let pending = [];
+    try {
+      pending = await fetchBlueSummarySourceEntries(s);
+    } catch (e) {
+      console.warn('[StoryGuide] read blue world info for mega summary failed:', e);
+      break;
+    }
+    if (pending.length < every) break;
+
+    const sorted = pending.sort((a, b) => {
+      const ai = parseSummaryIndexInput(a.indexId, s);
+      const bi = parseSummaryIndexInput(b.indexId, s);
+      if (ai && bi) return ai - bi;
+      return String(a.title || '').localeCompare(String(b.title || ''));
+    });
+    const slice = sorted.slice(0, every);
+    const ok = await createMegaSummaryForSlice(slice, meta, s);
+    if (!ok) break;
+    created += 1;
+  }
+
+  return created;
+}
+
 function buildSummaryPromptMessages(chunkText, fromFloor, toFloor, statData = null) {
   const s = ensureSettings();
 
@@ -3281,7 +4240,11 @@ function buildSummaryPromptMessages(chunkText, fromFloor, toFloor, statData = nu
   if (!tpl) tpl = DEFAULT_SUMMARY_USER_TEMPLATE;
 
   // 格式化 statData（如果有）
-  const statDataJson = statData ? JSON.stringify(statData, null, 2) : '';
+  let statDataJson = '';
+  if (statData) {
+    if (typeof statData === 'string') statDataJson = statData.trim();
+    else statDataJson = JSON.stringify(statData, null, 2);
+  }
 
   let user = renderTemplate(tpl, {
     fromFloor: String(fromFloor),
@@ -3334,7 +4297,7 @@ function appendToBlueIndexCache(rec) {
     range: rec?.range ?? undefined,
   };
   if (!item.summary) return;
-  if (!item.title) item.title = item.keywords?.[0] ? `条目：${item.keywords[0]}` : '条目';
+  if (!item.title) item.title= item.keywords?.[0] ? `条目：${item.keywords[0]}` : '条目';
   const arr = Array.isArray(s.summaryBlueIndex) ? s.summaryBlueIndex : [];
   // de-dup (only check recent items)
   for (let i = arr.length - 1; i >= 0 && i >= arr.length - 10; i--) {
@@ -3360,12 +4323,18 @@ function buildStructuredEntriesPromptMessages(chunkText, fromFloor, toFloor, met
   if (!sys) sys = DEFAULT_STRUCTURED_ENTRIES_SYSTEM_PROMPT;
   const charPrompt = String(s.structuredCharacterPrompt || '').trim() || DEFAULT_STRUCTURED_CHARACTER_PROMPT;
   const equipPrompt = String(s.structuredEquipmentPrompt || '').trim() || DEFAULT_STRUCTURED_EQUIPMENT_PROMPT;
-  const abilityPrompt = String(s.structuredAbilityPrompt || '').trim() || DEFAULT_STRUCTURED_ABILITY_PROMPT;
+  const factionPrompt = String(s.structuredFactionPrompt || '').trim() || DEFAULT_STRUCTURED_FACTION_PROMPT;
+  const achievementPrompt = String(s.structuredAchievementPrompt || '').trim() || DEFAULT_STRUCTURED_ACHIEVEMENT_PROMPT;
+  const subProfessionPrompt = String(s.structuredSubProfessionPrompt || '').trim() || DEFAULT_STRUCTURED_SUBPROFESSION_PROMPT;
+  const questPrompt = String(s.structuredQuestPrompt || '').trim() || DEFAULT_STRUCTURED_QUEST_PROMPT;
   sys = [
     sys,
     `【人物条目要求】\n${charPrompt}`,
     `【装备条目要求】\n${equipPrompt}`,
-    `【能力条目要求】\n${abilityPrompt}`,
+    `【势力条目要求】\n${factionPrompt}`,
+    `【成就条目要求】\n${achievementPrompt}`,
+    `【副职业条目要求】\n${subProfessionPrompt}`,
+    `【任务条目要求】\n${questPrompt}`,
     STRUCTURED_ENTRIES_JSON_REQUIREMENT,
   ].join('\n\n');
 
@@ -3378,9 +4347,29 @@ function buildStructuredEntriesPromptMessages(chunkText, fromFloor, toFloor, met
     const aliases = Array.isArray(e.aliases) && e.aliases.length > 0 ? `[别名:${e.aliases.join('/')}]` : '';
     return `${e.name}${aliases}`;
   }).join('、') || '无';
+  const knownFactions = Object.values(meta.factionEntries || {}).map(f => {
+    const aliases = Array.isArray(f.aliases) && f.aliases.length > 0 ? `[别名:${f.aliases.join('/')}]` : '';
+    return `${f.name}${aliases}`;
+  }).join('、') || '无';
+  const knownAchievements = Object.values(meta.achievementEntries || {}).map(a => {
+    const aliases = Array.isArray(a.aliases) && a.aliases.length > 0 ? `[别名:${a.aliases.join('/')}]` : '';
+    return `${a.name}${aliases}`;
+  }).join('、') || '无';
+  const knownSubProfessions = Object.values(meta.subProfessionEntries || {}).map(p => {
+    const aliases = Array.isArray(p.aliases) && p.aliases.length > 0 ? `[别名:${p.aliases.join('/')}]` : '';
+    return `${p.name}${aliases}`;
+  }).join('、') || '无';
+  const knownQuests = Object.values(meta.questEntries || {}).map(q => {
+    const aliases = Array.isArray(q.aliases) && q.aliases.length > 0 ? `[别名:${q.aliases.join('/')}]` : '';
+    return `${q.name}${aliases}`;
+  }).join('、') || '无';
 
   // 格式化 statData
-  const statDataJson = statData ? JSON.stringify(statData, null, 2) : '';
+  let statDataJson = '';
+  if (statData) {
+    if (typeof statData === 'string') statDataJson = statData.trim();
+    else statDataJson = JSON.stringify(statData, null, 2);
+  }
 
   let tpl = String(s.structuredEntriesUserTemplate || '').trim();
   if (!tpl) tpl = DEFAULT_STRUCTURED_ENTRIES_USER_TEMPLATE;
@@ -3390,6 +4379,10 @@ function buildStructuredEntriesPromptMessages(chunkText, fromFloor, toFloor, met
     chunk: String(chunkText || ''),
     knownCharacters: knownChars,
     knownEquipments: knownEquips,
+    knownFactions: knownFactions,
+    knownAchievements: knownAchievements,
+    knownSubProfessions: knownSubProfessions,
+    knownQuests: knownQuests,
     statData: statDataJson,
   });
   // 如果有 statData 且模板里没有包含，追加到末尾
@@ -3416,10 +4409,16 @@ async function generateStructuredEntries(chunkText, fromFloor, toFloor, meta, se
   return {
     characters: Array.isArray(parsed.characters) ? parsed.characters : [],
     equipments: Array.isArray(parsed.equipments) ? parsed.equipments : [],
-    abilities: Array.isArray(parsed.abilities) ? parsed.abilities : [],
+    factions: Array.isArray(parsed.factions) ? parsed.factions : (Array.isArray(parsed.abilities) ? parsed.abilities : []),
+    achievements: Array.isArray(parsed.achievements) ? parsed.achievements : [],
+    subProfessions: Array.isArray(parsed.subProfessions) ? parsed.subProfessions : [],
+    quests: Array.isArray(parsed.quests) ? parsed.quests : [],
     deletedCharacters: Array.isArray(parsed.deletedCharacters) ? parsed.deletedCharacters : [],
     deletedEquipments: Array.isArray(parsed.deletedEquipments) ? parsed.deletedEquipments : [],
-    deletedAbilities: Array.isArray(parsed.deletedAbilities) ? parsed.deletedAbilities : [],
+    deletedFactions: Array.isArray(parsed.deletedFactions) ? parsed.deletedFactions : (Array.isArray(parsed.deletedAbilities) ? parsed.deletedAbilities : []),
+    deletedAchievements: Array.isArray(parsed.deletedAchievements) ? parsed.deletedAchievements : [],
+    deletedSubProfessions: Array.isArray(parsed.deletedSubProfessions) ? parsed.deletedSubProfessions : [],
+    deletedQuests: Array.isArray(parsed.deletedQuests) ? parsed.deletedQuests : [],
   };
 }
 
@@ -3469,18 +4468,72 @@ function buildEquipmentContent(equip) {
   return parts.join('\n');
 }
 
-function buildAbilityContent(ability) {
+function buildFactionContent(faction) {
   const parts = [];
-  if (ability.name) parts.push(`【能力】${ability.name}${ability.isNegative ? '（负面）' : ''}`);
-  if (ability.type) parts.push(`类型：${ability.type}`);
-  if (ability.effects) parts.push(`效果：${ability.effects}`);
-  if (ability.trigger) parts.push(`触发条件：${ability.trigger}`);
-  if (ability.cost) parts.push(`代价/冷却：${ability.cost}`);
-  if (ability.statInfo) {
-    const infoStr = typeof ability.statInfo === 'object' ? JSON.stringify(ability.statInfo, null, 2) : String(ability.statInfo);
+  if (faction.name) parts.push(`【势力】${faction.name}`);
+  if (faction.aliases?.length) parts.push(`别名：${faction.aliases.join('、')}`);
+  if (faction.type) parts.push(`性质：${faction.type}`);
+  if (faction.scope) parts.push(`范围：${faction.scope}`);
+  if (faction.leader) parts.push(`领袖：${faction.leader}`);
+  if (faction.ideology) parts.push(`理念：${faction.ideology}`);
+  if (faction.relationToProtagonist) parts.push(`与主角关系：${faction.relationToProtagonist}`);
+  if (faction.status) parts.push(`状态：${faction.status}`);
+  if (faction.keyEvents?.length) parts.push(`关键事件：${faction.keyEvents.join('；')}`);
+  if (faction.statInfo) {
+    const infoStr = typeof faction.statInfo === 'object' ? JSON.stringify(faction.statInfo, null, 2) : String(faction.statInfo);
     parts.push(`属性数据：${infoStr}`);
   }
-  if (ability.boundEvents?.length) parts.push(`相关事件：${ability.boundEvents.join('；')}`);
+  return parts.join('\n');
+}
+
+function buildAchievementContent(achievement) {
+  const parts = [];
+  if (achievement.name) parts.push(`【成就】${achievement.name}`);
+  if (achievement.description) parts.push(`描述：${achievement.description}`);
+  if (achievement.requirements) parts.push(`达成条件：${achievement.requirements}`);
+  if (achievement.obtainedAt) parts.push(`获得时间：${achievement.obtainedAt}`);
+  if (achievement.status) parts.push(`状态：${achievement.status}`);
+  if (achievement.effects) parts.push(`影响：${achievement.effects}`);
+  if (achievement.keyEvents?.length) parts.push(`关键事件：${achievement.keyEvents.join('；')}`);
+  if (achievement.statInfo) {
+    const infoStr = typeof achievement.statInfo === 'object' ? JSON.stringify(achievement.statInfo, null, 2) : String(achievement.statInfo);
+    parts.push(`属性数据：${infoStr}`);
+  }
+  return parts.join('\n');
+}
+
+function buildSubProfessionContent(subProfession) {
+  const parts = [];
+  if (subProfession.name) parts.push(`【副职业】${subProfession.name}`);
+  if (subProfession.role) parts.push(`定位：${subProfession.role}`);
+  if (subProfession.level) parts.push(`等级：${subProfession.level}`);
+  if (subProfession.progress) parts.push(`进度：${subProfession.progress}`);
+  if (subProfession.skills) parts.push(`核心技能：${subProfession.skills}`);
+  if (subProfession.source) parts.push(`获得方式：${subProfession.source}`);
+  if (subProfession.status) parts.push(`状态：${subProfession.status}`);
+  if (subProfession.keyEvents?.length) parts.push(`关键事件：${subProfession.keyEvents.join('；')}`);
+  if (subProfession.statInfo) {
+    const infoStr = typeof subProfession.statInfo === 'object' ? JSON.stringify(subProfession.statInfo, null, 2) : String(subProfession.statInfo);
+    parts.push(`属性数据：${infoStr}`);
+  }
+  return parts.join('\n');
+}
+
+function buildQuestContent(quest) {
+  const parts = [];
+  if (quest.name) parts.push(`【任务】${quest.name}`);
+  if (quest.goal) parts.push(`目标：${quest.goal}`);
+  if (quest.progress) parts.push(`进度：${quest.progress}`);
+  if (quest.status) parts.push(`状态：${quest.status}`);
+  if (quest.issuer) parts.push(`发布者：${quest.issuer}`);
+  if (quest.reward) parts.push(`奖励：${quest.reward}`);
+  if (quest.deadline) parts.push(`期限：${quest.deadline}`);
+  if (quest.location) parts.push(`地点：${quest.location}`);
+  if (quest.keyEvents?.length) parts.push(`关键事件：${quest.keyEvents.join('；')}`);
+  if (quest.statInfo) {
+    const infoStr = typeof quest.statInfo === 'object' ? JSON.stringify(quest.statInfo, null, 2) : String(quest.statInfo);
+    parts.push(`属性数据：${infoStr}`);
+  }
   return parts.join('\n');
 }
 
@@ -3559,7 +4612,8 @@ async function writeOrUpdateStructuredEntry(entryType, entryData, meta, settings
     try {
       // 使用 /findentry 通过 comment 字段查找条目 UID
       // comment 格式为: "人物｜角色名｜CHA-001"
-      const searchPattern = `${prefix}｜${entryName}`;
+      const searchName = String(cached?.name || entryName).trim() || entryName;
+      const searchPattern = `${prefix}｜${searchName}`;
 
       // 构建查找脚本
       let findParts = [];
@@ -3627,14 +4681,30 @@ async function writeOrUpdateStructuredEntry(entryType, entryData, meta, settings
         let updateParts = [];
         const updateFileVar = '__sg_update_file';
 
+        const shouldReenable = !!settings.structuredReenableEntriesEnabled && (entryType === 'character' || entryType === 'faction');
+        const commentName = String(cached?.name || entryName).trim() || entryName;
+        const indexSuffix = cached?.indexId ? `｜${cached.indexId}` : '';
+        const newComment = `${prefix}｜${commentName}${indexSuffix}`;
+        const newKey = cached?.indexId ? buildStructuredEntryKey(prefix, commentName, cached.indexId) : '';
+
         if (target === 'chatbook') {
           // chatbook 模式需要先获取文件名
           updateParts.push('/getchatbook');
           updateParts.push(`/setvar key=${updateFileVar}`);
           updateParts.push(`/setentryfield file={{getvar::${updateFileVar}}} uid=${foundUid} field=content ${quoteSlashValue(content)}`);
+          if (shouldReenable) {
+            updateParts.push(`/setentryfield file={{getvar::${updateFileVar}}} uid=${foundUid} field=disable 0`);
+            updateParts.push(`/setentryfield file={{getvar::${updateFileVar}}} uid=${foundUid} field=comment ${quoteSlashValue(newComment)}`);
+            if (newKey) updateParts.push(`/setentryfield file={{getvar::${updateFileVar}}} uid=${foundUid} field=key ${quoteSlashValue(newKey)}`);
+          }
           updateParts.push(`/flushvar ${updateFileVar}`);
         } else {
           updateParts.push(`/setentryfield file=${quoteSlashValue(file)} uid=${foundUid} field=content ${quoteSlashValue(content)}`);
+          if (shouldReenable) {
+            updateParts.push(`/setentryfield file=${quoteSlashValue(file)} uid=${foundUid} field=disable 0`);
+            updateParts.push(`/setentryfield file=${quoteSlashValue(file)} uid=${foundUid} field=comment ${quoteSlashValue(newComment)}`);
+            if (newKey) updateParts.push(`/setentryfield file=${quoteSlashValue(file)} uid=${foundUid} field=key ${quoteSlashValue(newKey)}`);
+          }
         }
 
         await execSlash(updateParts.join(' | '));
@@ -3774,27 +4844,105 @@ async function writeOrUpdateEquipmentEntry(equip, meta, settings) {
   return results.length ? results : null;
 }
 
-async function writeOrUpdateAbilityEntry(ability, meta, settings) {
-  if (!ability?.name) return null;
+async function writeOrUpdateFactionEntry(faction, meta, settings) {
+  if (!faction?.name) return null;
   const results = [];
   // 写入绿灯世界书
   if (settings.summaryToWorldInfo) {
-    const r = await writeOrUpdateStructuredEntry('ability', ability, meta, settings, {
-      buildContent: buildAbilityContent,
-      entriesCache: meta.abilityEntries,
-      nextIndexKey: 'nextAbilityIndex',
-      prefix: settings.abilityEntryPrefix || '能力',
+    const r = await writeOrUpdateStructuredEntry('faction', faction, meta, settings, {
+      buildContent: buildFactionContent,
+      entriesCache: meta.factionEntries,
+      nextIndexKey: 'nextFactionIndex',
+      prefix: settings.factionEntryPrefix || '势力',
       targetType: 'green',
     });
     if (r) results.push(r);
   }
   // 写入蓝灯世界书
   if (settings.summaryToBlueWorldInfo) {
-    const r = await writeOrUpdateStructuredEntry('ability', ability, meta, settings, {
-      buildContent: buildAbilityContent,
-      entriesCache: meta.abilityEntries,
-      nextIndexKey: 'nextAbilityIndex',
-      prefix: settings.abilityEntryPrefix || '能力',
+    const r = await writeOrUpdateStructuredEntry('faction', faction, meta, settings, {
+      buildContent: buildFactionContent,
+      entriesCache: meta.factionEntries,
+      nextIndexKey: 'nextFactionIndex',
+      prefix: settings.factionEntryPrefix || '势力',
+      targetType: 'blue',
+    });
+    if (r) results.push(r);
+  }
+  return results.length ? results : null;
+}
+
+async function writeOrUpdateAchievementEntry(achievement, meta, settings) {
+  if (!achievement?.name) return null;
+  const results = [];
+  if (settings.summaryToWorldInfo) {
+    const r = await writeOrUpdateStructuredEntry('achievement', achievement, meta, settings, {
+      buildContent: buildAchievementContent,
+      entriesCache: meta.achievementEntries,
+      nextIndexKey: 'nextAchievementIndex',
+      prefix: settings.achievementEntryPrefix || '成就',
+      targetType: 'green',
+    });
+    if (r) results.push(r);
+  }
+  if (settings.summaryToBlueWorldInfo) {
+    const r = await writeOrUpdateStructuredEntry('achievement', achievement, meta, settings, {
+      buildContent: buildAchievementContent,
+      entriesCache: meta.achievementEntries,
+      nextIndexKey: 'nextAchievementIndex',
+      prefix: settings.achievementEntryPrefix || '成就',
+      targetType: 'blue',
+    });
+    if (r) results.push(r);
+  }
+  return results.length ? results : null;
+}
+
+async function writeOrUpdateSubProfessionEntry(subProfession, meta, settings) {
+  if (!subProfession?.name) return null;
+  const results = [];
+  if (settings.summaryToWorldInfo) {
+    const r = await writeOrUpdateStructuredEntry('subProfession', subProfession, meta, settings, {
+      buildContent: buildSubProfessionContent,
+      entriesCache: meta.subProfessionEntries,
+      nextIndexKey: 'nextSubProfessionIndex',
+      prefix: settings.subProfessionEntryPrefix || '副职业',
+      targetType: 'green',
+    });
+    if (r) results.push(r);
+  }
+  if (settings.summaryToBlueWorldInfo) {
+    const r = await writeOrUpdateStructuredEntry('subProfession', subProfession, meta, settings, {
+      buildContent: buildSubProfessionContent,
+      entriesCache: meta.subProfessionEntries,
+      nextIndexKey: 'nextSubProfessionIndex',
+      prefix: settings.subProfessionEntryPrefix || '副职业',
+      targetType: 'blue',
+    });
+    if (r) results.push(r);
+  }
+  return results.length ? results : null;
+}
+
+async function writeOrUpdateQuestEntry(quest, meta, settings) {
+  if (!quest?.name) return null;
+  const results = [];
+  if (settings.summaryToWorldInfo) {
+    const r = await writeOrUpdateStructuredEntry('quest', quest, meta, settings, {
+      buildContent: buildQuestContent,
+      entriesCache: meta.questEntries,
+      nextIndexKey: 'nextQuestIndex',
+      prefix: settings.questEntryPrefix || '任务',
+      targetType: 'green',
+    });
+    if (r) results.push(r);
+  }
+  if (settings.summaryToBlueWorldInfo) {
+    const r = await writeOrUpdateStructuredEntry('quest', quest, meta, settings, {
+      buildContent: buildQuestContent,
+      entriesCache: meta.questEntries,
+      nextIndexKey: 'nextQuestIndex',
+      prefix: settings.questEntryPrefix || '任务',
       targetType: 'blue',
     });
     if (r) results.push(r);
@@ -3967,21 +5115,87 @@ async function deleteEquipmentEntry(equipName, meta, settings) {
   return results.length ? results : null;
 }
 
-// 删除能力条目
-async function deleteAbilityEntry(abilityName, meta, settings) {
+// 删除势力条目
+async function deleteFactionEntry(factionName, meta, settings) {
   const results = [];
   if (settings.summaryToWorldInfo) {
-    const r = await deleteStructuredEntry('ability', abilityName, meta, settings, {
-      entriesCache: meta.abilityEntries,
-      prefix: settings.abilityEntryPrefix || '能力',
+    const r = await deleteStructuredEntry('faction', factionName, meta, settings, {
+      entriesCache: meta.factionEntries,
+      prefix: settings.factionEntryPrefix || '势力',
       targetType: 'green',
     });
     if (r) results.push(r);
   }
   if (settings.summaryToBlueWorldInfo) {
-    const r = await deleteStructuredEntry('ability', abilityName, meta, settings, {
-      entriesCache: meta.abilityEntries,
-      prefix: settings.abilityEntryPrefix || '能力',
+    const r = await deleteStructuredEntry('faction', factionName, meta, settings, {
+      entriesCache: meta.factionEntries,
+      prefix: settings.factionEntryPrefix || '势力',
+      targetType: 'blue',
+    });
+    if (r) results.push(r);
+  }
+  return results.length ? results : null;
+}
+
+// 删除成就条目
+async function deleteAchievementEntry(achievementName, meta, settings) {
+  const results = [];
+  if (settings.summaryToWorldInfo) {
+    const r = await deleteStructuredEntry('achievement', achievementName, meta, settings, {
+      entriesCache: meta.achievementEntries,
+      prefix: settings.achievementEntryPrefix || '成就',
+      targetType: 'green',
+    });
+    if (r) results.push(r);
+  }
+  if (settings.summaryToBlueWorldInfo) {
+    const r = await deleteStructuredEntry('achievement', achievementName, meta, settings, {
+      entriesCache: meta.achievementEntries,
+      prefix: settings.achievementEntryPrefix || '成就',
+      targetType: 'blue',
+    });
+    if (r) results.push(r);
+  }
+  return results.length ? results : null;
+}
+
+// 删除副职业条目
+async function deleteSubProfessionEntry(subProfessionName, meta, settings) {
+  const results = [];
+  if (settings.summaryToWorldInfo) {
+    const r = await deleteStructuredEntry('subProfession', subProfessionName, meta, settings, {
+      entriesCache: meta.subProfessionEntries,
+      prefix: settings.subProfessionEntryPrefix || '副职业',
+      targetType: 'green',
+    });
+    if (r) results.push(r);
+  }
+  if (settings.summaryToBlueWorldInfo) {
+    const r = await deleteStructuredEntry('subProfession', subProfessionName, meta, settings, {
+      entriesCache: meta.subProfessionEntries,
+      prefix: settings.subProfessionEntryPrefix || '副职业',
+      targetType: 'blue',
+    });
+    if (r) results.push(r);
+  }
+  return results.length ? results : null;
+}
+
+// 删除任务条目
+async function deleteQuestEntry(questName, meta, settings) {
+  const results = [];
+  if (settings.summaryToWorldInfo) {
+    const r = await deleteStructuredEntry('quest', questName, meta, settings, {
+      entriesCache: meta.questEntries,
+      prefix: settings.questEntryPrefix || '任务',
+      targetType: 'green',
+    });
+    if (r) results.push(r);
+  }
+  if (settings.summaryToBlueWorldInfo) {
+    const r = await deleteStructuredEntry('quest', questName, meta, settings, {
+      entriesCache: meta.questEntries,
+      prefix: settings.questEntryPrefix || '任务',
       targetType: 'blue',
     });
     if (r) results.push(r);
@@ -4211,31 +5425,8 @@ async function writeSummaryToWorldInfoEntry(rec, meta, {
   constant = 0,
 } = {}) {
   const kws = sanitizeKeywords(rec.keywords);
-  const range = rec?.range ? `${rec.range.fromFloor}-${rec.range.toFloor}` : '';
-  const prefix = String(commentPrefix || '剧情总结').trim() || '剧情总结';
-  const rawTitle = String(rec.title || '').trim();
-
   const s = ensureSettings();
-  const keyMode = String(s.summaryWorldInfoKeyMode || 'keywords');
-  const indexId = String(rec?.indexId || '').trim();
-  const indexInComment = (keyMode === 'indexId') && !!s.summaryIndexInComment && !!indexId;
-  // comment 字段通常就是世界书列表里的"标题"。这里保证 prefix 始终在最前，避免"前缀设置无效"。
-  let commentTitle = rawTitle;
-  if (prefix) {
-    if (!commentTitle) commentTitle = prefix;
-    else if (!commentTitle.startsWith(prefix)) commentTitle = `${prefix}｜${commentTitle}`;
-  }
-  // 若启用“索引编号触发”：把 A-001 写进 comment，便于在世界书列表里一眼定位。
-  if (indexInComment) {
-    if (!commentTitle.includes(indexId)) {
-      if (commentTitle === prefix) commentTitle = `${prefix}｜${indexId}`;
-      else if (commentTitle.startsWith(`${prefix}｜`)) commentTitle = commentTitle.replace(`${prefix}｜`, `${prefix}｜${indexId}｜`);
-      else commentTitle = `${prefix}｜${indexId}｜${commentTitle}`;
-      commentTitle = commentTitle.replace(/｜｜+/g, '｜');
-    }
-  }
-  if (!commentTitle) commentTitle = '剧情总结';
-  const comment = `${commentTitle}${range ? `（${range}）` : ''}`;
+  const comment = buildSummaryComment(rec, s, commentPrefix || rec?.commentPrefix || '剧情总结');
 
   // normalize content and make it safe for slash parser (avoid accidental pipe split)
   const content = String(rec.summary || '')
@@ -4390,13 +5581,20 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
     let summaryStatData = null;
     if (s.summaryReadStatData) {
       try {
-        const { statData } = await resolveStatDataComprehensive(chat, {
+        const statSettings = {
           ...s,
           wiRollStatVarName: s.summaryStatVarName || 'stat_data'
-        });
+        };
+        const { statData } = await resolveStatDataComprehensive(chat, statSettings);
         if (statData) {
           summaryStatData = statData;
           console.log('[StoryGuide] Summary loaded stat_data:', summaryStatData);
+        } else {
+          const rawText = await resolveStatDataRawText(chat, statSettings);
+          if (rawText) {
+            summaryStatData = rawText;
+            console.log('[StoryGuide] Summary loaded raw stat_data text');
+          }
         }
       } catch (e) {
         console.warn('[StoryGuide] Failed to load stat_data for summary:', e);
@@ -4478,7 +5676,7 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
         keywords = [indexId];
       }
 
-      const title = rawTitle || `${prefix}`;
+      const title= rawTitle || `${prefix}`;
 
       const rec = {
         title,
@@ -4488,6 +5686,8 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
         modelKeywords: (keyMode === 'indexId') ? modelKeywords : undefined,
         createdAt: Date.now(),
         range: { fromFloor, toFloor, fromIdx: startIdx, toIdx: endIdx },
+        commentPrefix: prefix,
+        commentPrefixBlue: String(s.summaryBlueWorldInfoCommentPrefix || s.summaryWorldInfoCommentPrefix || '剧情总结'),
       };
 
       if (keyMode === 'indexId') {
@@ -4507,7 +5707,7 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
       // 同步进蓝灯索引缓存（用于本地匹配/预筛选）
       try { appendToBlueIndexCache(rec); } catch { /* ignore */ }
 
-      // 生成结构化世界书条目（人物/装备/能力 - 与剧情总结同一事务）
+      // 生成结构化世界书条目（人物/装备/势力/成就/副职业/任务 - 与剧情总结同一事务）
       if (s.structuredEntriesEnabled && (s.summaryToWorldInfo || s.summaryToBlueWorldInfo)) {
         try {
           const structuredResult = await generateStructuredEntries(chunkText, fromFloor, toFloor, meta, s, summaryStatData);
@@ -4527,11 +5727,32 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
                 await writeOrUpdateEquipmentEntry(equip, meta, s);
               }
             }
-            // 写入/更新能力条目
-            if (s.abilityEntriesEnabled && structuredResult.abilities?.length) {
-              console.log(`[StoryGuide] Processing ${structuredResult.abilities.length} ability(s)`);
-              for (const ability of structuredResult.abilities) {
-                await writeOrUpdateAbilityEntry(ability, meta, s);
+            // 写入/更新势力条目
+            if (s.factionEntriesEnabled && structuredResult.factions?.length) {
+              console.log(`[StoryGuide] Processing ${structuredResult.factions.length} faction(s)`);
+              for (const faction of structuredResult.factions) {
+                await writeOrUpdateFactionEntry(faction, meta, s);
+              }
+            }
+            // 写入/更新成就条目
+            if (s.achievementEntriesEnabled && structuredResult.achievements?.length) {
+              console.log(`[StoryGuide] Processing ${structuredResult.achievements.length} achievement(s)`);
+              for (const achievement of structuredResult.achievements) {
+                await writeOrUpdateAchievementEntry(achievement, meta, s);
+              }
+            }
+            // 写入/更新副职业条目
+            if (s.subProfessionEntriesEnabled && structuredResult.subProfessions?.length) {
+              console.log(`[StoryGuide] Processing ${structuredResult.subProfessions.length} sub profession(s)`);
+              for (const subProfession of structuredResult.subProfessions) {
+                await writeOrUpdateSubProfessionEntry(subProfession, meta, s);
+              }
+            }
+            // 写入/更新任务条目
+            if (s.questEntriesEnabled && structuredResult.quests?.length) {
+              console.log(`[StoryGuide] Processing ${structuredResult.quests.length} quest(s)`);
+              for (const quest of structuredResult.quests) {
+                await writeOrUpdateQuestEntry(quest, meta, s);
               }
             }
 
@@ -4548,10 +5769,28 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
                 await deleteEquipmentEntry(equipName, meta, s);
               }
             }
-            if (structuredResult.deletedAbilities?.length) {
-              console.log(`[StoryGuide] Deleting ${structuredResult.deletedAbilities.length} ability(s)`);
-              for (const abilityName of structuredResult.deletedAbilities) {
-                await deleteAbilityEntry(abilityName, meta, s);
+            if (structuredResult.deletedFactions?.length) {
+              console.log(`[StoryGuide] Deleting ${structuredResult.deletedFactions.length} faction(s)`);
+              for (const factionName of structuredResult.deletedFactions) {
+                await deleteFactionEntry(factionName, meta, s);
+              }
+            }
+            if (structuredResult.deletedAchievements?.length) {
+              console.log(`[StoryGuide] Deleting ${structuredResult.deletedAchievements.length} achievement(s)`);
+              for (const achievementName of structuredResult.deletedAchievements) {
+                await deleteAchievementEntry(achievementName, meta, s);
+              }
+            }
+            if (structuredResult.deletedSubProfessions?.length) {
+              console.log(`[StoryGuide] Deleting ${structuredResult.deletedSubProfessions.length} sub profession(s)`);
+              for (const subProfessionName of structuredResult.deletedSubProfessions) {
+                await deleteSubProfessionEntry(subProfessionName, meta, s);
+              }
+            }
+            if (structuredResult.deletedQuests?.length) {
+              console.log(`[StoryGuide] Deleting ${structuredResult.deletedQuests.length} quest(s)`);
+              for (const questName of structuredResult.deletedQuests) {
+                await deleteQuestEntry(questName, meta, s);
               }
             }
 
@@ -4580,20 +5819,30 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
           }
         }
 
-        if (s.summaryToBlueWorldInfo) {
-          try {
-            await writeSummaryToWorldInfoEntry(rec, meta, {
-              target: 'file',
-              file: String(s.summaryBlueWorldInfoFile || ''),
-              commentPrefix: String(s.summaryBlueWorldInfoCommentPrefix || s.summaryWorldInfoCommentPrefix || '剧情总结'),
-              constant: 1,
-            });
-            wroteBlueOk += 1;
-          } catch (e) {
-            console.warn('[StoryGuide] write blue world info failed:', e);
-            writeErrs.push(`${fromFloor}-${toFloor} 蓝灯：${e?.message ?? e}`);
-          }
+      if (s.summaryToBlueWorldInfo) {
+        try {
+          await writeSummaryToWorldInfoEntry(rec, meta, {
+            target: 'file',
+            file: String(s.summaryBlueWorldInfoFile || ''),
+            commentPrefix: String(s.summaryBlueWorldInfoCommentPrefix || s.summaryWorldInfoCommentPrefix || '剧情总结'),
+            constant: 1,
+          });
+          wroteBlueOk += 1;
+        } catch (e) {
+          console.warn('[StoryGuide] write blue world info failed:', e);
+          writeErrs.push(`${fromFloor}-${toFloor} 蓝灯：${e?.message ?? e}`);
         }
+      }
+
+      // 生成大总结（到达阈值时自动触发）
+      try {
+        const megaCreated = await maybeGenerateMegaSummary(meta, s);
+        if (megaCreated > 0) {
+          console.log(`[StoryGuide] Mega summary created: ${megaCreated}`);
+        }
+      } catch (e) {
+        console.warn('[StoryGuide] Mega summary generation failed:', e);
+      }
       }
     }
 
@@ -4721,7 +5970,7 @@ function stripTriggerInjection(text, tag = 'SG_WI_TRIGGERS') {
   return t.replace(reComment, '').replace(rePlain, '').trimEnd();
 }
 
-function buildTriggerInjection(keywords, tag = 'SG_WI_TRIGGERS', style = 'hidden') {
+function buildTriggerInjection(keywords, tag = 'SG_WI_TRIGGERS', style= 'hidden') {
   const kws = sanitizeKeywords(Array.isArray(keywords) ? keywords : []);
   if (!kws.length) return '';
   if (String(style || 'hidden') === 'plain') {
@@ -5018,7 +6267,7 @@ async function computeRollDecisionViaCustom(userText, statData, settings, random
   return res;
 }
 
-function buildRollInjectionFromResult(res, tag = 'SG_ROLL', style = 'hidden') {
+function buildRollInjectionFromResult(res, tag = 'SG_ROLL', style= 'hidden') {
   if (!res) return '';
   const action = String(res.actionLabel || res.action || '').trim();
   const formula = String(res.formula || '').trim();
@@ -5295,6 +6544,24 @@ async function resolveStatDataComprehensive(chat, settings) {
   return { statData: null, rawText: '', source: null };
 }
 
+async function resolveStatDataRawText(chat, settings) {
+  const s = settings || ensureSettings();
+  const steps = [
+    async () => resolveStatDataViaSlashCommand(s),
+    async () => resolveStatDataFromVariableStore(s),
+    async () => resolveStatDataFromTemplate(s),
+    async () => resolveStatDataFromChatDOM(s),
+    async () => resolveStatDataFromLatestAssistant(chat, s),
+  ];
+  for (const step of steps) {
+    try {
+      const { rawText } = await step();
+      if (rawText && String(rawText).trim()) return String(rawText).trim();
+    } catch { /* ignore */ }
+  }
+  return '';
+}
+
 async function maybeInjectRollResult(reason = 'msg_sent') {
   const s = ensureSettings();
   if (!s.wiRollEnabled) return;
@@ -5399,7 +6666,7 @@ async function maybeInjectRollResult(reason = 'msg_sent') {
         userText: lastText,
       });
     }
-    const style = String(s.wiRollInjectStyle || 'hidden').trim() || 'hidden';
+    const style= String(s.wiRollInjectStyle || 'hidden').trim() || 'hidden';
     const rollText = buildRollInjectionFromResult(res, rollTag, style);
     if (rollText) {
       const cleaned = stripTriggerInjection(last.mes ?? last.message ?? '', rollTag);
@@ -5500,7 +6767,7 @@ async function buildRollInjectionForText(userText, chat, settings, logStatus) {
     });
   }
   if (!res.random) res.random = { roll: randomRoll, weight: clampFloat(s.wiRollRandomWeight, 0, 1, 0.3) };
-  const style = String(s.wiRollInjectStyle || 'hidden').trim() || 'hidden';
+  const style= String(s.wiRollInjectStyle || 'hidden').trim() || 'hidden';
   const rollText = buildRollInjectionFromResult(res, rollTag, style);
   if (rollText) logStatus?.('ROLL 已注入：判定完成', 'ok');
   return rollText || null;
@@ -5564,7 +6831,7 @@ async function buildTriggerInjectionForText(userText, chat, settings, logStatus)
   const keywords = Array.from(kwSet);
   if (!keywords.length) return null;
 
-  const style = String(s.wiTriggerInjectStyle || 'hidden').trim() || 'hidden';
+  const style= String(s.wiTriggerInjectStyle || 'hidden').trim() || 'hidden';
   const injected = buildTriggerInjection(keywords, tagForStrip, style);
   if (injected) logStatus?.(`索引已注入：${pickedNames.slice(0, 4).join('、')}${pickedNames.length > 4 ? '…' : ''}`, 'ok');
   return injected || null;
@@ -5895,6 +7162,52 @@ function getBlueIndexEntriesFast() {
   return (Array.isArray(s.summaryBlueIndex) ? s.summaryBlueIndex : []);
 }
 
+function detectIndexEntryTypeByTitle(title, settings) {
+  const s = settings || ensureSettings();
+  const t = String(title || '').trim();
+  if (!t) return 'plot';
+  const prefixes = [
+    { type: 'character', prefix: String(s.characterEntryPrefix || '人物') },
+    { type: 'equipment', prefix: String(s.equipmentEntryPrefix || '装备') },
+    { type: 'faction', prefix: String(s.factionEntryPrefix || '势力') },
+    { type: 'achievement', prefix: String(s.achievementEntryPrefix || '成就') },
+    { type: 'subProfession', prefix: String(s.subProfessionEntryPrefix || '副职业') },
+    { type: 'quest', prefix: String(s.questEntryPrefix || '任务') },
+  ];
+  for (const p of prefixes) {
+    const pref = String(p.prefix || '').trim();
+    if (!pref) continue;
+    if (t.startsWith(`${pref}｜`) || t.includes(`${pref}｜`)) return p.type;
+  }
+  return 'plot';
+}
+
+function addStructuredIndexCandidates(out, entriesCache, prefix, type, seen) {
+  for (const entry of Object.values(entriesCache || {})) {
+    if (!entry || entry.targetType !== 'green') continue;
+    if (!entry.name || !entry.indexId) continue;
+    const key = buildStructuredEntryKey(prefix, entry.name, entry.indexId);
+    const kws = [key];
+    if (Array.isArray(entry.aliases)) {
+      for (const a of entry.aliases) {
+        const alias = String(a || '').trim();
+        if (!alias) continue;
+        if (kws.length >= 6) break;
+        kws.push(alias);
+      }
+    }
+    const dedupKey = `${prefix}__${entry.name}__${entry.indexId}`;
+    if (seen && seen.has(dedupKey)) continue;
+    if (seen) seen.add(dedupKey);
+    out.push({
+      title: `${prefix}｜${entry.name}`,
+      summary: String(entry.content || '').trim(),
+      keywords: kws,
+      type,
+    });
+  }
+}
+
 function collectBlueIndexCandidates() {
   const s = ensureSettings();
   const meta = getSummaryMeta();
@@ -5903,28 +7216,92 @@ function collectBlueIndexCandidates() {
 
   const fromMeta = Array.isArray(meta?.history) ? meta.history : [];
   for (const r of fromMeta) {
-    const title = String(r?.title || '').trim();
+    const title= String(r?.title || '').trim();
     const summary = String(r?.summary || '').trim();
     const keywords = sanitizeKeywords(r?.keywords);
     if (!summary) continue;
     const key = `${title}__${summary.slice(0, 24)}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ title: title || (keywords[0] ? `条目：${keywords[0]}` : '条目'), summary, keywords });
+    out.push({ title: title || (keywords[0] ? `条目：${keywords[0]}` : '条目'), summary, keywords, type: 'plot' });
   }
 
   const fromImported = getBlueIndexEntriesFast();
   for (const r of fromImported) {
-    const title = String(r?.title || '').trim();
+    const title= String(r?.title || '').trim();
     const summary = String(r?.summary || '').trim();
     const keywords = sanitizeKeywords(r?.keywords);
     if (!summary) continue;
     const key = `${title}__${summary.slice(0, 24)}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ title: title || (keywords[0] ? `条目：${keywords[0]}` : '条目'), summary, keywords });
+    out.push({
+      title: title || (keywords[0] ? `条目：${keywords[0]}` : '条目'),
+      summary,
+      keywords,
+      type: detectIndexEntryTypeByTitle(title, s),
+    });
   }
 
+  addStructuredIndexCandidates(out, meta.characterEntries, String(s.characterEntryPrefix || '人物'), 'character', seen);
+  addStructuredIndexCandidates(out, meta.equipmentEntries, String(s.equipmentEntryPrefix || '装备'), 'equipment', seen);
+  addStructuredIndexCandidates(out, meta.factionEntries, String(s.factionEntryPrefix || '势力'), 'faction', seen);
+  addStructuredIndexCandidates(out, meta.achievementEntries, String(s.achievementEntryPrefix || '成就'), 'achievement', seen);
+  addStructuredIndexCandidates(out, meta.subProfessionEntries, String(s.subProfessionEntryPrefix || '副职业'), 'subProfession', seen);
+  addStructuredIndexCandidates(out, meta.questEntries, String(s.questEntryPrefix || '任务'), 'quest', seen);
+
+  return out;
+}
+
+function getIndexTypeLimits(settings) {
+  const s = settings || ensureSettings();
+  return {
+    maxCharacters: clampInt(s.wiTriggerMaxCharacters, 0, 10, 2),
+    maxEquipments: clampInt(s.wiTriggerMaxEquipments, 0, 10, 2),
+    maxFactions: clampInt(s.wiTriggerMaxFactions, 0, 10, 2),
+    maxAchievements: clampInt(s.wiTriggerMaxAchievements, 0, 10, 2),
+    maxSubProfessions: clampInt(s.wiTriggerMaxSubProfessions, 0, 10, 2),
+    maxQuests: clampInt(s.wiTriggerMaxQuests, 0, 10, 2),
+    maxPlot: clampInt(s.wiTriggerMaxPlot, 0, 10, 3),
+  };
+}
+
+function normalizeIndexEntryType(entry, settings) {
+  if (entry?.type) return entry.type;
+  return detectIndexEntryTypeByTitle(entry?.title || '', settings);
+}
+
+function applyIndexTypeLimits(picked, settings, maxEntries) {
+  const limits = getIndexTypeLimits(settings);
+  const counts = {
+    character: 0,
+    equipment: 0,
+    faction: 0,
+    achievement: 0,
+    subProfession: 0,
+    quest: 0,
+    plot: 0,
+  };
+  const maxByType = {
+    character: limits.maxCharacters,
+    equipment: limits.maxEquipments,
+    faction: limits.maxFactions,
+    achievement: limits.maxAchievements,
+    subProfession: limits.maxSubProfessions,
+    quest: limits.maxQuests,
+    plot: limits.maxPlot,
+  };
+
+  const out = [];
+  for (const item of picked) {
+    const e = item?.e || item;
+    const type = normalizeIndexEntryType(e, settings);
+    const maxAllowed = maxByType[type] ?? maxEntries;
+    if (Number.isFinite(maxAllowed) && maxAllowed >= 0 && counts[type] >= maxAllowed) continue;
+    counts[type] += 1;
+    out.push(item);
+    if (out.length >= maxEntries) break;
+  }
   return out;
 }
 
@@ -5946,28 +7323,43 @@ function pickRelevantIndexEntries(recentText, userText, candidates, maxEntries, 
     if (score >= minScore) scored.push({ e, score });
   }
   scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, maxEntries);
+  return applyIndexTypeLimits(scored, ensureSettings(), maxEntries);
 }
 
 function buildIndexPromptMessages(recentText, userText, candidatesForModel, maxPick) {
   const s = ensureSettings();
+  const maxCharacters = clampInt(s.wiTriggerMaxCharacters, 0, 10, 2);
+  const maxEquipments = clampInt(s.wiTriggerMaxEquipments, 0, 10, 2);
+  const maxFactions = clampInt(s.wiTriggerMaxFactions, 0, 10, 2);
+  const maxAchievements = clampInt(s.wiTriggerMaxAchievements, 0, 10, 2);
+  const maxSubProfessions = clampInt(s.wiTriggerMaxSubProfessions, 0, 10, 2);
+  const maxQuests = clampInt(s.wiTriggerMaxQuests, 0, 10, 2);
+  const maxPlot = clampInt(s.wiTriggerMaxPlot, 0, 10, 3);
+
   const sys = String(s.wiIndexSystemPrompt || DEFAULT_INDEX_SYSTEM_PROMPT).trim() || DEFAULT_INDEX_SYSTEM_PROMPT;
   const tmpl = String(s.wiIndexUserTemplate || DEFAULT_INDEX_USER_TEMPLATE).trim() || DEFAULT_INDEX_USER_TEMPLATE;
 
   const candidatesJson = JSON.stringify(candidatesForModel, null, 0);
-
-  const user = tmpl
+  const replaceTokens = (str) => String(str || '')
     .replaceAll('{{userMessage}}', String(userText || ''))
     .replaceAll('{{recentText}}', String(recentText || ''))
     .replaceAll('{{candidates}}', candidatesJson)
-    .replaceAll('{{maxPick}}', String(maxPick));
+    .replaceAll('{{maxPick}}', String(maxPick))
+    .replaceAll('{{maxCharacters}}', String(maxCharacters))
+    .replaceAll('{{maxEquipments}}', String(maxEquipments))
+    .replaceAll('{{maxFactions}}', String(maxFactions))
+    .replaceAll('{{maxAchievements}}', String(maxAchievements))
+    .replaceAll('{{maxSubProfessions}}', String(maxSubProfessions))
+    .replaceAll('{{maxQuests}}', String(maxQuests))
+    .replaceAll('{{maxPlot}}', String(maxPlot));
 
+  const user = replaceTokens(tmpl);
   const enforced = user + `
 
 ` + INDEX_JSON_REQUIREMENT.replaceAll('maxPick', String(maxPick));
 
   return [
-    { role: 'system', content: sys },
+    { role: 'system', content: replaceTokens(sys) },
     { role: 'user', content: enforced },
   ];
 }
@@ -5992,11 +7384,11 @@ async function pickRelevantIndexEntriesLLM(recentText, userText, candidates, max
 
   const candidatesForModel = shortlist.map((x, i) => {
     const e = x.e || x;
-    const title = String(e.title || '').trim();
+    const title= String(e.title || '').trim();
     const summary0 = String(e.summary || '').trim();
     const summary = summary0.length > candMaxChars ? (summary0.slice(0, candMaxChars) + '…') : summary0;
     const kws = Array.isArray(e.keywords) ? e.keywords.slice(0, 24) : [];
-    return { id: i, title: title || '条目', summary, keywords: kws };
+    return { id: i, title: title || '条目', summary, keywords: kws, type: normalizeIndexEntryType(e, s) };
   });
 
   const messages = buildIndexPromptMessages(recentText, userText, candidatesForModel, maxEntries);
@@ -6052,7 +7444,7 @@ async function pickRelevantIndexEntriesLLM(recentText, userText, candidates, max
     if (origin) picked.push({ e: origin, score: Number(shortlist[id]?.score || 0) });
     if (picked.length >= maxEntries) break;
   }
-  return picked;
+  return applyIndexTypeLimits(picked, s, maxEntries);
 }
 
 
@@ -6147,7 +7539,7 @@ async function maybeInjectWorldInfoTriggers(reason = 'msg_sent') {
   if (!keywords.length) return;
 
   const tag = tagForStrip;
-  const style = String(s.wiTriggerInjectStyle || 'hidden').trim() || 'hidden';
+  const style= String(s.wiTriggerInjectStyle || 'hidden').trim() || 'hidden';
   const cleaned = stripTriggerInjection(last.mes ?? last.message ?? '', tag);
   const injected = cleaned + buildTriggerInjection(keywords, tag, style);
   last.mes = injected;
@@ -6209,7 +7601,7 @@ function buildInlineMarkdownFromModules(parsedJson, modules, mode, showEmpty) {
 
     const hasKey = parsedJson && Object.hasOwn(parsedJson, m.key);
     const val = hasKey ? parsedJson[m.key] : undefined;
-    const title = m.title || m.key;
+    const title= m.title || m.key;
 
     if (m.type === 'list') {
       const arr = Array.isArray(val) ? val : [];
@@ -6549,19 +7941,19 @@ async function runInlineAppendForLastMessage(opts = {}) {
     return;
   }
 
-    try {
-      const { snapshotText } = buildSnapshot();
+  try {
+    const { snapshotText } = buildSnapshot();
 
-      const modules = getModules('append');
-      // append 里 schema 按 inline 模块生成；如果用户把 inline 全关了，就不生成
-      if (!modules.length) return;
+    const modules = getModules('append');
+    // append 里 schema 按 inline 模块生成；如果用户把 inline 全关了，就不生成
+    if (!modules.length) return;
 
-      await updateMapFromSnapshot(snapshotText);
+    await updateMapFromSnapshot(snapshotText);
 
-      // 对 “compact/standard” 给一点暗示（不强制），避免用户模块 prompt 很长时没起作用
-      const modeHint = (s.appendMode === 'standard')
-        ? `\n【附加要求】inline 输出可比面板更短，但不要丢掉关键信息。\n`
-        : `\n【附加要求】inline 输出尽量短：每个字段尽量 1~2 句/2 条以内。\n`;
+    // 对 “compact/standard” 给一点暗示（不强制），避免用户模块 prompt 很长时没起作用
+    const modeHint = (s.appendMode === 'standard')
+      ? `\n【附加要求】inline 输出可比面板更短，但不要丢掉关键信息。\n`
+      : `\n【附加要求】inline 输出尽量短：每个字段尽量 1~2 句/2 条以内。\n`;
 
     const schema = buildSchemaFromModules(modules);
     const messages = buildPromptMessages(snapshotText + modeHint, s.spoilerLevel, modules, 'append');
@@ -6670,7 +8062,22 @@ function fillIndexModelSelect(modelIds, selected) {
   const $sel = $('#sg_wiIndexModelSelect');
   if (!$sel.length) return;
   $sel.empty();
-  $sel.append(`<option value="">（选择模型）</option>`);
+  $sel.append(`<option value="">(选择模型)</option>`);
+  (modelIds || []).forEach(id => {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = id;
+    if (selected && id === selected) opt.selected = true;
+    $sel.append(opt);
+  });
+}
+
+
+function fillRollModelSelect(modelIds, selected) {
+  const $sel = $('#sg_wiRollModelSelect');
+  if (!$sel.length) return;
+  $sel.empty();
+  $sel.append(`<option value="">(选择模型)</option>`);
   (modelIds || []).forEach(id => {
     const opt = document.createElement('option');
     opt.value = id;
@@ -6878,6 +8285,1033 @@ async function refreshIndexModels() {
 
 
 
+async function refreshRollModels() {
+  const s = ensureSettings();
+  const raw = String($('#sg_wiRollCustomEndpoint').val() || s.wiRollCustomEndpoint || '').trim();
+  const apiBase = normalizeBaseUrl(raw);
+  if (!apiBase) { setStatus('请先填写"ROLL独立API基础URL"再刷新模型', 'warn'); return; }
+
+  setStatus('正在刷新"ROLL独立API"模型列表…', 'warn');
+
+  const apiKey = String($('#sg_wiRollCustomApiKey').val() || s.wiRollCustomApiKey || '');
+  const statusUrl = '/api/backends/chat-completions/status';
+
+  const body = {
+    reverse_proxy: apiBase,
+    chat_completion_source: 'custom',
+    custom_url: apiBase,
+    custom_include_headers: apiKey ? `Authorization: Bearer ${apiKey}` : ''
+  };
+
+  try {
+    const headers = { ...getStRequestHeadersCompat(), 'Content-Type': 'application/json' };
+    const res = await fetch(statusUrl, { method: 'POST', headers, body: JSON.stringify(body) });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      const err = new Error(`状态检查失败: HTTP ${res.status} ${res.statusText}\n${txt}`);
+      err.status = res.status;
+      throw err;
+    }
+
+    const data = await res.json().catch(() => ({}));
+
+    let modelsList = [];
+    if (Array.isArray(data?.models)) modelsList = data.models;
+    else if (Array.isArray(data?.data)) modelsList = data.data;
+    else if (Array.isArray(data)) modelsList = data;
+
+    let ids = [];
+    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
+
+    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
+
+    if (!ids.length) {
+      setStatus('刷新成功，但未解析到模型列表（返回格式不兼容）', 'warn');
+      return;
+    }
+
+    s.wiRollCustomModelsCache = ids;
+    saveSettings();
+    fillRollModelSelect(ids, s.wiRollCustomModel);
+    setStatus(`已刷新ROLL模型：${ids.length} 个（后端代理）`, 'ok');
+    return;
+  } catch (e) {
+    const status = e?.status;
+    if (!(status === 404 || status === 405)) console.warn('[StoryGuide] roll status check failed; fallback to direct /models', e);
+  }
+
+  try {
+    const modelsUrl = (function (base) {
+      const u = normalizeBaseUrl(base);
+      if (!u) return '';
+      if (/\/v1$/.test(u)) return u + '/models';
+      if (/\/v1\b/i.test(u)) return u.replace(/\/+$/, '') + '/models';
+      return u + '/v1/models';
+    })(apiBase);
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+    const res = await fetch(modelsUrl, { method: 'GET', headers });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      throw new Error(`直连 /models 失败: HTTP ${res.status} ${res.statusText}\n${txt}`);
+    }
+    const data = await res.json().catch(() => ({}));
+
+    let modelsList = [];
+    if (Array.isArray(data?.models)) modelsList = data.models;
+    else if (Array.isArray(data?.data)) modelsList = data.data;
+    else if (Array.isArray(data)) modelsList = data;
+
+    let ids = [];
+    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
+
+    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
+
+    if (!ids.length) { setStatus('直连刷新失败：未解析到模型列表', 'warn'); return; }
+
+    s.wiRollCustomModelsCache = ids;
+    saveSettings();
+    fillRollModelSelect(ids, s.wiRollCustomModel);
+    setStatus(`已刷新ROLL模型：${ids.length} 个（直连 fallback）`, 'ok');
+  } catch (e) {
+    setStatus(`刷新ROLL模型失败：${e?.message ?? e}`, 'err');
+  }
+}
+
+
+// -------------------- 图像生成模块 --------------------
+
+function getRecentStoryContent(count) {
+  const chat = SillyTavern.getContext().chat || [];
+  const messages = chat.slice(-count).filter(m => m.mes && !m.is_system);
+  return messages.map(m => m.mes).join('\n\n');
+}
+
+function setImageGenStatus(text, kind = '') {
+  const $s = $('#sg_imageGenStatus');
+  $s.removeClass('ok err warn').addClass(kind || '');
+  $s.text(text || '');
+}
+
+function closeImagePreviewModal() {
+  $('#sg_image_preview_backdrop').removeClass('show');
+  $('body').removeClass('sg-image-preview-open');
+}
+
+function openImagePreviewModal(src, altText = 'Image preview') {
+  if (!src) return;
+  if (!$('#sg_image_preview_backdrop').length) {
+    document.body.insertAdjacentHTML('beforeend', `
+      <div id="sg_image_preview_backdrop" class="sg-image-preview-backdrop">
+        <div class="sg-image-preview-panel">
+          <button class="sg-image-preview-close" type="button" aria-label="Close">×</button>
+          <img id="sg_image_preview_img" alt="${escapeHtml(altText)}">
+        </div>
+      </div>
+    `);
+
+    $('#sg_image_preview_backdrop').on('click', (e) => {
+      if (e.target && e.target.id === 'sg_image_preview_backdrop') closeImagePreviewModal();
+    });
+
+    $(document).on('keydown', (e) => {
+      if (e.key === 'Escape') closeImagePreviewModal();
+    });
+
+    $(document).on('click', '#sg_image_preview_backdrop .sg-image-preview-close', (e) => {
+      e.preventDefault();
+      closeImagePreviewModal();
+    });
+  }
+
+  $('#sg_image_preview_img').attr('src', src);
+  $('#sg_image_preview_img').attr('alt', altText || 'Image preview');
+  $('#sg_image_preview_backdrop').addClass('show');
+  $('body').addClass('sg-image-preview-open');
+}
+
+
+// 通用 LLM 调用函数（使用图像生成模块独立 API）
+async function callLLM(messages, opts = {}) {
+  const s = ensureSettings();
+  const temperature = opts.temperature ?? 0.7;
+  const maxTokens = opts.max_tokens ?? s.imageGenCustomMaxTokens ?? 1024;
+
+
+  // 使用图像生成模块独立的 API 配置
+  const endpoint = s.imageGenCustomEndpoint || '';
+  const apiKey = s.imageGenCustomApiKey || '';
+  const model = s.imageGenCustomModel || 'gpt-4o-mini';
+
+  if (!endpoint) {
+    throw new Error('请先在「图像生成」标签页配置 LLM API 基础URL');
+  }
+
+  return await callViaCustom(endpoint, apiKey, model, messages, temperature, maxTokens, 0.95, false);
+}
+
+// 刷新图像生成 LLM 模型列表
+async function refreshImageGenModels() {
+  const s = ensureSettings();
+  const raw = String($('#sg_imageGenCustomEndpoint').val() || s.imageGenCustomEndpoint || '').trim();
+  const apiBase = normalizeBaseUrl(raw);
+  if (!apiBase) { setImageGenStatus('请先填写 LLM API 基础URL', 'warn'); return; }
+
+  setImageGenStatus('正在刷新模型列表…', 'warn');
+
+  try {
+    const apiKey = String($('#sg_imageGenCustomApiKey').val() || s.imageGenCustomApiKey || '').trim();
+    const url = apiBase + '/v1/models';
+    const headers = apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {};
+
+    const response = await fetch(url, { headers });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const data = await response.json();
+    const models = (data.data || data.models || data || [])
+      .map(m => typeof m === 'string' ? m : (m.id || m.name || ''))
+      .filter(Boolean)
+      .sort();
+
+    if (!models.length) { setImageGenStatus('未找到可用模型', 'warn'); return; }
+
+    const $sel = $('#sg_imageGenCustomModel');
+    const cur = $sel.val();
+    $sel.empty();
+    for (const m of models) {
+      $sel.append($('<option>').val(m).text(m));
+    }
+    if (models.includes(cur)) $sel.val(cur);
+    else if (models.length) $sel.val(models[0]);
+
+    pullUiToSettings(); saveSettings();
+    setImageGenStatus(`✅ 已加载 ${models.length} 个模型`, 'ok');
+  } catch (e) {
+    console.error('[ImageGen] Refresh models failed:', e);
+    setImageGenStatus(`❌ 刷新失败: ${e?.message || e}`, 'err');
+  }
+}
+
+function normalizeCharacterProfiles(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function getCharacterProfilesFromSettings(options = {}) {
+  const s = ensureSettings();
+  const list = normalizeCharacterProfiles(s.imageGenCharacterProfiles);
+  const mapped = list.map((entry) => ({
+    name: String(entry?.name || '').trim(),
+    keys: Array.isArray(entry?.keys) ? entry.keys.map(k => String(k || '').toLowerCase().trim()).filter(Boolean) : [],
+    tags: String(entry?.tags || '').trim(),
+    enabled: entry?.enabled !== false
+  }));
+  if (options.includeEmpty) {
+    return mapped.filter(entry => entry.name || entry.tags || (entry.keys && entry.keys.length));
+  }
+  return mapped.filter(entry => entry.name && entry.tags);
+}
+
+function renderCharacterProfilesUi() {
+  const s = ensureSettings();
+  const list = getCharacterProfilesFromSettings({ includeEmpty: true });
+  const $wrap = $('#sg_imageGenProfiles');
+  if (!$wrap.length) return;
+  if (!list.length) {
+    $wrap.html('<div class="sg-hint">暂无人物形象，点击“添加人物”创建。</div>');
+    return;
+  }
+
+  const rows = list.map((entry, idx) => {
+    const keys = (entry.keys || []).join(', ');
+    return `
+      <div class="sg-profile-row" data-index="${idx}">
+        <div class="sg-grid2">
+          <div class="sg-field">
+            <label>人物名</label>
+            <input type="text" class="sg-profile-name" value="${escapeHtml(entry.name)}">
+          </div>
+          <div class="sg-field">
+            <label>关键词（逗号分隔）</label>
+            <input type="text" class="sg-profile-keys" value="${escapeHtml(keys)}">
+          </div>
+        </div>
+        <div class="sg-field" style="margin-top:6px;">
+          <label>形象标签</label>
+          <textarea rows="3" class="sg-profile-tags" placeholder="1girl, silver hair, ...">${escapeHtml(entry.tags)}</textarea>
+        </div>
+        <div class="sg-row sg-inline" style="margin-top:6px; gap:12px;">
+          <label class="sg-check"><input type="checkbox" class="sg-profile-enabled" ${entry.enabled ? 'checked' : ''}>启用</label>
+          <button class="menu_button sg-btn sg-profile-delete" type="button">删除</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+  $wrap.html(rows);
+}
+
+function collectCharacterProfilesFromUi() {
+  const list = [];
+  $('#sg_imageGenProfiles .sg-profile-row').each((_, el) => {
+    const $row = $(el);
+    const name = String($row.find('.sg-profile-name').val() || '').trim();
+    const keysRaw = String($row.find('.sg-profile-keys').val() || '').trim();
+    const tags = String($row.find('.sg-profile-tags').val() || '').trim();
+    const enabled = $row.find('.sg-profile-enabled').is(':checked');
+    if (!name && !tags && !keysRaw) return;
+    const keys = keysRaw
+      .split(',')
+      .map(k => String(k || '').toLowerCase().trim())
+      .filter(Boolean);
+    list.push({ name, keys, tags, enabled });
+  });
+  return list;
+}
+
+function matchCharacterTagsFromProfiles(storyContent) {
+  const s = ensureSettings();
+  if (!s.imageGenCharacterProfilesEnabled) return '';
+  const entries = getCharacterProfilesFromSettings();
+  if (!entries.length) return '';
+
+  const text = String(storyContent || '').toLowerCase();
+  const matched = [];
+
+  for (const entry of entries) {
+    if (!entry.enabled) continue;
+    const nameMatch = entry.name && text.includes(entry.name.toLowerCase());
+    const keyMatch = entry.keys?.some(k => text.includes(k));
+    if (nameMatch || keyMatch) matched.push(entry);
+  }
+
+  if (!matched.length) return '';
+
+  const allTags = matched.map(e => e.tags).join(', ');
+  console.log('[ImageGen] Matched profiles:', matched.map(e => e.name));
+  return allTags;
+}
+
+
+function getImageGenBatchPatterns() {
+  const s = ensureSettings();
+  const raw = String(s.imageGenBatchPatterns || '').trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((item, i) => ({
+      label: String(item?.label || `组${i + 1}`),
+      type: String(item?.type || 'character'),
+      detail: String(item?.detail || '').trim()
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function splitStoryIntoParts(text, count) {
+  const clean = String(text || '').trim();
+  if (!clean) return Array(count).fill('');
+  const paras = clean.split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
+  if (paras.length >= count) return paras.slice(0, count);
+  const parts = [];
+  const total = clean.length;
+  const chunk = Math.max(1, Math.floor(total / count));
+  for (let i = 0; i < count; i += 1) {
+    const start = i * chunk;
+    const end = i === count - 1 ? total : Math.min(total, (i + 1) * chunk);
+    parts.push(clean.slice(start, end).trim());
+  }
+  return parts;
+}
+
+
+
+
+function getBatchDistinctHint(index, total) {
+  if (!Number.isFinite(index)) return '';
+  const hints = [
+    '使用近景构图，强调面部表情',
+    '使用中景构图，强调姿态与动作',
+    '使用互动构图，强调人物关系',
+    '使用远景构图，强调环境与气氛',
+    '使用趣味构图，强调轻松彩蛋动作',
+    '使用全身构图，强调姿态与服装',
+    '使用对战构图，强调动感与张力',
+    '使用对话构图，强调视线互动',
+    '使用场景构图，强调空间层次',
+    '使用光影构图，强调氛围',
+    '使用情绪构图，强调情感',
+    '使用静态构图，强调安静氛围'
+  ];
+  return hints[index % hints.length];
+}
+
+function renderImageGenBatchPreview() {
+  const s = ensureSettings();
+  const $wrap = $('#sg_imagegen_batch');
+  if (!$wrap.length) return;
+  if (!imageGenBatchPrompts.length) {
+    const status = imageGenBatchBusy ? '生成中…' : (imageGenBatchStatus || '尚未生成提示词');
+    $wrap.html(`
+      <div class="sg-floating-row">
+        <div class="sg-floating-title-sm">提示词预览</div>
+        <div class="sg-floating-status">${escapeHtml(status)}</div>
+      </div>
+      <div class="sg-floating-empty">尚未生成提示词</div>
+    `);
+    return;
+  }
+
+  const current = imageGenBatchPrompts[imageGenPreviewIndex] || imageGenBatchPrompts[0];
+  const counter = `${imageGenPreviewIndex + 1}/${imageGenBatchPrompts.length}`;
+  const status = imageGenBatchBusy ? '生成中…' : (imageGenBatchStatus || '就绪');
+  const imgUrl = imageGenImageUrls[imageGenPreviewIndex] || '';
+  const imgHtml = imgUrl
+    ? `<img class="sg-floating-image sg-image-zoom" src="${escapeHtml(imgUrl)}" data-full="${escapeHtml(imgUrl)}" alt="Generated" style="cursor: zoom-in;" />`
+    : '<div class="sg-floating-empty">暂无图像</div>';
+  const regenDisabled = (!imgUrl || imageGenBatchBusy) ? 'disabled' : '';
+  const model = String(s.novelaiModel || DEFAULT_SETTINGS.novelaiModel || 'nai-diffusion-4-5-full');
+  const resolution = String(s.novelaiResolution || '832x1216');
+  const steps = s.novelaiSteps || 28;
+  const scale = s.novelaiScale || 5;
+  const sampler = String(s.novelaiSampler || (model.includes('diffusion-4') ? 'k_euler_ancestral' : 'k_euler'));
+  const legacy = model.includes('diffusion-4') ? (s.novelaiLegacy !== false) : true;
+  const cfgRescale = clampFloat(s.novelaiCfgRescale, 0, 1, 0);
+  const noiseSchedule = String(s.novelaiNoiseSchedule || 'native');
+  const varietyBoost = s.novelaiVarietyBoost ? '开' : '关';
+  const seedLabel = s.novelaiFixedSeedEnabled ? `固定:${clampInt(s.novelaiFixedSeed, 0, 4294967295, 0)}` : '随机';
+  const negative = String((s.novelaiNegativePrompt || '').trim());
+  const negativePreview = negative ? `${negative.slice(0, 160)}${negative.length > 160 ? '…' : ''}` : '（空）';
+  const legacyLabel = legacy ? '开' : '关';
+  const expandLabel = imageGenPreviewExpanded ? '折叠预览' : '展开预览';
+  const previewHiddenClass = imageGenPreviewExpanded ? '' : 'sg-floating-preview-collapsed';
+  const paramsHtml = `
+    <div class="sg-floating-params ${previewHiddenClass}">
+      <div><b>模型</b>：${escapeHtml(model)}</div>
+      <div><b>分辨率</b>：${escapeHtml(resolution)}</div>
+      <div><b>Steps</b>：${escapeHtml(String(steps))}｜<b>Scale</b>：${escapeHtml(String(scale))}</div>
+      <div><b>Sampler</b>：${escapeHtml(sampler)}｜<b>Seed</b>：${escapeHtml(seedLabel)}｜<b>Legacy</b>：${escapeHtml(legacyLabel)}</div>
+      <div><b>CFG Rescale</b>：${escapeHtml(String(cfgRescale))}｜<b>Noise</b>：${escapeHtml(noiseSchedule)}｜<b>Variety</b>：${escapeHtml(varietyBoost)}</div>
+      <div><b>负面</b>：${escapeHtml(negativePreview)}</div>
+    </div>
+    <div class="sg-floating-row sg-floating-row-actions" style="margin-top:-2px;">
+      <button class="sg-floating-mini-btn" id="sg_imagegen_toggle_preview">${escapeHtml(expandLabel)}</button>
+      <button class="sg-floating-mini-btn" id="sg_imagegen_copy_payload">复制请求参数</button>
+    </div>
+  `;
+  $wrap.html(`
+    <div class="sg-floating-row">
+      <div class="sg-floating-title-sm">提示词预览（${escapeHtml(counter)}）</div>
+      <div class="sg-floating-status">${escapeHtml(status)}</div>
+    </div>
+    <div class="sg-floating-prompt">${escapeHtml(String(current.positive || ''))}</div>
+    ${paramsHtml}
+    <div class="sg-floating-row sg-floating-row-actions">
+      <button class="sg-floating-mini-btn" id="sg_imagegen_prev">◀</button>
+      <button class="sg-floating-mini-btn" id="sg_imagegen_next">▶</button>
+      <div class="sg-floating-spacer"></div>
+      <button class="sg-floating-mini-btn" id="sg_imagegen_regen" ${regenDisabled}>重生成</button>
+      <button class="sg-floating-mini-btn" id="sg_imagegen_clear">清空</button>
+    </div>
+    <div class="sg-floating-image-wrap">${imgHtml}</div>
+    <div class="sg-floating-row sg-floating-row-actions" style="margin-top:6px;">
+      <button class="sg-floating-mini-btn" id="sg_imagegen_download">下载图像</button>
+    </div>
+  `);
+
+
+  if (!imgUrl) $('#sg_imagegen_regen').prop('disabled', true);
+}
+
+async function generateImagePromptBatch() {
+  const s = ensureSettings();
+  if (!s.imageGenBatchEnabled) return [];
+
+  const lookback = s.imageGenLookbackMessages || 5;
+  let storyContent = getRecentStoryContent(lookback);
+  if (s.imageGenPromptRulesEnabled && s.imageGenPromptRules) {
+    storyContent = applyPromptRules(storyContent, s.imageGenPromptRules);
+  }
+  if (!storyContent.trim()) throw new Error('没有找到对话内容');
+
+  let statData = null;
+  if (s.imageGenReadStatData) {
+    try {
+      const ctx = SillyTavern.getContext();
+      const chat = Array.isArray(ctx?.chat) ? ctx.chat : [];
+      const { statData: loaded } = await resolveStatDataComprehensive(chat, {
+        ...s,
+        wiRollStatVarName: s.imageGenStatVarName || 'stat_data'
+      });
+      if (loaded) {
+        statData = loaded;
+        console.log('[ImageGen] Loaded stat_data for image batch prompt:', statData);
+      }
+    } catch (e) {
+      console.warn('[ImageGen] Failed to load stat_data for image batch prompt:', e);
+    }
+  }
+
+  const statDataJson = statData ? JSON.stringify(statData, null, 2) : '';
+  const profileTags = matchCharacterTagsFromProfiles(storyContent);
+
+  const patterns = getImageGenBatchPatterns();
+  if (!patterns.length) throw new Error('未配置批次模板');
+
+  const storyParts = splitStoryIntoParts(storyContent, 5);
+  const results = [];
+
+  let batchPrompt = `请根据以下故事内容生成一组图像提示词列表（JSON 数组）。\n\n`;
+  if (statDataJson) {
+    batchPrompt += `【角色状态数据】：\n${statDataJson}\n\n`;
+  }
+
+  batchPrompt += `需要生成 ${patterns.length} 组，每组输出 JSON 对象：{ "label":"", "type":"", "subject":"", "positive":"", "negative":"" }。\n`;
+  batchPrompt += `要求：只输出 JSON 数组，不要其它文字。positive/negative 必须是英文标签串（逗号分隔）。\n`;
+
+  const patternLines = patterns.map((pattern, idx) => {
+    let rule = '';
+    if (pattern.type === 'story') {
+      const part = storyParts[idx] || storyContent;
+      rule = `剧情代表性画面。剧情片段：${part}`;
+    } else if (pattern.type === 'character_close') {
+      rule = '单人女性近景特写，强调脸部与表情。';
+    } else if (pattern.type === 'character_full') {
+      rule = '单人女性全身立绘，展示服装与姿态。';
+    } else if (pattern.type === 'duo') {
+      rule = '双人同框互动，突出动作关系与情绪交流；即使剧情没有双人也要生成双人构图。';
+    } else if (pattern.type === 'scene') {
+      rule = '场景图提示词，重点描述环境和氛围。';
+    } else if (pattern.type === 'custom_female_1') {
+      const custom = String(s.imageGenCustomFemalePrompt1 || '').trim();
+      rule = `女性角色提示词，融合自定义描述：${custom || '（空）'}`;
+    } else if (pattern.type === 'custom_female_2') {
+      const custom = String(s.imageGenCustomFemalePrompt2 || '').trim();
+      rule = `女性角色提示词，融合自定义描述：${custom || '（空）'}`;
+    } else {
+      rule = '彩蛋图提示词，使用当前角色/场景，但内容与剧情不同。';
+    }
+    const distinctHint = getBatchDistinctHint(idx, patterns.length);
+    const detail = pattern.detail ? `细化：${pattern.detail}` : '';
+    const hint = distinctHint ? `构图提示：${distinctHint}` : '';
+    const parts = [rule, hint, detail].filter(Boolean).join(' | ');
+    return `${idx + 1}. label=${pattern.label}, type=${pattern.type} => ${parts}`;
+  }).join('\n');
+
+  batchPrompt += `\n【模板列表】：\n${patternLines}\n`;
+  batchPrompt += `\n【故事内容】：\n${storyContent}\n`;
+
+  const messages = [
+    { role: 'system', content: s.imageGenSystemPrompt || DEFAULT_SETTINGS.imageGenSystemPrompt },
+    { role: 'user', content: batchPrompt }
+  ];
+
+  const result = await callLLM(messages, { temperature: 0.7 });
+  let parsedList;
+  try {
+    const jsonMatch = result.match(/\[[\s\S]*\]/);
+    if (jsonMatch) parsedList = JSON.parse(jsonMatch[0]);
+  } catch {
+    parsedList = null;
+  }
+
+  if (!Array.isArray(parsedList)) {
+    throw new Error('批量提示词解析失败，请重试');
+  }
+
+  for (let i = 0; i < patterns.length; i += 1) {
+    const pattern = patterns[i];
+    const parsed = parsedList[i] || {};
+    const positive = parsed?.positive || '';
+    const negative = parsed?.negative || '';
+    let finalPositive = positive || '';
+    if (profileTags) finalPositive = `${profileTags}, ${finalPositive}`;
+
+    if (s.imageGenArtistPromptEnabled && s.imageGenArtistPrompt) {
+      const artist = String(s.imageGenArtistPrompt || '').trim();
+      if (artist) finalPositive = `${artist}, ${finalPositive}`;
+    }
+
+    results.push({
+      label: parsed?.label || pattern.label,
+      type: parsed?.type || pattern.type,
+      positive: finalPositive || positive || '',
+      negative: negative || '',
+      subject: parsed?.subject || ''
+    });
+  }
+
+  return results;
+
+}
+
+async function generateImageFromBatch() {
+  const s = ensureSettings();
+  if (!imageGenBatchPrompts.length) {
+    imageGenBatchStatus = '未生成提示词';
+    renderImageGenBatchPreview();
+    return;
+  }
+  if (imageGenBatchIndex >= imageGenBatchPrompts.length) imageGenBatchIndex = 0;
+
+  const item = imageGenBatchPrompts[imageGenBatchIndex];
+  imageGenBatchBusy = true;
+  imageGenBatchStatus = `生成中：${item.label}`;
+  renderImageGenBatchPreview();
+
+  try {
+    const url = await generateImageWithNovelAI(item.positive, item.negative);
+    imageGenImageUrls[imageGenBatchIndex] = url;
+    imageGenPreviewIndex = imageGenBatchIndex;
+    imageGenBatchStatus = `已生成：${item.label}`;
+    imageGenBatchIndex = (imageGenBatchIndex + 1) % imageGenBatchPrompts.length;
+  } catch (e) {
+    imageGenBatchStatus = `生成失败：${e?.message || e}`;
+  } finally {
+    imageGenBatchBusy = false;
+    renderImageGenBatchPreview();
+  }
+}
+
+async function generateAllImagesFromBatch() {
+  if (!imageGenBatchPrompts.length) {
+    imageGenBatchStatus = '未生成提示词';
+    renderImageGenBatchPreview();
+    return;
+  }
+  if (imageGenBatchBusy) return;
+
+  imageGenBatchBusy = true;
+  for (let i = 0; i < imageGenBatchPrompts.length; i += 1) {
+    const item = imageGenBatchPrompts[i];
+    imageGenBatchStatus = `生成中：${item.label} (${i + 1}/${imageGenBatchPrompts.length})`;
+    imageGenPreviewIndex = i;
+    renderImageGenBatchPreview();
+    try {
+      const url = await generateImageWithNovelAI(item.positive, item.negative);
+      imageGenImageUrls[i] = url;
+      imageGenBatchStatus = `已生成：${item.label} (${i + 1}/${imageGenBatchPrompts.length})`;
+      renderImageGenBatchPreview();
+    } catch (e) {
+      imageGenBatchStatus = `生成失败：${item.label} (${i + 1}/${imageGenBatchPrompts.length})`;
+      renderImageGenBatchPreview();
+      break;
+    }
+  }
+  imageGenBatchBusy = false;
+  renderImageGenBatchPreview();
+}
+
+
+function clearImageGenBatch() {
+  imageGenBatchPrompts = [];
+  imageGenImageUrls = [];
+  imageGenBatchIndex = 0;
+  imageGenPreviewIndex = 0;
+  imageGenBatchStatus = '已清空';
+  renderImageGenBatchPreview();
+}
+
+
+async function generateImagePromptWithLLM(storyContent, genType, statData = null) {
+  const s = ensureSettings();
+  const systemPrompt = s.imageGenSystemPrompt || DEFAULT_SETTINGS.imageGenSystemPrompt;
+
+  const statDataJson = statData ? JSON.stringify(statData, null, 2) : '';
+  let userPrompt = `请根据以下故事内容生成图像提示词。\n\n`;
+  if (genType === 'character') {
+    userPrompt += `【要求】：生成角色立绘的提示词，重点描述角色外观。\n\n`;
+  } else if (genType === 'scene') {
+    userPrompt += `【要求】：生成场景图的提示词，重点描述环境和氛围。\n\n`;
+  } else {
+    userPrompt += `【要求】：自动判断应该生成角色还是场景。\n\n`;
+  }
+  userPrompt += `【故事内容】：\n${storyContent}\n\n`;
+  userPrompt += `请输出 JSON 格式的提示词。`;
+
+
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userPrompt }
+  ];
+
+  try {
+    const result = await callLLM(messages, { temperature: 0.7 });
+
+
+    let parsed;
+    try {
+      const jsonMatch = result.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        parsed = JSON.parse(jsonMatch[0]);
+      } else {
+        throw new Error('未找到 JSON');
+      }
+    } catch (e) {
+      console.warn('[ImageGen] Failed to parse LLM response:', e, result);
+      return { type: genType || 'auto', subject: '(解析失败)', positive: result.slice(0, 500), negative: '' };
+    }
+
+    return { type: parsed.type || genType || 'auto', subject: parsed.subject || '', positive: parsed.positive || '', negative: parsed.negative || '' };
+  } catch (e) {
+    console.error('[ImageGen] LLM call failed:', e);
+    const errMsg = e?.message || String(e);
+    if (errMsg.includes('not found') || errMsg.includes('404')) {
+      throw new Error(`LLM 模型不存在，请点击「🔄 刷新模型」获取可用模型列表`);
+    }
+    throw new Error(`LLM 调用失败: ${errMsg}`);
+  }
+}
+
+async function generateImageWithNovelAI(positive, negative) {
+  const s = ensureSettings();
+  const apiKey = s.novelaiApiKey;
+
+  if (!apiKey) throw new Error('请先填写 Novel AI API Key');
+
+  const [width, height] = (s.novelaiResolution || '832x1216').split('x').map(Number);
+  const defaultNegative = s.novelaiNegativePrompt || DEFAULT_SETTINGS.novelaiNegativePrompt;
+  const finalNegative = negative ? `${defaultNegative}, ${negative}` : defaultNegative;
+
+  const model = String(s.novelaiModel || DEFAULT_SETTINGS.novelaiModel || 'nai-diffusion-4-5-full');
+  const isV4 = model.includes('diffusion-4');
+  const fixedSeedEnabled = !!s.novelaiFixedSeedEnabled;
+  const fixedSeed = clampInt(s.novelaiFixedSeed, 0, 4294967295, 0);
+  const seed = fixedSeedEnabled ? fixedSeed : Math.floor(Math.random() * 4294967295);
+  const sampler = String(s.novelaiSampler || (isV4 ? 'k_euler_ancestral' : 'k_euler'));
+  const legacy = isV4 ? (s.novelaiLegacy !== false) : true;
+  const cfgRescale = clampFloat(s.novelaiCfgRescale, 0, 1, 0);
+  const noiseSchedule = String(s.novelaiNoiseSchedule || 'native');
+  const varietyBoost = !!s.novelaiVarietyBoost;
+
+
+  // V4/V4.5 需要完全不同的参数格式
+  let payload;
+
+  if (isV4) {
+    // V4/V4.5 格式 - 基于 novelai-python SDK
+    payload = {
+      input: positive,
+      model: model,
+      action: 'generate',
+      parameters: {
+        width: width || 832,
+        height: height || 1216,
+        scale: s.novelaiScale || 5,
+        steps: s.novelaiSteps || 28,
+        sampler: sampler,
+
+        n_samples: 1,
+        ucPreset: 0,
+        qualityToggle: true,
+        seed: seed,
+        negative_prompt: finalNegative,
+        // V4/V4.5 特有参数
+        cfg_rescale: cfgRescale,
+        sm: false,
+        sm_dyn: false,
+        noise_schedule: noiseSchedule,
+        legacy: legacy,  // 启用以支持 V3 风格的 :: 权重语法
+        legacy_v3_extend: false,
+        skip_cfg_above_sigma: null,
+        variety_boost: varietyBoost,
+
+        decrisp_mode: false,
+        use_coords: false,
+        v4_prompt: {
+          caption: {
+            base_caption: positive,
+            char_captions: []
+          },
+          use_coords: false,
+          use_order: false
+        },
+        v4_negative_prompt: {
+          caption: {
+            base_caption: finalNegative,
+            char_captions: []
+          }
+        }
+      }
+    };
+  } else {
+    // V3 格式
+    payload = {
+      input: positive,
+      model: model,
+      action: 'generate',
+      parameters: {
+        width: width || 832,
+        height: height || 1216,
+        scale: s.novelaiScale || 5,
+        steps: s.novelaiSteps || 28,
+        sampler: sampler,
+
+        negative_prompt: finalNegative,
+        n_samples: 1,
+        ucPreset: 0,
+        qualityToggle: true,
+        seed: seed
+      }
+    };
+  }
+
+  setImageGenStatus('正在调用 Novel AI API 生成图像…', 'warn');
+
+  console.log('[ImageGen] NovelAI request params:', {
+    model,
+    width: width || 832,
+    height: height || 1216,
+    steps: s.novelaiSteps || 28,
+    scale: s.novelaiScale || 5,
+    sampler,
+    seed,
+    fixedSeedEnabled,
+    legacy,
+    cfgRescale,
+    noiseSchedule,
+    varietyBoost,
+    negative: finalNegative,
+    isV4
+  });
+
+  lastNovelaiPayload = payload;
+
+  const response = await fetch('https://image.novelai.net/ai/generate-image', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Accept': 'application/zip' },
+    body: JSON.stringify(payload)
+  });
+
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => '');
+    throw new Error(`Novel AI API 错误: ${response.status} ${response.statusText}\n${errText}`);
+  }
+
+  const blob = await response.blob();
+
+  // 尝试用 JSZip 解压
+  try {
+    if (typeof JSZip !== 'undefined') {
+      const zip = await JSZip.loadAsync(blob);
+      const files = Object.keys(zip.files);
+      if (files.length > 0) {
+        const imageBlob = await zip.files[files[0]].async('blob');
+        return URL.createObjectURL(imageBlob);
+      }
+    }
+  } catch (e) { console.warn('[ImageGen] JSZip failed:', e); }
+
+  return URL.createObjectURL(blob);
+}
+
+async function runImageGeneration() {
+  const s = ensureSettings();
+
+  if (!s.novelaiApiKey) { setImageGenStatus('请先填写 Novel AI API Key', 'err'); return; }
+
+  const genType = $('#sg_imageGenType').val() || 'auto';
+  const lookback = s.imageGenLookbackMessages || 5;
+
+  try {
+    setImageGenStatus('正在读取最近对话…', 'warn');
+    let storyContent = getRecentStoryContent(lookback);
+    if (s.imageGenPromptRulesEnabled && s.imageGenPromptRules) {
+      storyContent = applyPromptRules(storyContent, s.imageGenPromptRules);
+    }
+
+
+    if (!storyContent.trim()) { setImageGenStatus('没有找到对话内容', 'err'); return; }
+
+    setImageGenStatus('正在使用 LLM 生成图像提示词…', 'warn');
+    let statData = null;
+    if (s.imageGenReadStatData) {
+      try {
+        const ctx = SillyTavern.getContext();
+        const chat = Array.isArray(ctx?.chat) ? ctx.chat : [];
+        const { statData: loaded } = await resolveStatDataComprehensive(chat, {
+          ...s,
+          wiRollStatVarName: s.imageGenStatVarName || 'stat_data'
+        });
+        if (loaded) {
+          statData = loaded;
+          console.log('[ImageGen] Loaded stat_data for image prompt:', statData);
+        }
+      } catch (e) {
+        console.warn('[ImageGen] Failed to load stat_data for image prompt:', e);
+      }
+    }
+    const promptResult = await generateImagePromptWithLLM(storyContent, genType, statData);
+
+    const normalizePositive = (text) => String(text || '')
+      .replace(/\s+/g, ' ')
+      .replace(/^\s*,+\s*/g, '')
+      .replace(/\s*,+\s*$/g, '')
+      .trim();
+
+    const normalizeStatText = (data) => {
+      if (!data) return '';
+      try {
+        return typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+      } catch {
+        return String(data);
+      }
+    };
+
+    const profileTags = matchCharacterTagsFromProfiles(storyContent);
+    let finalPositive = normalizePositive(promptResult.positive);
+    if (profileTags) {
+      finalPositive = `${normalizePositive(profileTags)}, ${finalPositive}`;
+      console.log('[ImageGen] Added character profile tags:', profileTags);
+    }
+
+
+    if (s.imageGenArtistPromptEnabled && s.imageGenArtistPrompt) {
+      const artistPrompt = normalizePositive(s.imageGenArtistPrompt);
+      if (artistPrompt) {
+        finalPositive = `${artistPrompt}, ${finalPositive}`;
+      }
+    }
+
+    $('#sg_imagePositivePrompt').val(finalPositive);
+
+
+    $('#sg_imagePromptPreview').show();
+
+    const imageUrl = await generateImageWithNovelAI(finalPositive, promptResult.negative);
+
+    $('#sg_generatedImage').attr('src', imageUrl);
+    $('#sg_generatedImage').attr('data-full', imageUrl);
+    $('#sg_imageResult').show();
+
+
+    setImageGenStatus(`✅ 生成成功！类型: ${promptResult.type}，主题: ${promptResult.subject}`, 'ok');
+
+    if (s.imageGenAutoSave && s.imageGenSavePath) {
+      try { await saveGeneratedImage(imageUrl); setImageGenStatus(`✅ 生成成功并已保存！`, 'ok'); }
+      catch (e) { console.warn('[ImageGen] Auto-save failed:', e); }
+    }
+  } catch (e) {
+    console.error('[ImageGen] Generation failed:', e);
+    setImageGenStatus(`❌ 生成失败: ${e?.message || e}`, 'err');
+  }
+}
+
+async function saveGeneratedImage(imageUrl) {
+  const response = await fetch(imageUrl);
+  const blob = await response.blob();
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const filename = `sg_image_${timestamp}.png`;
+
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
+
+
+// -------------------- 在线图库功能 --------------------
+
+async function loadGalleryFromGitHub() {
+  const s = ensureSettings();
+  const url = String($('#sg_imageGalleryUrl').val() || s.imageGalleryUrl || '').trim();
+
+  if (!url) {
+    setImageGenStatus('请先填写图库索引 URL', 'err');
+    return false;
+  }
+
+  setImageGenStatus('正在加载图库…', 'warn');
+  $('#sg_galleryInfo').text('(加载中…)');
+
+  try {
+    const response = await fetch(url, { cache: 'no-cache' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const data = await response.json();
+    if (!data.images || !Array.isArray(data.images)) throw new Error('格式错误：缺少 images 数组');
+
+    s.imageGalleryCache = data.images;
+    s.imageGalleryCacheTime = Date.now();
+    s.imageGalleryBaseUrl = data.baseUrl || url.replace(/\/[^\/]+$/, '/');
+    saveSettings();
+
+    $('#sg_galleryInfo').text(`(已加载 ${data.images.length} 张)`);
+    setImageGenStatus(`✅ 图库加载成功：${data.images.length} 张图片`, 'ok');
+    return true;
+  } catch (e) {
+    console.error('[ImageGallery] Load failed:', e);
+    $('#sg_galleryInfo').text('(加载失败)');
+    setImageGenStatus(`❌ 图库加载失败: ${e?.message || e}`, 'err');
+    return false;
+  }
+}
+
+async function matchGalleryImage() {
+  const s = ensureSettings();
+
+  if (!s.imageGalleryCache || s.imageGalleryCache.length === 0) {
+    setImageGenStatus('请先加载图库', 'err');
+    return;
+  }
+
+  const storyContent = getRecentStoryContent(s.imageGenLookbackMessages || 5);
+  if (!storyContent.trim()) { setImageGenStatus('没有找到对话内容', 'err'); return; }
+
+  setImageGenStatus('正在分析剧情并匹配图片…', 'warn');
+
+  const galleryList = s.imageGalleryCache.map(img =>
+    `- id:${img.id}, tags:[${(img.tags || []).join(',')}], desc:${img.description || ''}`
+  ).join('\n');
+
+  const messages = [
+    { role: 'system', content: s.imageGalleryMatchPrompt || DEFAULT_SETTINGS.imageGalleryMatchPrompt },
+    { role: 'user', content: `【剧情】：\n${storyContent}\n\n【图库】：\n${galleryList}\n\n选择最匹配的图片。` }
+  ];
+
+  try {
+    const result = await callLLM(messages, { temperature: 0.3, max_tokens: 256 });
+    const jsonMatch = result.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) { setImageGenStatus('❌ 匹配失败：无法解析响应', 'err'); return; }
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    const matchedImage = s.imageGalleryCache.find(img => img.id === parsed.matchedId);
+
+    if (!matchedImage) { setImageGenStatus(`❌ 未找到 ID "${parsed.matchedId}"`, 'err'); return; }
+
+    const baseUrl = s.imageGalleryBaseUrl || '';
+    const imageUrl = matchedImage.path.startsWith('http') ? matchedImage.path : baseUrl + matchedImage.path;
+
+    $('#sg_matchedGalleryImage').attr('src', imageUrl);
+    $('#sg_matchedGalleryImage').attr('data-full', imageUrl);
+    $('#sg_galleryMatchReason').text(`🎯 ${parsed.reason || ''}`);
+    $('#sg_galleryResult').show();
+
+    setImageGenStatus(`✅ 匹配：${matchedImage.description || parsed.matchedId}`, 'ok');
+  } catch (e) {
+    console.error('[ImageGallery] Match failed:', e);
+    setImageGenStatus(`❌ 匹配失败: ${e?.message || e}`, 'err');
+  }
+}
+
+
 async function refreshModels() {
   const s = ensureSettings();
   const raw = String($('#sg_customEndpoint').val() || s.customEndpoint || '').trim();
@@ -7001,7 +9435,7 @@ function createTopbarButton() {
   btn.id = 'sg_topbar_btn';
   btn.type = 'button';
   btn.className = 'sg-topbar-btn';
-  btn.title = '剧情指导 StoryGuide';
+  btn.title= '剧情指导 StoryGuide';
   btn.innerHTML = '<span class="sg-topbar-icon">📘</span>';
   btn.addEventListener('click', () => openModal());
 
@@ -7281,9 +9715,10 @@ function buildModalHtml() {
           剧情指导 <span class="sg-sub">StoryGuide v${SG_VERSION}</span>
         </div>
         <div class="sg-modal-actions">
-          <button class="menu_button sg-btn" id="sg_close">关闭</button>
+          <button class="menu_button sg-btn" id="sg_close">✕</button>
         </div>
       </div>
+
 
       <div class="sg-modal-body">
         <div class="sg-left">
@@ -7292,6 +9727,7 @@ function buildModalHtml() {
             <button class="sg-pgtab" id="sg_pgtab_summary">总结设置</button>
             <button class="sg-pgtab" id="sg_pgtab_index">索引设置</button>
             <button class="sg-pgtab" id="sg_pgtab_roll">ROLL 设置</button>
+            <button class="sg-pgtab" id="sg_pgtab_image">图像生成</button>
           </div>
 
           <div class="sg-page active" id="sg_page_guide">
@@ -7574,15 +10010,15 @@ function buildModalHtml() {
               </div>
             </div>
 
-            <div class="sg-card sg-subcard">
-              <div class="sg-field">
-                <label>自定义总结提示词（System，可选）</label>
-                <textarea id="sg_summarySystemPrompt" rows="6" placeholder="例如：更强调线索/关系变化/回合制记录，或要求英文输出…（仍需输出 JSON）"></textarea>
-              </div>
-              <div class="sg-field">
-                <label>对话片段模板（User，可选）</label>
-                <textarea id="sg_summaryUserTemplate" rows="4" placeholder="支持占位符：{{fromFloor}} {{toFloor}} {{chunk}}"></textarea>
-              </div>
+              <div class="sg-card sg-subcard">
+                <div class="sg-field">
+                  <label>自定义总结提示词（System，可选）</label>
+                  <textarea id="sg_summarySystemPrompt" rows="6" placeholder="例如：更强调线索/关系变化/回合制记录，或要求英文输出…（仍需输出 JSON）"></textarea>
+                </div>
+                <div class="sg-field">
+                  <label>对话片段模板（User，可选）</label>
+                  <textarea id="sg_summaryUserTemplate" rows="4" placeholder="支持占位符：{{fromFloor}} {{toFloor}} {{chunk}}"></textarea>
+                </div>
               <div class="sg-row sg-inline">
                 <button class="menu_button sg-btn" id="sg_summaryResetPrompt">恢复默认提示词</button>
                 <div class="sg-hint" style="margin-left:auto">占位符：{{fromFloor}} {{toFloor}} {{chunk}} {{statData}}。插件会强制要求输出 JSON：{title, summary, keywords[]}。</div>
@@ -7597,12 +10033,44 @@ function buildModalHtml() {
             </div>
 
             <div class="sg-card sg-subcard">
-              <div class="sg-card-title">结构化条目（人物/装备/能力）</div>
+              <div class="sg-card-title">结构化条目（人物/装备/势力/成就/副职业/任务）</div>
               <div class="sg-row sg-inline">
                 <label class="sg-check"><input type="checkbox" id="sg_structuredEntriesEnabled">启用结构化条目</label>
                 <label class="sg-check"><input type="checkbox" id="sg_characterEntriesEnabled">人物</label>
                 <label class="sg-check"><input type="checkbox" id="sg_equipmentEntriesEnabled">装备</label>
-                <label class="sg-check"><input type="checkbox" id="sg_abilityEntriesEnabled">能力</label>
+                <label class="sg-check"><input type="checkbox" id="sg_factionEntriesEnabled">势力</label>
+              </div>
+              <div class="sg-row sg-inline">
+                <label class="sg-check"><input type="checkbox" id="sg_structuredReenableEntriesEnabled">自动重新启用人物/势力</label>
+              </div>
+
+              <div class="sg-card sg-subcard">
+                <div class="sg-card-title">大总结（汇总多条剧情总结）</div>
+                <div class="sg-row sg-inline">
+                  <label class="sg-check"><input type="checkbox" id="sg_megaSummaryEnabled">启用大总结</label>
+                  <div class="sg-field" style="margin-left:8px">
+                    <label style="margin-right:6px">每</label>
+                    <input id="sg_megaSummaryEvery" type="number" min="5" max="5000" style="width:80px">
+                    <span class="sg-hint" style="margin-left:6px">条剧情总结生成一次</span>
+                  </div>
+                </div>
+                <div class="sg-field">
+                  <label>大总结前缀</label>
+                  <input id="sg_megaSummaryCommentPrefix" type="text" placeholder="大总结">
+                </div>
+                <div class="sg-field">
+                  <label>大总结提示词（System，可选）</label>
+                  <textarea id="sg_megaSummarySystemPrompt" rows="5" placeholder="例如：强调阶段性转折/主线推进…（仍需输出 JSON）"></textarea>
+                </div>
+                <div class="sg-field">
+                  <label>大总结模板（User，可选）</label>
+                  <textarea id="sg_megaSummaryUserTemplate" rows="4" placeholder="支持占位符：{{items}}"></textarea>
+                </div>
+              </div>
+              <div class="sg-row sg-inline">
+                <label class="sg-check"><input type="checkbox" id="sg_achievementEntriesEnabled">成就</label>
+                <label class="sg-check"><input type="checkbox" id="sg_subProfessionEntriesEnabled">副职业</label>
+                <label class="sg-check"><input type="checkbox" id="sg_questEntriesEnabled">任务</label>
               </div>
               <div class="sg-grid2">
                 <div class="sg-field">
@@ -7616,8 +10084,22 @@ function buildModalHtml() {
               </div>
               <div class="sg-grid2">
                 <div class="sg-field">
-                  <label>能力条目前缀</label>
-                  <input id="sg_abilityEntryPrefix" type="text" placeholder="能力">
+                  <label>势力条目前缀</label>
+                  <input id="sg_factionEntryPrefix" type="text" placeholder="势力">
+                </div>
+                <div class="sg-field">
+                  <label>成就条目前缀</label>
+                  <input id="sg_achievementEntryPrefix" type="text" placeholder="成就">
+                </div>
+              </div>
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>副职业条目前缀</label>
+                  <input id="sg_subProfessionEntryPrefix" type="text" placeholder="副职业">
+                </div>
+                <div class="sg-field">
+                  <label>任务条目前缀</label>
+                  <input id="sg_questEntryPrefix" type="text" placeholder="任务">
                 </div>
               </div>
               <div class="sg-field">
@@ -7626,7 +10108,7 @@ function buildModalHtml() {
               </div>
               <div class="sg-field">
                 <label>结构化提取模板（User，可选）</label>
-                <textarea id="sg_structuredEntriesUserTemplate" rows="4" placeholder="支持占位符：{{fromFloor}} {{toFloor}} {{chunk}} {{knownCharacters}} {{knownEquipments}}"></textarea>
+                <textarea id="sg_structuredEntriesUserTemplate" rows="4" placeholder="支持占位符：{{fromFloor}} {{toFloor}} {{chunk}} {{knownCharacters}} {{knownEquipments}} {{knownFactions}} {{knownAchievements}} {{knownSubProfessions}} {{knownQuests}}"></textarea>
               </div>
               <div class="sg-field">
                 <label>人物条目提示词（可选）</label>
@@ -7637,13 +10119,25 @@ function buildModalHtml() {
                 <textarea id="sg_structuredEquipmentPrompt" rows="3" placeholder="例如：强调来源/稀有度/当前状态…"></textarea>
               </div>
               <div class="sg-field">
-                <label>能力条目提示词（可选）</label>
-                <textarea id="sg_structuredAbilityPrompt" rows="3" placeholder="例如：强调触发条件/代价/负面效果…"></textarea>
+                <label>势力条目提示词（可选）</label>
+                <textarea id="sg_structuredFactionPrompt" rows="3" placeholder="例如：强调范围/领袖/关系变化…"></textarea>
+              </div>
+              <div class="sg-field">
+                <label>成就条目提示词（可选）</label>
+                <textarea id="sg_structuredAchievementPrompt" rows="3" placeholder="例如：强调达成条件/影响…"></textarea>
+              </div>
+              <div class="sg-field">
+                <label>副职业条目提示词（可选）</label>
+                <textarea id="sg_structuredSubProfessionPrompt" rows="3" placeholder="例如：强调定位/技能/进度…"></textarea>
+              </div>
+              <div class="sg-field">
+                <label>任务条目提示词（可选）</label>
+                <textarea id="sg_structuredQuestPrompt" rows="3" placeholder="例如：强调目标/进度/奖励…"></textarea>
               </div>
               <div class="sg-row sg-inline">
                 <button class="menu_button sg-btn" id="sg_structuredResetPrompt">恢复默认结构化提示词</button>
                 <button class="menu_button sg-btn" id="sg_clearStructuredCache">清除结构化条目缓存</button>
-                <div class="sg-hint" style="margin-left:auto">占位符：{{fromFloor}} {{toFloor}} {{chunk}} {{knownCharacters}} {{knownEquipments}}。</div>
+                <div class="sg-hint" style="margin-left:auto">占位符：{{fromFloor}} {{toFloor}} {{chunk}} {{knownCharacters}} {{knownEquipments}} {{knownFactions}} {{knownAchievements}} {{knownSubProfessions}} {{knownQuests}}。</div>
               </div>
             </div>
 
@@ -7679,15 +10173,11 @@ function buildModalHtml() {
 
             <div class="sg-row sg-inline">
               <label class="sg-check"><input type="checkbox" id="sg_summaryToWorldInfo">写入世界书（绿灯启用）</label>
-              <select id="sg_summaryWorldInfoTarget">
-                <option value="chatbook">写入当前聊天绑定世界书</option>
-                <option value="file">写入指定世界书文件名</option>
-              </select>
-              <input id="sg_summaryWorldInfoFile" type="text" placeholder="Target=file 时填写世界书文件名" style="flex:1; min-width: 220px;">
+              <input id="sg_summaryWorldInfoFile" type="text" placeholder="世界书文件名" style="flex:1; min-width: 220px;">
             </div>
 
             <div class="sg-row sg-inline">
-              <label class="sg-check"><input type="checkbox" id="sg_summaryToBlueWorldInfo">同时写入蓝灯世界书（常开索引）</label>
+              <label class="sg-check"><input type="checkbox" id="sg_summaryToBlueWorldInfo" checked>同时写入蓝灯世界书（常开索引）</label>
               <input id="sg_summaryBlueWorldInfoFile" type="text" placeholder="蓝灯世界书文件名（建议单独建一个）" style="flex:1; min-width: 260px;">
             </div>
 
@@ -7766,6 +10256,26 @@ function buildModalHtml() {
               </div>
               <div class="sg-grid2">
                 <div class="sg-field">
+                  <label>最多索引势力数</label>
+                  <input id="sg_wiTriggerMaxFactions" type="number" min="0" max="10" placeholder="2">
+                </div>
+                <div class="sg-field">
+                  <label>最多索引成就数</label>
+                  <input id="sg_wiTriggerMaxAchievements" type="number" min="0" max="10" placeholder="2">
+                </div>
+              </div>
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>最多索引副职业数</label>
+                  <input id="sg_wiTriggerMaxSubProfessions" type="number" min="0" max="10" placeholder="2">
+                </div>
+                <div class="sg-field">
+                  <label>最多索引任务数</label>
+                  <input id="sg_wiTriggerMaxQuests" type="number" min="0" max="10" placeholder="2">
+                </div>
+              </div>
+              <div class="sg-grid2">
+                <div class="sg-field">
                   <label>最多索引剧情数（优先久远）</label>
                   <input id="sg_wiTriggerMaxPlot" type="number" min="0" max="10" placeholder="3">
                 </div>
@@ -7807,11 +10317,11 @@ function buildModalHtml() {
   </div>
   <div class="sg-field">
     <label>索引模板（User，可选）</label>
-    <textarea id="sg_wiIndexUserTemplate" rows="6" placeholder="支持占位符：{{userMessage}} {{recentText}} {{candidates}} {{maxPick}}"></textarea>
+    <textarea id="sg_wiIndexUserTemplate" rows="6" placeholder="支持占位符：{{userMessage}} {{recentText}} {{candidates}} {{maxPick}} {{maxCharacters}} {{maxEquipments}} {{maxFactions}} {{maxAchievements}} {{maxSubProfessions}} {{maxQuests}} {{maxPlot}}"></textarea>
   </div>
   <div class="sg-row sg-inline">
     <button class="menu_button sg-btn" id="sg_wiIndexResetPrompt">恢复默认索引提示词</button>
-    <div class="sg-hint" style="margin-left:auto">占位符：{{userMessage}} {{recentText}} {{candidates}} {{maxPick}}。插件会强制要求输出 JSON：{pickedIds:number[]}。</div>
+    <div class="sg-hint" style="margin-left:auto">占位符：{{userMessage}} {{recentText}} {{candidates}} {{maxPick}} {{maxCharacters}} {{maxEquipments}} {{maxFactions}} {{maxAchievements}} {{maxSubProfessions}} {{maxQuests}} {{maxPlot}}。插件会强制要求输出 JSON：{pickedIds:number[]}。</div>
   </div>
 
   <div class="sg-card sg-subcard" id="sg_index_custom_block" style="display:none">
@@ -7944,6 +10454,15 @@ function buildModalHtml() {
             </div>
 
             <div class="sg-row sg-inline" style="margin-top:6px;">
+              <label>手动大总结范围</label>
+              <input id="sg_megaSummaryFrom" type="text" style="width:120px" placeholder="A-001">
+              <span> - </span>
+              <input id="sg_megaSummaryTo" type="text" style="width:120px" placeholder="A-080">
+              <button class="menu_button sg-btn" id="sg_megaSummarizeRange">生成大总结</button>
+              <div class="sg-hint" style="margin-left:auto">按索引号范围汇总，步长=大总结阈值</div>
+            </div>
+
+            <div class="sg-row sg-inline" style="margin-top:6px;">
               <label class="sg-check" style="margin:0;"><input type="checkbox" id="sg_summaryManualSplit">手动范围按每 N 层拆分生成多条（N=上方“每 N 层总结一次”）</label>
               <div class="sg-hint" style="margin-left:auto">例如 1-80 且 N=40 → 2 条</div>
             </div>
@@ -8046,6 +10565,12 @@ function buildModalHtml() {
                   <div class="sg-field">
                     <label>模型ID</label>
                     <input id="sg_wiRollCustomModel" type="text" placeholder="gpt-4o-mini">
+                    <div class="sg-row sg-inline" style="margin-top:6px;">
+                      <button class="menu_button sg-btn" id="sg_refreshRollModels">刷新模型</button>
+                      <select id="sg_wiRollModelSelect" class="sg-model-select">
+                        <option value="">（选择模型）</option>
+                      </select>
+                    </div>
                   </div>
                   <div class="sg-field">
                     <label>Max Tokens</label>
@@ -8080,6 +10605,317 @@ function buildModalHtml() {
               <div class="sg-hint" style="margin-top:8px;">提示：仅记录由 ROLL API 返回的简要计算摘要。</div>
             </div>
           </div> <!-- sg_page_roll -->
+
+          <div class="sg-page" id="sg_page_image">
+            <div class="sg-card">
+              <div class="sg-card-title">🎨 图像生成设置</div>
+              <div class="sg-hint" style="margin-bottom:10px;">读取最新剧情内容，使用 LLM 生成标签，调用 Novel AI API 生成角色/场景图像。</div>
+
+              <div class="sg-row sg-inline">
+                <label class="sg-check"><input type="checkbox" id="sg_imageGenEnabled">启用图像生成模块</label>
+              </div>
+
+              <div class="sg-card sg-subcard" style="margin-top:10px;">
+                <div class="sg-card-title" style="font-size:0.95em;">LLM 提示词生成 API</div>
+                <div class="sg-hint">用于将剧情内容转换为图像生成标签（Tag）</div>
+                <div class="sg-grid2" style="margin-top:8px;">
+                  <div class="sg-field">
+                    <label>API 基础URL</label>
+                    <input id="sg_imageGenCustomEndpoint" type="text" placeholder="https://api.openai.com/v1">
+                  </div>
+                  <div class="sg-field">
+                    <label>API Key</label>
+                    <input id="sg_imageGenCustomApiKey" type="password" placeholder="sk-...">
+                  </div>
+                </div>
+                <div class="sg-grid2">
+                  <div class="sg-field">
+                    <label>模型</label>
+                    <select id="sg_imageGenCustomModel">
+                      <option value="gpt-4o-mini">gpt-4o-mini</option>
+                      <option value="gpt-4o">gpt-4o</option>
+                    </select>
+                  </div>
+                  <div class="sg-field">
+                    <label>Max Tokens</label>
+                    <input id="sg_imageGenCustomMaxTokens" type="number" min="128" max="200000">
+                  </div>
+                </div>
+                <div class="sg-row sg-inline" style="margin-top:6px; justify-content:flex-end;">
+                  <button class="menu_button sg-btn" id="sg_imageGenRefreshModels">🔄 刷新模型</button>
+                </div>
+
+              </div>
+
+               <div class="sg-card sg-subcard" style="margin-top:10px;">
+                 <div class="sg-card-title" style="font-size:0.95em;">🧍 人物形象库</div>
+                 <div class="sg-hint">在剧情中匹配角色名/关键词后，会将该人物的标签自动拼到正向提示词前面。</div>
+                 <div class="sg-row sg-inline" style="margin-top:8px; gap:12px;">
+                   <label class="sg-check"><input type="checkbox" id="sg_imageGenProfilesEnabled">启用人物形象匹配</label>
+                   <button class="menu_button sg-btn" id="sg_imageGenProfileAdd">添加人物</button>
+                   <div class="sg-row sg-inline sg-profile-scale-controls" style="gap:6px;">
+                     <button class="menu_button sg-btn" id="sg_imageGenProfilesToggle">展开/折叠</button>
+                   </div>
+                 </div>
+                 <div id="sg_imageGenProfiles" style="margin-top:8px;"></div>
+               </div>
+
+
+              <div class="sg-card sg-subcard" style="margin-top:10px;">
+                <div class="sg-card-title" style="font-size:0.95em;">Novel AI 图像 API</div>
+                <div class="sg-field">
+                  <label>Novel AI API Key</label>
+                  <input id="sg_novelaiApiKey" type="password" placeholder="pst-...">
+                  <div class="sg-hint">需要 Novel AI 订阅才能使用 API</div>
+                </div>
+
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>模型</label>
+                  <select id="sg_novelaiModel">
+                    <option value="nai-diffusion-4-5-full">NAI Diffusion V4.5 Full</option>
+                    <option value="nai-diffusion-4-full">NAI Diffusion V4 Full</option>
+                    <option value="nai-diffusion-4-curated-preview">NAI Diffusion V4 Curated</option>
+                    <option value="nai-diffusion-3">NAI Diffusion V3</option>
+                  </select>
+                </div>
+                <div class="sg-field">
+                  <label>分辨率</label>
+                  <select id="sg_novelaiResolution">
+                    <option value="832x1216">832×1216 (立绘)</option>
+                    <option value="1216x832">1216×832 (横向)</option>
+                    <option value="1024x1024">1024×1024 (方形)</option>
+                    <option value="640x640">640×640 (小)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>Steps</label>
+                  <input id="sg_novelaiSteps" type="number" min="1" max="50">
+                </div>
+                <div class="sg-field">
+                  <label>Scale (Guidance)</label>
+                  <input id="sg_novelaiScale" type="number" min="1" max="10" step="0.5">
+                </div>
+              </div>
+
+                <div class="sg-field">
+                  <label>默认负面提示词</label>
+                  <textarea id="sg_novelaiNegativePrompt" rows="2" placeholder="lowres, bad anatomy, ..."></textarea>
+                </div>
+
+                <div class="sg-grid2">
+                  <div class="sg-field">
+                    <label>Sampler</label>
+                    <select id="sg_novelaiSampler">
+                      <option value="k_euler">k_euler</option>
+                      <option value="k_euler_ancestral">k_euler_ancestral</option>
+                      <option value="k_dpmpp_2m">k_dpmpp_2m</option>
+                      <option value="k_dpmpp_2m_sde">k_dpmpp_2m_sde</option>
+                      <option value="k_dpmpp_sde">k_dpmpp_sde</option>
+                      <option value="k_dpmpp_2s_a">k_dpmpp_2s_a</option>
+                      <option value="k_dpmpp_sde_ancestral">k_dpmpp_sde_ancestral</option>
+                      <option value="k_lms">k_lms</option>
+                      <option value="k_heun">k_heun</option>
+                      <option value="k_dpm_2">k_dpm_2</option>
+                      <option value="k_dpm_2_ancestral">k_dpm_2_ancestral</option>
+                    </select>
+                  </div>
+                  <div class="sg-field">
+                    <label>固定 Seed</label>
+                    <div class="sg-row sg-inline" style="gap:8px; align-items:center;">
+                      <label class="sg-check"><input type="checkbox" id="sg_novelaiFixedSeedEnabled">启用</label>
+                      <input id="sg_novelaiFixedSeed" type="number" min="0" max="4294967295" step="1" style="flex:1; min-width:120px;">
+                    </div>
+                  </div>
+                </div>
+
+                <div class="sg-grid2" style="margin-top:6px;">
+                  <div class="sg-field">
+                    <label>Prompt Guidance Rescale</label>
+                    <input id="sg_novelaiCfgRescale" type="number" min="0" max="1" step="0.01">
+                  </div>
+                  <div class="sg-field">
+                    <label>Noise Schedule</label>
+                    <select id="sg_novelaiNoiseSchedule">
+                      <option value="native">native</option>
+                      <option value="karras">karras</option>
+                      <option value="exponential">exponential</option>
+                      <option value="polyexponential">polyexponential</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="sg-row sg-inline" style="margin-top:6px; gap:12px;">
+                  <label class="sg-check"><input type="checkbox" id="sg_novelaiLegacy">V4 Legacy (支持 :: 权重语法)</label>
+                  <label class="sg-check"><input type="checkbox" id="sg_novelaiVarietyBoost">Variety Boost</label>
+                </div>
+
+
+                <hr class="sg-hr">
+
+                <div class="sg-row sg-inline">
+                  <label class="sg-check"><input type="checkbox" id="sg_imageGenAutoSave">自动保存生成的图像</label>
+                </div>
+
+              <div class="sg-field">
+                <label>保存路径（留空则仅显示不保存）</label>
+                <input id="sg_imageGenSavePath" type="text" placeholder="例如：C:/Images/Generated">
+                <div class="sg-hint">图像会以时间戳命名保存到此目录</div>
+              </div>
+
+              <hr class="sg-hr">
+
+              <div class="sg-field">
+                <label>读取最近消息数</label>
+                <input id="sg_imageGenLookbackMessages" type="number" min="1" max="30">
+              </div>
+              <div class="sg-row sg-inline">
+                <label class="sg-check"><input type="checkbox" id="sg_imageGenReadStatData">读取角色状态变量</label>
+                <input id="sg_imageGenStatVarName" type="text" placeholder="stat_data" style="width:120px">
+              </div>
+
+              <div class="sg-field">
+                <label>标签生成提示词 (System)</label>
+                <textarea id="sg_imageGenSystemPrompt" rows="8" placeholder="用于让 LLM 生成 Danbooru 风格标签的提示词"></textarea>
+                <div class="sg-actions-row">
+                  <button class="menu_button sg-btn" id="sg_imageGenResetPrompt">恢复默认提示词</button>
+                </div>
+              </div>
+
+              <div class="sg-card sg-subcard" style="margin-top:10px;">
+                <div class="sg-card-title" style="font-size:0.95em;">画师/正向提示词</div>
+                <div class="sg-hint">启用后会把该权重串追加到正向提示词最前面。</div>
+                <div class="sg-row sg-inline" style="margin-top:6px;">
+                  <label class="sg-check"><input type="checkbox" id="sg_imageGenArtistPromptEnabled">启用画师/正向提示词</label>
+                </div>
+                <div class="sg-field" style="margin-top:6px;">
+                  <textarea id="sg_imageGenArtistPrompt" rows="4" placeholder="请输入权重串，如 1.2::artist:name ::, masterpiece"></textarea>
+                </div>
+              </div>
+
+              <div class="sg-card sg-subcard" style="margin-top:10px;">
+                <div class="sg-card-title" style="font-size:0.95em;">提示词替换</div>
+                <div class="sg-hint">对剧情文本进行替换/插入，再交给 LLM 生成标签（命中规则时生效）。</div>
+                <div class="sg-row sg-inline" style="margin-top:6px;">
+                  <label class="sg-check"><input type="checkbox" id="sg_imageGenPromptRulesEnabled">启用提示词替换</label>
+                </div>
+                <div class="sg-field" style="margin-top:6px;">
+                  <textarea id="sg_imageGenPromptRules" rows="6" placeholder="触发词=前置前|插入词
+触发词=前置后|插入词
+触发词=替换|替换词
+# 以 # 或 // 开头为注释"></textarea>
+                </div>
+              </div>
+
+               <div class="sg-card sg-subcard" style="margin-top:10px;">
+                <div class="sg-card-title" style="font-size:0.95em;">批量提示词模板</div>
+                <div class="sg-hint">默认会生成 12 张：5 张剧情拆分 + 7 张固定类型。一般不需要手动修改。</div>
+                <div class="sg-row sg-inline" style="margin-top:6px;">
+                  <label class="sg-check"><input type="checkbox" id="sg_imageGenBatchEnabled">启用批量提示词</label>
+                </div>
+                <div class="sg-grid2" style="margin-top:6px;">
+                  <div class="sg-field">
+                    <label>自定义女性提示词 1</label>
+                    <textarea id="sg_imageGenCustomFemalePrompt1" rows="3" placeholder="例如：1girl, close-up, soft light, ..."></textarea>
+                  </div>
+                  <div class="sg-field">
+                    <label>自定义女性提示词 2</label>
+                    <textarea id="sg_imageGenCustomFemalePrompt2" rows="3" placeholder="例如：1girl, full body, dynamic pose, ..."></textarea>
+                  </div>
+                </div>
+                <div class="sg-field" style="margin-top:6px;">
+                  <textarea id="sg_imageGenBatchPatterns" rows="8" placeholder='[{"label":"剧情-1","type":"story","detail":"..."}]'></textarea>
+                </div>
+                <div class="sg-actions-row" style="margin-top:6px;">
+                  <button class="menu_button sg-btn" id="sg_imageGenResetBatch">恢复默认模板</button>
+                </div>
+              </div>
+
+
+              <div class="sg-card sg-subcard" style="margin-top:10px;">
+                <div class="sg-card-title" style="font-size:0.95em;">图像生成预设</div>
+                <div class="sg-hint">保存/导入用于“正文→标签”的预设配置（支持导入 SillyTavern 对话预设 JSON）。</div>
+                <div class="sg-row sg-inline" style="margin-top:6px;">
+                  <select id="sg_imageGenPresetSelect" style="min-width:160px;"></select>
+                  <button class="menu_button sg-btn" id="sg_imageGenApplyPreset">应用</button>
+                  <button class="menu_button sg-btn" id="sg_imageGenSavePreset">保存为预设</button>
+                  <button class="menu_button sg-btn" id="sg_imageGenDeletePreset">删除</button>
+                </div>
+                <div class="sg-row sg-inline" style="margin-top:6px;">
+                  <button class="menu_button sg-btn" id="sg_imageGenExportPreset">导出预设</button>
+                  <button class="menu_button sg-btn" id="sg_imageGenImportPreset">导入预设</button>
+                </div>
+              </div>
+
+            </div>
+
+            <div class="sg-card">
+              <div class="sg-card-title">生成图像</div>
+
+              <div class="sg-row sg-inline">
+                <label>生成类型</label>
+                <select id="sg_imageGenType">
+                  <option value="auto">自动识别</option>
+                  <option value="character">角色立绘</option>
+                  <option value="scene">场景图</option>
+                </select>
+                <button class="menu_button sg-btn-primary" id="sg_generateImage">🎨 根据剧情生成图像</button>
+              </div>
+
+              <div class="sg-field" id="sg_imagePromptPreview" style="display:none; margin-top:10px;">
+                <label>生成的提示词</label>
+                <textarea id="sg_imagePositivePrompt" rows="3" readonly style="background: var(--SmartThemeBlurTintColor);"></textarea>
+                <div class="sg-row sg-inline" style="margin-top:6px;">
+                  <button class="menu_button sg-btn" id="sg_editPromptAndGenerate">编辑并重新生成</button>
+                  <button class="menu_button sg-btn" id="sg_copyImagePrompt">📋 复制提示词</button>
+                </div>
+              </div>
+
+              <div id="sg_imageResult" class="sg-image-result" style="display:none; margin-top:12px;">
+                <img id="sg_generatedImage" src="" alt="Generated Image" class="sg-image-zoom" style="max-width:100%; max-height:500px; border-radius:6px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); cursor: zoom-in;">
+                <div class="sg-row sg-inline" style="margin-top:8px; justify-content:center;">
+                  <button class="menu_button sg-btn" id="sg_regenImage">🔄 重生成</button>
+                  <button class="menu_button sg-btn" id="sg_downloadImage">💾 保存图像</button>
+                </div>
+              </div>
+
+
+              <div class="sg-hint" id="sg_imageGenStatus" style="margin-top:10px;"></div>
+            </div>
+
+            <div class="sg-card">
+              <div class="sg-card-title">📚 在线图库（作者预设图片）</div>
+              <div class="sg-hint" style="margin-bottom:10px;">从 GitHub 加载作者预先生成的图片库，AI 会根据剧情自动选择最匹配的图片。</div>
+              
+              <div class="sg-row sg-inline">
+                <label class="sg-check"><input type="checkbox" id="sg_imageGalleryEnabled">启用在线图库</label>
+              </div>
+
+              <div class="sg-field">
+                <label>图库索引 URL</label>
+                <input id="sg_imageGalleryUrl" type="text" placeholder="https://raw.githubusercontent.com/用户名/仓库/main/index.json">
+                <div class="sg-hint">填入 GitHub Raw URL 指向图库的 index.json 文件</div>
+              </div>
+
+              <div class="sg-row sg-inline">
+                <button class="menu_button sg-btn" id="sg_loadGallery">📥 加载/刷新图库</button>
+                <span class="sg-hint" id="sg_galleryInfo" style="margin-left:10px;">(未加载)</span>
+              </div>
+
+              <div class="sg-row sg-inline" style="margin-top:10px;">
+                <button class="menu_button sg-btn-primary" id="sg_matchGalleryImage">🔍 根据剧情匹配图片</button>
+              </div>
+
+              <div id="sg_galleryResult" class="sg-image-result" style="display:none; margin-top:12px;">
+                <div class="sg-hint" id="sg_galleryMatchReason" style="margin-bottom:8px;"></div>
+                <img id="sg_matchedGalleryImage" src="" alt="Matched Image" class="sg-image-zoom" style="max-width:100%; max-height:500px; border-radius:6px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); cursor: zoom-in;">
+              </div>
+
+            </div>
+          </div> <!-- sg_page_image -->
 
           <div class="sg-status" id="sg_status"></div>
         </div>
@@ -8119,8 +10955,22 @@ function ensureModal() {
   // --- settings pages (剧情指导 / 总结设置 / 索引设置 / ROLL 设置) ---
   setupSettingsPages();
 
-  $('#sg_modal_backdrop').on('click', (e) => { if (e.target && e.target.id === 'sg_modal_backdrop') closeModal(); });
-  $('#sg_close').on('click', closeModal);
+  $('#sg_modal_backdrop').on('click', (e) => {
+    if (e.target && e.target.id === 'sg_modal_backdrop') closeModal();
+  });
+  $('#sg_close').on('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    closeModal();
+  });
+  $('#sg_close').on('pointerdown', (e) => {
+    e.stopPropagation();
+  });
+
+  $('#sg_close').on('pointerup', (e) => {
+    e.stopPropagation();
+  });
+
 
   $('#sg_tab_md').on('click', () => showPane('md'));
   $('#sg_tab_json').on('click', () => showPane('json'));
@@ -8222,11 +11072,7 @@ function ensureModal() {
     setStatus('已恢复默认索引提示词 ✅', 'ok');
   });
 
-  $('#sg_summaryWorldInfoTarget').on('change', () => {
-    const t = String($('#sg_summaryWorldInfoTarget').val() || 'chatbook');
-    $('#sg_summaryWorldInfoFile').toggle(t === 'file');
-    pullUiToSettings(); saveSettings();
-  });
+
 
   $('#sg_summaryToBlueWorldInfo').on('change', () => {
     const checked = $('#sg_summaryToBlueWorldInfo').is(':checked');
@@ -8258,7 +11104,10 @@ function ensureModal() {
     $('#sg_structuredEntriesUserTemplate').val(DEFAULT_STRUCTURED_ENTRIES_USER_TEMPLATE);
     $('#sg_structuredCharacterPrompt').val(DEFAULT_STRUCTURED_CHARACTER_PROMPT);
     $('#sg_structuredEquipmentPrompt').val(DEFAULT_STRUCTURED_EQUIPMENT_PROMPT);
-    $('#sg_structuredAbilityPrompt').val(DEFAULT_STRUCTURED_ABILITY_PROMPT);
+    $('#sg_structuredFactionPrompt').val(DEFAULT_STRUCTURED_FACTION_PROMPT);
+    $('#sg_structuredAchievementPrompt').val(DEFAULT_STRUCTURED_ACHIEVEMENT_PROMPT);
+    $('#sg_structuredSubProfessionPrompt').val(DEFAULT_STRUCTURED_SUBPROFESSION_PROMPT);
+    $('#sg_structuredQuestPrompt').val(DEFAULT_STRUCTURED_QUEST_PROMPT);
     pullUiToSettings();
     saveSettings();
     setStatus('已恢复默认结构化提示词 ✅', 'ok');
@@ -8279,7 +11128,7 @@ function ensureModal() {
     saveSettings();
     updateSummaryManualRangeHint(false);
   });
-  $('#sg_summaryManualFrom, #sg_summaryManualTo, #sg_summaryEvery, #sg_summaryCountMode').on('input change', () => {
+  $('#sg_summaryManualFrom, #sg_summaryManualTo, #sg_summaryEvery, #sg_summaryCountMode, #sg_megaSummaryFrom, #sg_megaSummaryTo').on('input change', () => {
     // count mode / every affects the computed floor range and split pieces
     updateSummaryManualRangeHint(false);
   });
@@ -8312,6 +11161,18 @@ function ensureModal() {
     }
   });
 
+  $('#sg_megaSummarizeRange').on('click', async () => {
+    try {
+      pullUiToSettings();
+      saveSettings();
+      const from = String($('#sg_megaSummaryFrom').val() || '').trim();
+      const to = String($('#sg_megaSummaryTo').val() || '').trim();
+      await runMegaSummaryManual(from, to);
+    } catch (e) {
+      setStatus(`手动大总结失败：${e?.message ?? e}`, 'err');
+    }
+  });
+
   $('#sg_resetSummaryState').on('click', async () => {
     try {
       const meta = getDefaultSummaryMeta();
@@ -8325,7 +11186,7 @@ function ensureModal() {
   });
 
   // auto-save summary settings
-  $('#sg_summaryEnabled, #sg_summaryEvery, #sg_summaryCountMode, #sg_summaryTemperature, #sg_summarySystemPrompt, #sg_summaryUserTemplate, #sg_summaryReadStatData, #sg_summaryStatVarName, #sg_structuredEntriesEnabled, #sg_characterEntriesEnabled, #sg_equipmentEntriesEnabled, #sg_abilityEntriesEnabled, #sg_characterEntryPrefix, #sg_equipmentEntryPrefix, #sg_abilityEntryPrefix, #sg_structuredEntriesSystemPrompt, #sg_structuredEntriesUserTemplate, #sg_structuredCharacterPrompt, #sg_structuredEquipmentPrompt, #sg_structuredAbilityPrompt, #sg_summaryCustomEndpoint, #sg_summaryCustomApiKey, #sg_summaryCustomModel, #sg_summaryCustomMaxTokens, #sg_summaryCustomStream, #sg_summaryToWorldInfo, #sg_summaryWorldInfoFile, #sg_summaryWorldInfoCommentPrefix, #sg_summaryWorldInfoKeyMode, #sg_summaryIndexPrefix, #sg_summaryIndexPad, #sg_summaryIndexStart, #sg_summaryIndexInComment, #sg_summaryToBlueWorldInfo, #sg_summaryBlueWorldInfoFile, #sg_wiTriggerEnabled, #sg_wiTriggerLookbackMessages, #sg_wiTriggerIncludeUserMessage, #sg_wiTriggerUserMessageWeight, #sg_wiTriggerStartAfterAssistantMessages, #sg_wiTriggerMaxEntries, #sg_wiTriggerMaxCharacters, #sg_wiTriggerMaxEquipments, #sg_wiTriggerMaxPlot, #sg_wiTriggerMinScore, #sg_wiTriggerMaxKeywords, #sg_wiTriggerInjectStyle, #sg_wiTriggerDebugLog, #sg_wiBlueIndexMode, #sg_wiBlueIndexFile, #sg_summaryMaxChars, #sg_summaryMaxTotalChars, #sg_wiTriggerMatchMode, #sg_wiIndexPrefilterTopK, #sg_wiIndexProvider, #sg_wiIndexTemperature, #sg_wiIndexSystemPrompt, #sg_wiIndexUserTemplate, #sg_wiIndexCustomEndpoint, #sg_wiIndexCustomApiKey, #sg_wiIndexCustomModel, #sg_wiIndexCustomMaxTokens, #sg_wiIndexTopP, #sg_wiIndexCustomStream, #sg_wiRollEnabled, #sg_wiRollStatSource, #sg_wiRollStatVarName, #sg_wiRollRandomWeight, #sg_wiRollDifficulty, #sg_wiRollInjectStyle, #sg_wiRollDebugLog, #sg_wiRollStatParseMode, #sg_wiRollProvider, #sg_wiRollCustomEndpoint, #sg_wiRollCustomApiKey, #sg_wiRollCustomModel, #sg_wiRollCustomMaxTokens, #sg_wiRollCustomTopP, #sg_wiRollCustomTemperature, #sg_wiRollCustomStream, #sg_wiRollSystemPrompt').on('change input', () => {
+  $('#sg_summaryEnabled, #sg_summaryEvery, #sg_summaryCountMode, #sg_summaryTemperature, #sg_summarySystemPrompt, #sg_summaryUserTemplate, #sg_summaryReadStatData, #sg_summaryStatVarName, #sg_structuredEntriesEnabled, #sg_characterEntriesEnabled, #sg_equipmentEntriesEnabled, #sg_abilityEntriesEnabled, #sg_characterEntryPrefix, #sg_equipmentEntryPrefix, #sg_abilityEntryPrefix, #sg_structuredEntriesSystemPrompt, #sg_structuredEntriesUserTemplate, #sg_structuredCharacterPrompt, #sg_structuredEquipmentPrompt, #sg_structuredAbilityPrompt, #sg_summaryCustomEndpoint, #sg_summaryCustomApiKey, #sg_summaryCustomModel, #sg_summaryCustomMaxTokens, #sg_summaryCustomStream, #sg_summaryToWorldInfo, #sg_summaryWorldInfoFile, #sg_summaryWorldInfoCommentPrefix, #sg_summaryWorldInfoKeyMode, #sg_summaryIndexPrefix, #sg_summaryIndexPad, #sg_summaryIndexStart, #sg_summaryIndexInComment, #sg_summaryToBlueWorldInfo, #sg_summaryBlueWorldInfoFile, #sg_wiTriggerEnabled, #sg_wiTriggerLookbackMessages, #sg_wiTriggerIncludeUserMessage, #sg_wiTriggerUserMessageWeight, #sg_wiTriggerStartAfterAssistantMessages, #sg_wiTriggerMaxEntries, #sg_wiTriggerMaxCharacters, #sg_wiTriggerMaxEquipments, #sg_wiTriggerMaxPlot, #sg_wiTriggerMinScore, #sg_wiTriggerMaxKeywords, #sg_wiTriggerInjectStyle, #sg_wiTriggerDebugLog, #sg_wiBlueIndexMode, #sg_wiBlueIndexFile, #sg_summaryMaxChars, #sg_summaryMaxTotalChars, #sg_wiTriggerMatchMode, #sg_wiIndexPrefilterTopK, #sg_wiIndexProvider, #sg_wiIndexTemperature, #sg_wiIndexSystemPrompt, #sg_wiIndexUserTemplate, #sg_wiIndexCustomEndpoint, #sg_wiIndexCustomApiKey, #sg_wiIndexCustomModel, #sg_wiIndexCustomMaxTokens, #sg_wiIndexTopP, #sg_wiIndexCustomStream, #sg_wiRollEnabled, #sg_wiRollStatSource, #sg_wiRollStatVarName, #sg_wiRollRandomWeight, #sg_wiRollDifficulty, #sg_wiRollInjectStyle, #sg_wiRollDebugLog, #sg_wiRollStatParseMode, #sg_wiRollProvider, #sg_wiRollCustomEndpoint, #sg_wiRollCustomApiKey, #sg_wiRollCustomModel, #sg_wiRollCustomMaxTokens, #sg_wiRollCustomTopP, #sg_wiRollCustomTemperature, #sg_wiRollCustomStream, #sg_wiRollSystemPrompt, #sg_imageGenEnabled, #sg_novelaiApiKey, #sg_novelaiModel, #sg_novelaiResolution, #sg_novelaiSteps, #sg_novelaiScale, #sg_novelaiNegativePrompt, #sg_imageGenAutoSave, #sg_imageGenSavePath, #sg_imageGenLookbackMessages, #sg_imageGenReadStatData, #sg_imageGenStatVarName, #sg_imageGenCustomEndpoint, #sg_imageGenCustomApiKey, #sg_imageGenCustomModel, #sg_imageGenSystemPrompt, #sg_imageGalleryEnabled, #sg_imageGalleryUrl, #sg_imageGenWorldBookEnabled, #sg_imageGenWorldBookFile').on('change input', () => {
     pullUiToSettings();
     saveSettings();
     updateSummaryInfoLabel();
@@ -8333,10 +11194,187 @@ function ensureModal() {
     updateSummaryManualRangeHint(false);
   });
 
+  $('#sg_factionEntriesEnabled, #sg_factionEntryPrefix, #sg_structuredFactionPrompt, #sg_structuredReenableEntriesEnabled, #sg_achievementEntriesEnabled, #sg_achievementEntryPrefix, #sg_structuredAchievementPrompt, #sg_subProfessionEntriesEnabled, #sg_subProfessionEntryPrefix, #sg_structuredSubProfessionPrompt, #sg_questEntriesEnabled, #sg_questEntryPrefix, #sg_structuredQuestPrompt, #sg_megaSummaryEnabled, #sg_megaSummaryEvery, #sg_megaSummarySystemPrompt, #sg_megaSummaryUserTemplate, #sg_megaSummaryCommentPrefix').on('input change', () => {
+    pullUiToSettings();
+    saveSettings();
+    updateSummaryInfoLabel();
+    updateBlueIndexInfoLabel();
+    updateSummaryManualRangeHint(false);
+  });
+
+  $('#sg_wiTriggerMaxFactions, #sg_wiTriggerMaxAchievements, #sg_wiTriggerMaxSubProfessions, #sg_wiTriggerMaxQuests').on('input change', () => {
+    pullUiToSettings();
+    saveSettings();
+    updateSummaryInfoLabel();
+    updateBlueIndexInfoLabel();
+    updateSummaryManualRangeHint(false);
+  });
+
+  $('#sg_imageGenCustomEndpoint, #sg_imageGenCustomApiKey, #sg_imageGenCustomModel, #sg_imageGenCustomMaxTokens, #sg_imageGenArtistPromptEnabled, #sg_imageGenArtistPrompt, #sg_imageGenPromptRulesEnabled, #sg_imageGenPromptRules, #sg_imageGenBatchEnabled, #sg_imageGenBatchPatterns, #sg_imageGenPresetSelect, #sg_imageGenProfilesEnabled, #sg_imageGenCustomFemalePrompt1, #sg_imageGenCustomFemalePrompt2, #sg_novelaiModel, #sg_novelaiResolution, #sg_novelaiSteps, #sg_novelaiScale, #sg_novelaiSampler, #sg_novelaiFixedSeedEnabled, #sg_novelaiFixedSeed, #sg_novelaiCfgRescale, #sg_novelaiNoiseSchedule, #sg_novelaiLegacy, #sg_novelaiVarietyBoost, #sg_novelaiNegativePrompt, #sg_imageGenProfiles').on('input change', () => {
+    pullUiToSettings();
+    saveSettings();
+  });
+
+
   $('#sg_refreshModels').on('click', async () => {
+
     pullUiToSettings(); saveSettings();
     await refreshModels();
   });
+
+  $('#sg_imageGenRefreshModels').on('click', async () => {
+    pullUiToSettings(); saveSettings();
+    await refreshImageGenModels();
+  });
+
+
+  $(document).on('click', '#sg_imageGenProfileAdd', () => {
+    const s = ensureSettings();
+    const list = getCharacterProfilesFromSettings({ includeEmpty: true });
+    list.push({ name: `人物${list.length + 1}`, keys: [], tags: '', enabled: true });
+    s.imageGenCharacterProfiles = list;
+    saveSettings();
+    renderCharacterProfilesUi();
+    pullSettingsToUi();
+  });
+
+  $(document).on('click', '#sg_imageGenProfilesToggle', () => {
+    const s = ensureSettings();
+    s.imageGenProfilesExpanded = !s.imageGenProfilesExpanded;
+    saveSettings();
+    pullSettingsToUi();
+  });
+
+
+  $(document).on('input change', '#sg_imageGenProfiles input, #sg_imageGenProfiles textarea, #sg_imageGenProfiles .sg-profile-enabled', () => {
+    const s = ensureSettings();
+    s.imageGenCharacterProfiles = collectCharacterProfilesFromUi();
+    saveSettings();
+  });
+
+  $(document).on('click', '#sg_imageGenProfiles .sg-profile-delete', (e) => {
+    e.preventDefault();
+    const $row = $(e.currentTarget).closest('.sg-profile-row');
+    if (!$row.length) return;
+    $row.remove();
+    const s = ensureSettings();
+    s.imageGenCharacterProfiles = collectCharacterProfilesFromUi();
+    saveSettings();
+    renderCharacterProfilesUi();
+  });
+
+
+  $('#sg_imageGenResetBatch').on('click', () => {
+    $('#sg_imageGenBatchPatterns').val(String(DEFAULT_SETTINGS.imageGenBatchPatterns || ''));
+    pullUiToSettings();
+    saveSettings();
+    setStatus('已恢复默认批量模板 ✅', 'ok');
+  });
+
+  $('#sg_imageGenSavePreset').on('click', () => {
+    const name = normalizeImageGenPresetName(prompt('预设名称：') || '');
+    if (!name) return;
+    const list = getImageGenPresetList();
+    const snapshot = getImageGenPresetSnapshot();
+    const idx = list.findIndex(p => p?.name === name);
+    if (idx >= 0) list[idx] = { name, snapshot };
+    else list.push({ name, snapshot });
+    setImageGenPresetList(list);
+    const s = ensureSettings();
+    s.imageGenPresetActive = name;
+    saveSettings();
+    pullSettingsToUi();
+    setStatus('预设已保存 ✅', 'ok');
+  });
+
+  $('#sg_imageGenApplyPreset').on('click', () => {
+    const name = String($('#sg_imageGenPresetSelect').val() || '').trim();
+    if (!name) return;
+    const list = getImageGenPresetList();
+    const preset = list.find(p => p?.name === name);
+    if (!preset) return;
+    applyImageGenPresetSnapshot(preset.snapshot);
+    const s = ensureSettings();
+    s.imageGenPresetActive = name;
+    saveSettings();
+    setStatus('预设已应用 ✅', 'ok');
+  });
+
+  $('#sg_imageGenDeletePreset').on('click', () => {
+    const name = String($('#sg_imageGenPresetSelect').val() || '').trim();
+    if (!name) return;
+    const list = getImageGenPresetList().filter(p => p?.name !== name);
+    setImageGenPresetList(list);
+    const s = ensureSettings();
+    if (s.imageGenPresetActive === name) s.imageGenPresetActive = '';
+    saveSettings();
+    pullSettingsToUi();
+    setStatus('预设已删除', 'ok');
+  });
+
+  $('#sg_imageGenExportPreset').on('click', () => {
+    const name = String($('#sg_imageGenPresetSelect').val() || '').trim();
+    const list = getImageGenPresetList();
+    const preset = list.find(p => p?.name === name);
+    if (!preset) {
+      setStatus('请选择一个预设再导出', 'warn');
+      return;
+    }
+    const payload = {
+      _type: 'StoryGuide_ImageGenPreset',
+      _version: '1.0',
+      _exportedAt: new Date().toISOString(),
+      name: preset.name,
+      snapshot: preset.snapshot
+    };
+    downloadTextFile(`storyguide-imagegen-preset-${preset.name}.json`, JSON.stringify(payload, null, 2));
+    setStatus('预设已导出 ✅', 'ok');
+  });
+
+  $('#sg_imageResult, #sg_galleryResult, #sg_imagegen_float_preview, #sg_imagegen_batch').on('click', 'img', (e) => {
+    const src = String($(e.currentTarget).attr('data-full') || $(e.currentTarget).attr('src') || '').trim();
+    if (!src) return;
+    openImagePreviewModal(src, $(e.currentTarget).attr('alt') || 'Image preview');
+  });
+
+  $('#sg_imageGenImportPreset').on('click', async () => {
+    const file = await pickFile('.json,application/json');
+    if (!file) return;
+    try {
+      const txt = await readFileText(file);
+      const data = JSON.parse(txt);
+      let preset = null;
+
+      if (data && data._type === 'StoryGuide_ImageGenPreset') {
+        const name = normalizeImageGenPresetName(data.name || '未命名');
+        if (!name) return;
+        preset = { name, snapshot: data.snapshot || {} };
+      } else {
+        preset = resolveImageGenPresetFromSillyPreset(txt, file?.name || '对话预设');
+      }
+
+      if (!preset || !preset.name) {
+        setStatus('预设文件格式不正确', 'err');
+        return;
+      }
+
+      const list = getImageGenPresetList();
+      const idx = list.findIndex(p => p?.name === preset.name);
+      if (idx >= 0) list[idx] = preset;
+      else list.push(preset);
+      setImageGenPresetList(list);
+      const s = ensureSettings();
+      s.imageGenPresetActive = preset.name;
+      saveSettings();
+      pullSettingsToUi();
+      setStatus('预设已导入 ✅', 'ok');
+    } catch (e) {
+      setStatus(`导入失败：${e?.message ?? e}`, 'err');
+    }
+  });
+
+
+
 
   // 导出/导入全局预设
   $('#sg_exportPreset').on('click', () => {
@@ -8385,6 +11423,16 @@ function ensureModal() {
   $('#sg_wiIndexModelSelect').on('change', () => {
     const id = String($('#sg_wiIndexModelSelect').val() || '').trim();
     if (id) $('#sg_wiIndexCustomModel').val(id);
+  });
+
+  $('#sg_refreshRollModels').on('click', async () => {
+    pullUiToSettings(); saveSettings();
+    await refreshRollModels();
+  });
+
+  $('#sg_wiRollModelSelect').on('change', () => {
+    const id = String($('#sg_wiRollModelSelect').val() || '').trim();
+    if (id) $('#sg_wiRollCustomModel').val(id);
   });
 
   // 蓝灯索引导入/清空
@@ -8557,35 +11605,35 @@ function ensureModal() {
     updateWorldbookInfoLabel();
   });
 
-    // 地图功能事件处理
-    $('#sg_mapEnabled').on('change', () => {
-      pullUiToSettings();
-      saveSettings();
-    });
+  // 地图功能事件处理
+  $('#sg_mapEnabled').on('change', () => {
+    pullUiToSettings();
+    saveSettings();
+  });
 
-    $('#sg_mapSystemPrompt').on('change input', () => {
-      pullUiToSettings();
-      saveSettings();
-    });
+  $('#sg_mapSystemPrompt').on('change input', () => {
+    pullUiToSettings();
+    saveSettings();
+  });
 
-    $('#sg_mapResetPrompt').on('click', () => {
-      $('#sg_mapSystemPrompt').val(String(DEFAULT_SETTINGS.mapSystemPrompt || ''));
-      pullUiToSettings();
-      saveSettings();
-      setStatus('已恢复默认地图提示词 ✅', 'ok');
-    });
+  $('#sg_mapResetPrompt').on('click', () => {
+    $('#sg_mapSystemPrompt').val(String(DEFAULT_SETTINGS.mapSystemPrompt || ''));
+    pullUiToSettings();
+    saveSettings();
+    setStatus('已恢复默认地图提示词 ✅', 'ok');
+  });
 
-    bindMapEventPanelHandler();
+  bindMapEventPanelHandler();
 
-    $(document).on('click', (e) => {
-      const $t = $(e.target);
-      if ($t.closest('.sg-map-popover, .sg-map-location').length) return;
-      if (sgMapPopoverEl) sgMapPopoverEl.style.display = 'none';
-    });
+  $(document).on('click', (e) => {
+    const $t = $(e.target);
+    if ($t.closest('.sg-map-popover, .sg-map-location').length) return;
+    if (sgMapPopoverEl) sgMapPopoverEl.style.display = 'none';
+  });
 
-    $('#sg_resetMap').on('click', async () => {
-      try {
-        await setMapData(getDefaultMapData());
+  $('#sg_resetMap').on('click', async () => {
+    try {
+      await setMapData(getDefaultMapData());
       updateMapPreview();
       setStatus('地图已重置 ✅', 'ok');
     } catch (e) {
@@ -8703,8 +11751,8 @@ function ensureModal() {
 
 function showSettingsPage(page) {
   const p = String(page || 'guide');
-  $('#sg_pgtab_guide, #sg_pgtab_summary, #sg_pgtab_index, #sg_pgtab_roll').removeClass('active');
-  $('#sg_page_guide, #sg_page_summary, #sg_page_index, #sg_page_roll').removeClass('active');
+  $('#sg_pgtab_guide, #sg_pgtab_summary, #sg_pgtab_index, #sg_pgtab_roll, #sg_pgtab_image').removeClass('active');
+  $('#sg_page_guide, #sg_page_summary, #sg_page_index, #sg_page_roll, #sg_page_image').removeClass('active');
 
   if (p === 'summary') {
     $('#sg_pgtab_summary').addClass('active');
@@ -8715,6 +11763,9 @@ function showSettingsPage(page) {
   } else if (p === 'roll') {
     $('#sg_pgtab_roll').addClass('active');
     $('#sg_page_roll').addClass('active');
+  } else if (p === 'image') {
+    $('#sg_pgtab_image').addClass('active');
+    $('#sg_page_image').addClass('active');
   } else {
     $('#sg_pgtab_guide').addClass('active');
     $('#sg_page_guide').addClass('active');
@@ -8742,10 +11793,89 @@ function setupSettingsPages() {
   $('#sg_pgtab_summary').on('click', () => showSettingsPage('summary'));
   $('#sg_pgtab_index').on('click', () => showSettingsPage('index'));
   $('#sg_pgtab_roll').on('click', () => showSettingsPage('roll'));
+  $('#sg_pgtab_image').on('click', () => showSettingsPage('image'));
 
   // quick jump
   $('#sg_gotoIndexPage').on('click', () => showSettingsPage('index'));
   $('#sg_gotoRollPage').on('click', () => showSettingsPage('roll'));
+
+  // 图像生成事件
+  $('#sg_generateImage').on('click', async () => {
+    pullUiToSettings(); saveSettings();
+    await runImageGeneration();
+  });
+
+  $('#sg_downloadImage').on('click', async () => {
+    const src = $('#sg_generatedImage').attr('src');
+    if (src) await saveGeneratedImage(src);
+  });
+
+  $('#sg_regenImage').on('click', async () => {
+    const positive = String($('#sg_imagePositivePrompt').val() || '').trim();
+    if (!positive) {
+      setImageGenStatus('暂无提示词可重生成', 'warn');
+      return;
+    }
+    const negative = String($('#sg_novelaiNegativePrompt').val() || '').trim();
+    setImageGenStatus('正在重新生成图像…', 'warn');
+    try {
+      const imageUrl = await generateImageWithNovelAI(positive, negative);
+      $('#sg_generatedImage').attr('src', imageUrl);
+      $('#sg_generatedImage').attr('data-full', imageUrl);
+      $('#sg_imageResult').show();
+      setImageGenStatus('✅ 已重新生成', 'ok');
+    } catch (e) {
+      setImageGenStatus(`❌ 重生成失败: ${e?.message || e}`, 'err');
+    }
+  });
+
+
+  $('#sg_copyImagePrompt').on('click', () => {
+    const prompt = $('#sg_imagePositivePrompt').val();
+    if (prompt) {
+      navigator.clipboard.writeText(prompt);
+      setImageGenStatus('提示词已复制到剪贴板', 'ok');
+    }
+  });
+
+  $('#sg_imageGenResetPrompt').on('click', () => {
+    $('#sg_imageGenSystemPrompt').val(DEFAULT_SETTINGS.imageGenSystemPrompt);
+    pullUiToSettings(); saveSettings();
+    setImageGenStatus('已恢复默认提示词', 'ok');
+  });
+
+  $('#sg_editPromptAndGenerate').on('click', async () => {
+    const $textarea = $('#sg_imagePositivePrompt');
+    if ($textarea.prop('readonly')) {
+      $textarea.prop('readonly', false);
+      $('#sg_editPromptAndGenerate').text('使用编辑后的提示词生成');
+    } else {
+      const positive = $textarea.val();
+      if (positive) {
+        const s = ensureSettings();
+        setImageGenStatus('正在使用编辑后的提示词生成…', 'warn');
+        try {
+          const imageUrl = await generateImageWithNovelAI(positive, '');
+          $('#sg_generatedImage').attr('src', imageUrl);
+          $('#sg_imageResult').show();
+          setImageGenStatus('✅ 生成成功！', 'ok');
+        } catch (e) {
+          setImageGenStatus(`❌ 生成失败: ${e?.message || e}`, 'err');
+        }
+      }
+    }
+  });
+
+  // 在线图库事件
+  $('#sg_loadGallery').on('click', async () => {
+    pullUiToSettings(); saveSettings();
+    await loadGalleryFromGitHub();
+  });
+
+  $('#sg_matchGalleryImage').on('click', async () => {
+    pullUiToSettings(); saveSettings();
+    await matchGalleryImage();
+  });
 }
 
 function pullSettingsToUi() {
@@ -8818,18 +11948,33 @@ function pullSettingsToUi() {
   $('#sg_summaryUserTemplate').val(String(s.summaryUserTemplate || DEFAULT_SUMMARY_USER_TEMPLATE));
   $('#sg_summaryReadStatData').prop('checked', !!s.summaryReadStatData);
   $('#sg_summaryStatVarName').val(String(s.summaryStatVarName || 'stat_data'));
+  $('#sg_megaSummaryEnabled').prop('checked', !!s.megaSummaryEnabled);
+  $('#sg_megaSummaryEvery').val(s.megaSummaryEvery || 40);
+  $('#sg_megaSummaryCommentPrefix').val(String(s.megaSummaryCommentPrefix || '大总结'));
+  $('#sg_megaSummarySystemPrompt').val(String(s.megaSummarySystemPrompt || DEFAULT_MEGA_SUMMARY_SYSTEM_PROMPT));
+  $('#sg_megaSummaryUserTemplate').val(String(s.megaSummaryUserTemplate || DEFAULT_MEGA_SUMMARY_USER_TEMPLATE));
   $('#sg_structuredEntriesEnabled').prop('checked', !!s.structuredEntriesEnabled);
   $('#sg_characterEntriesEnabled').prop('checked', !!s.characterEntriesEnabled);
   $('#sg_equipmentEntriesEnabled').prop('checked', !!s.equipmentEntriesEnabled);
-  $('#sg_abilityEntriesEnabled').prop('checked', !!s.abilityEntriesEnabled);
+  $('#sg_factionEntriesEnabled').prop('checked', !!s.factionEntriesEnabled);
+  $('#sg_structuredReenableEntriesEnabled').prop('checked', !!s.structuredReenableEntriesEnabled);
+  $('#sg_achievementEntriesEnabled').prop('checked', !!s.achievementEntriesEnabled);
+  $('#sg_subProfessionEntriesEnabled').prop('checked', !!s.subProfessionEntriesEnabled);
+  $('#sg_questEntriesEnabled').prop('checked', !!s.questEntriesEnabled);
   $('#sg_characterEntryPrefix').val(String(s.characterEntryPrefix || '人物'));
   $('#sg_equipmentEntryPrefix').val(String(s.equipmentEntryPrefix || '装备'));
-  $('#sg_abilityEntryPrefix').val(String(s.abilityEntryPrefix || '能力'));
+  $('#sg_factionEntryPrefix').val(String(s.factionEntryPrefix || '势力'));
+  $('#sg_achievementEntryPrefix').val(String(s.achievementEntryPrefix || '成就'));
+  $('#sg_subProfessionEntryPrefix').val(String(s.subProfessionEntryPrefix || '副职业'));
+  $('#sg_questEntryPrefix').val(String(s.questEntryPrefix || '任务'));
   $('#sg_structuredEntriesSystemPrompt').val(String(s.structuredEntriesSystemPrompt || DEFAULT_STRUCTURED_ENTRIES_SYSTEM_PROMPT));
   $('#sg_structuredEntriesUserTemplate').val(String(s.structuredEntriesUserTemplate || DEFAULT_STRUCTURED_ENTRIES_USER_TEMPLATE));
   $('#sg_structuredCharacterPrompt').val(String(s.structuredCharacterPrompt || DEFAULT_STRUCTURED_CHARACTER_PROMPT));
   $('#sg_structuredEquipmentPrompt').val(String(s.structuredEquipmentPrompt || DEFAULT_STRUCTURED_EQUIPMENT_PROMPT));
-  $('#sg_structuredAbilityPrompt').val(String(s.structuredAbilityPrompt || DEFAULT_STRUCTURED_ABILITY_PROMPT));
+  $('#sg_structuredFactionPrompt').val(String(s.structuredFactionPrompt || DEFAULT_STRUCTURED_FACTION_PROMPT));
+  $('#sg_structuredAchievementPrompt').val(String(s.structuredAchievementPrompt || DEFAULT_STRUCTURED_ACHIEVEMENT_PROMPT));
+  $('#sg_structuredSubProfessionPrompt').val(String(s.structuredSubProfessionPrompt || DEFAULT_STRUCTURED_SUBPROFESSION_PROMPT));
+  $('#sg_structuredQuestPrompt').val(String(s.structuredQuestPrompt || DEFAULT_STRUCTURED_QUEST_PROMPT));
   $('#sg_summaryCustomEndpoint').val(String(s.summaryCustomEndpoint || ''));
   $('#sg_summaryCustomApiKey').val(String(s.summaryCustomApiKey || ''));
   $('#sg_summaryCustomModel').val(String(s.summaryCustomModel || ''));
@@ -8866,6 +12011,10 @@ function pullSettingsToUi() {
   $('#sg_wiTriggerMaxEntries').val(s.wiTriggerMaxEntries || 4);
   $('#sg_wiTriggerMaxCharacters').val(s.wiTriggerMaxCharacters ?? 2);
   $('#sg_wiTriggerMaxEquipments').val(s.wiTriggerMaxEquipments ?? 2);
+  $('#sg_wiTriggerMaxFactions').val(s.wiTriggerMaxFactions ?? 2);
+  $('#sg_wiTriggerMaxAchievements').val(s.wiTriggerMaxAchievements ?? 2);
+  $('#sg_wiTriggerMaxSubProfessions').val(s.wiTriggerMaxSubProfessions ?? 2);
+  $('#sg_wiTriggerMaxQuests').val(s.wiTriggerMaxQuests ?? 2);
   $('#sg_wiTriggerMaxPlot').val(s.wiTriggerMaxPlot ?? 3);
   $('#sg_wiTriggerMinScore').val(s.wiTriggerMinScore ?? 0.08);
   $('#sg_wiTriggerMaxKeywords').val(s.wiTriggerMaxKeywords || 24);
@@ -8890,6 +12039,71 @@ function pullSettingsToUi() {
   $('#sg_wiRollCustomStream').prop('checked', !!s.wiRollCustomStream);
   $('#sg_wiRollSystemPrompt').val(String(s.wiRollSystemPrompt || DEFAULT_ROLL_SYSTEM_PROMPT));
   $('#sg_roll_custom_block').toggle(String(s.wiRollProvider || 'custom') === 'custom');
+  fillRollModelSelect(Array.isArray(s.wiRollCustomModelsCache) ? s.wiRollCustomModelsCache : [], s.wiRollCustomModel);
+
+  // 图像生成设置
+  $('#sg_imageGenEnabled').prop('checked', !!s.imageGenEnabled);
+  $('#sg_novelaiApiKey').val(String(s.novelaiApiKey || ''));
+  $('#sg_novelaiModel').val(String(s.novelaiModel || DEFAULT_SETTINGS.novelaiModel || 'nai-diffusion-4-5-full'));
+  $('#sg_novelaiResolution').val(String(s.novelaiResolution || '832x1216'));
+  $('#sg_novelaiSteps').val(s.novelaiSteps || 28);
+  $('#sg_novelaiScale').val(s.novelaiScale || 5);
+  $('#sg_novelaiSampler').val(String(s.novelaiSampler || 'k_euler'));
+  $('#sg_novelaiFixedSeedEnabled').prop('checked', !!s.novelaiFixedSeedEnabled);
+  $('#sg_novelaiFixedSeed').val(Number.isFinite(Number(s.novelaiFixedSeed)) ? Number(s.novelaiFixedSeed) : 0);
+  $('#sg_novelaiCfgRescale').val(Number.isFinite(Number(s.novelaiCfgRescale)) ? Number(s.novelaiCfgRescale) : 0);
+  $('#sg_novelaiNoiseSchedule').val(String(s.novelaiNoiseSchedule || 'native'));
+  $('#sg_novelaiLegacy').prop('checked', s.novelaiLegacy !== false);
+  $('#sg_novelaiVarietyBoost').prop('checked', !!s.novelaiVarietyBoost);
+  $('#sg_novelaiNegativePrompt').val(String(s.novelaiNegativePrompt || ''));
+
+  $('#sg_imageGenAutoSave').prop('checked', !!s.imageGenAutoSave);
+  $('#sg_imageGenSavePath').val(String(s.imageGenSavePath || ''));
+  $('#sg_imageGenLookbackMessages').val(s.imageGenLookbackMessages || 5);
+  $('#sg_imageGenReadStatData').prop('checked', !!s.imageGenReadStatData);
+  $('#sg_imageGenStatVarName').val(String(s.imageGenStatVarName || 'stat_data'));
+  $('#sg_imageGenCustomEndpoint').val(String(s.imageGenCustomEndpoint || ''));
+  $('#sg_imageGenCustomApiKey').val(String(s.imageGenCustomApiKey || ''));
+  $('#sg_imageGenCustomModel').val(String(s.imageGenCustomModel || 'gpt-4o-mini'));
+  $('#sg_imageGenCustomMaxTokens').val(s.imageGenCustomMaxTokens || 1024);
+
+  const presetList = getImageGenPresetList();
+  const $presetSelect = $('#sg_imageGenPresetSelect');
+  if ($presetSelect.length) {
+    $presetSelect.empty();
+    $presetSelect.append($('<option>').val('').text('选择预设'));
+    for (const item of presetList) {
+      $presetSelect.append($('<option>').val(item?.name || '').text(item?.name || '未命名'));
+    }
+    if (s.imageGenPresetActive) $presetSelect.val(s.imageGenPresetActive);
+  }
+
+  $('#sg_imageGenSystemPrompt').val(String(s.imageGenSystemPrompt || DEFAULT_SETTINGS.imageGenSystemPrompt));
+  $('#sg_imageGenArtistPromptEnabled').prop('checked', !!s.imageGenArtistPromptEnabled);
+  $('#sg_imageGenArtistPrompt').val(String(s.imageGenArtistPrompt || ''));
+  $('#sg_imageGenPromptRulesEnabled').prop('checked', !!s.imageGenPromptRulesEnabled);
+  $('#sg_imageGenPromptRules').val(String(s.imageGenPromptRules || ''));
+  $('#sg_imageGenBatchEnabled').prop('checked', !!s.imageGenBatchEnabled);
+  $('#sg_imageGenBatchPatterns').val(String(s.imageGenBatchPatterns || ''));
+
+
+  // 在线图库设置
+  $('#sg_imageGalleryEnabled').prop('checked', !!s.imageGalleryEnabled);
+  $('#sg_imageGalleryUrl').val(String(s.imageGalleryUrl || ''));
+  if (s.imageGalleryCache && s.imageGalleryCache.length > 0) {
+    $('#sg_galleryInfo').text(`(已缓存 ${s.imageGalleryCache.length} 张)`);
+  }
+
+  // 角色标签世界书设置
+  $('#sg_imageGenProfilesEnabled').prop('checked', !!s.imageGenCharacterProfilesEnabled);
+  renderCharacterProfilesUi();
+  const expanded = !!s.imageGenProfilesExpanded;
+  $('#sg_imageGenProfiles').toggleClass('sg-profiles-collapsed', !expanded);
+  $('#sg_imageGenProfilesToggle').text(expanded ? '折叠' : '展开');
+  $('#sg_imageGenProfilesEnabled').trigger('change');
+  $('#sg_imageGenCustomFemalePrompt1').val(String(s.imageGenCustomFemalePrompt1 || ''));
+  $('#sg_imageGenCustomFemalePrompt2').val(String(s.imageGenCustomFemalePrompt2 || ''));
+
 
   $('#sg_wiTriggerMatchMode').val(String(s.wiTriggerMatchMode || 'local'));
   $('#sg_wiIndexPrefilterTopK').val(s.wiIndexPrefilterTopK ?? 24);
@@ -8915,7 +12129,7 @@ function pullSettingsToUi() {
   $('#sg_summaryMaxTotalChars').val(s.summaryMaxTotalChars || 24000);
 
   $('#sg_summary_custom_block').toggle(String(s.summaryProvider || 'st') === 'custom');
-  $('#sg_summaryWorldInfoFile').toggle(String(s.summaryWorldInfoTarget || 'chatbook') === 'file');
+  $('#sg_summaryWorldInfoFile').show();
   $('#sg_summaryBlueWorldInfoFile').toggle(!!s.summaryToBlueWorldInfo);
   $('#sg_summaryIndexFormat').toggle(String(s.summaryWorldInfoKeyMode || 'keywords') === 'indexId');
 
@@ -9195,7 +12409,7 @@ function renderSummaryPaneFromMeta() {
   lastSummaryText = String(last?.summary || '');
 
   const md = hist.slice(-12).reverse().map((h, idx) => {
-    const title = String(h.title || `${ensureSettings().summaryWorldInfoCommentPrefix || '剧情总结'} #${hist.length - idx}`);
+    const title= String(h.title || `${ensureSettings().summaryWorldInfoCommentPrefix || '剧情总结'} #${hist.length - idx}`);
     const kws = Array.isArray(h.keywords) ? h.keywords : [];
     const when = h.createdAt ? new Date(h.createdAt).toLocaleString() : '';
     const range = h?.range ? `（${h.range.fromFloor}-${h.range.toFloor}）` : '';
@@ -9265,18 +12479,33 @@ function pullUiToSettings() {
   s.summaryUserTemplate = String($('#sg_summaryUserTemplate').val() || '').trim() || DEFAULT_SUMMARY_USER_TEMPLATE;
   s.summaryReadStatData = $('#sg_summaryReadStatData').is(':checked');
   s.summaryStatVarName = String($('#sg_summaryStatVarName').val() || 'stat_data').trim() || 'stat_data';
+  s.megaSummaryEnabled = $('#sg_megaSummaryEnabled').is(':checked');
+  s.megaSummaryEvery = clampInt($('#sg_megaSummaryEvery').val(), 5, 5000, s.megaSummaryEvery || 40);
+  s.megaSummaryCommentPrefix = String($('#sg_megaSummaryCommentPrefix').val() || '大总结').trim() || '大总结';
+  s.megaSummarySystemPrompt = String($('#sg_megaSummarySystemPrompt').val() || '').trim() || DEFAULT_MEGA_SUMMARY_SYSTEM_PROMPT;
+  s.megaSummaryUserTemplate = String($('#sg_megaSummaryUserTemplate').val() || '').trim() || DEFAULT_MEGA_SUMMARY_USER_TEMPLATE;
   s.structuredEntriesEnabled = $('#sg_structuredEntriesEnabled').is(':checked');
   s.characterEntriesEnabled = $('#sg_characterEntriesEnabled').is(':checked');
   s.equipmentEntriesEnabled = $('#sg_equipmentEntriesEnabled').is(':checked');
-  s.abilityEntriesEnabled = $('#sg_abilityEntriesEnabled').is(':checked');
+  s.factionEntriesEnabled = $('#sg_factionEntriesEnabled').is(':checked');
+  s.structuredReenableEntriesEnabled = $('#sg_structuredReenableEntriesEnabled').is(':checked');
+  s.achievementEntriesEnabled = $('#sg_achievementEntriesEnabled').is(':checked');
+  s.subProfessionEntriesEnabled = $('#sg_subProfessionEntriesEnabled').is(':checked');
+  s.questEntriesEnabled = $('#sg_questEntriesEnabled').is(':checked');
   s.characterEntryPrefix = String($('#sg_characterEntryPrefix').val() || '人物').trim() || '人物';
   s.equipmentEntryPrefix = String($('#sg_equipmentEntryPrefix').val() || '装备').trim() || '装备';
-  s.abilityEntryPrefix = String($('#sg_abilityEntryPrefix').val() || '能力').trim() || '能力';
+  s.factionEntryPrefix = String($('#sg_factionEntryPrefix').val() || '势力').trim() || '势力';
+  s.achievementEntryPrefix = String($('#sg_achievementEntryPrefix').val() || '成就').trim() || '成就';
+  s.subProfessionEntryPrefix = String($('#sg_subProfessionEntryPrefix').val() || '副职业').trim() || '副职业';
+  s.questEntryPrefix = String($('#sg_questEntryPrefix').val() || '任务').trim() || '任务';
   s.structuredEntriesSystemPrompt = String($('#sg_structuredEntriesSystemPrompt').val() || '').trim() || DEFAULT_STRUCTURED_ENTRIES_SYSTEM_PROMPT;
   s.structuredEntriesUserTemplate = String($('#sg_structuredEntriesUserTemplate').val() || '').trim() || DEFAULT_STRUCTURED_ENTRIES_USER_TEMPLATE;
   s.structuredCharacterPrompt = String($('#sg_structuredCharacterPrompt').val() || '').trim() || DEFAULT_STRUCTURED_CHARACTER_PROMPT;
   s.structuredEquipmentPrompt = String($('#sg_structuredEquipmentPrompt').val() || '').trim() || DEFAULT_STRUCTURED_EQUIPMENT_PROMPT;
-  s.structuredAbilityPrompt = String($('#sg_structuredAbilityPrompt').val() || '').trim() || DEFAULT_STRUCTURED_ABILITY_PROMPT;
+  s.structuredFactionPrompt = String($('#sg_structuredFactionPrompt').val() || '').trim() || DEFAULT_STRUCTURED_FACTION_PROMPT;
+  s.structuredAchievementPrompt = String($('#sg_structuredAchievementPrompt').val() || '').trim() || DEFAULT_STRUCTURED_ACHIEVEMENT_PROMPT;
+  s.structuredSubProfessionPrompt = String($('#sg_structuredSubProfessionPrompt').val() || '').trim() || DEFAULT_STRUCTURED_SUBPROFESSION_PROMPT;
+  s.structuredQuestPrompt = String($('#sg_structuredQuestPrompt').val() || '').trim() || DEFAULT_STRUCTURED_QUEST_PROMPT;
   s.summaryCustomEndpoint = String($('#sg_summaryCustomEndpoint').val() || '').trim();
   s.summaryCustomApiKey = String($('#sg_summaryCustomApiKey').val() || '');
   s.summaryCustomModel = String($('#sg_summaryCustomModel').val() || '').trim() || 'gpt-4o-mini';
@@ -9310,6 +12539,10 @@ function pullUiToSettings() {
   s.wiTriggerMaxEntries = clampInt($('#sg_wiTriggerMaxEntries').val(), 1, 20, s.wiTriggerMaxEntries || 4);
   s.wiTriggerMaxCharacters = clampInt($('#sg_wiTriggerMaxCharacters').val(), 0, 10, s.wiTriggerMaxCharacters ?? 2);
   s.wiTriggerMaxEquipments = clampInt($('#sg_wiTriggerMaxEquipments').val(), 0, 10, s.wiTriggerMaxEquipments ?? 2);
+  s.wiTriggerMaxFactions = clampInt($('#sg_wiTriggerMaxFactions').val(), 0, 10, s.wiTriggerMaxFactions ?? 2);
+  s.wiTriggerMaxAchievements = clampInt($('#sg_wiTriggerMaxAchievements').val(), 0, 10, s.wiTriggerMaxAchievements ?? 2);
+  s.wiTriggerMaxSubProfessions = clampInt($('#sg_wiTriggerMaxSubProfessions').val(), 0, 10, s.wiTriggerMaxSubProfessions ?? 2);
+  s.wiTriggerMaxQuests = clampInt($('#sg_wiTriggerMaxQuests').val(), 0, 10, s.wiTriggerMaxQuests ?? 2);
   s.wiTriggerMaxPlot = clampInt($('#sg_wiTriggerMaxPlot').val(), 0, 10, s.wiTriggerMaxPlot ?? 3);
   s.wiTriggerMinScore = clampFloat($('#sg_wiTriggerMinScore').val(), 0, 1, (s.wiTriggerMinScore ?? 0.08));
   s.wiTriggerMaxKeywords = clampInt($('#sg_wiTriggerMaxKeywords').val(), 1, 200, s.wiTriggerMaxKeywords || 24);
@@ -9333,6 +12566,53 @@ function pullUiToSettings() {
   s.wiRollCustomTemperature = clampFloat($('#sg_wiRollCustomTemperature').val(), 0, 2, s.wiRollCustomTemperature ?? 0.2);
   s.wiRollCustomStream = $('#sg_wiRollCustomStream').is(':checked');
   s.wiRollSystemPrompt = String($('#sg_wiRollSystemPrompt').val() || '').trim() || DEFAULT_ROLL_SYSTEM_PROMPT;
+
+  // 图像生成设置
+  s.imageGenEnabled = $('#sg_imageGenEnabled').is(':checked');
+  s.novelaiApiKey = String($('#sg_novelaiApiKey').val() || '').trim();
+  s.novelaiModel = String($('#sg_novelaiModel').val() || DEFAULT_SETTINGS.novelaiModel || 'nai-diffusion-4-5-full');
+  s.novelaiResolution = String($('#sg_novelaiResolution').val() || '832x1216');
+  s.novelaiSteps = clampInt($('#sg_novelaiSteps').val(), 1, 50, s.novelaiSteps || 28);
+  s.novelaiScale = clampFloat($('#sg_novelaiScale').val(), 1, 10, s.novelaiScale || 5);
+  s.novelaiSampler = String($('#sg_novelaiSampler').val() || s.novelaiSampler || 'k_euler');
+  s.novelaiFixedSeedEnabled = $('#sg_novelaiFixedSeedEnabled').is(':checked');
+  s.novelaiFixedSeed = clampInt($('#sg_novelaiFixedSeed').val(), 0, 4294967295, s.novelaiFixedSeed || 0);
+  s.novelaiCfgRescale = clampFloat($('#sg_novelaiCfgRescale').val(), 0, 1, s.novelaiCfgRescale ?? 0);
+  s.novelaiNoiseSchedule = String($('#sg_novelaiNoiseSchedule').val() || s.novelaiNoiseSchedule || 'native');
+  s.novelaiLegacy = $('#sg_novelaiLegacy').is(':checked');
+  s.novelaiVarietyBoost = $('#sg_novelaiVarietyBoost').is(':checked');
+  s.novelaiNegativePrompt = String($('#sg_novelaiNegativePrompt').val() || '').trim();
+
+  s.imageGenAutoSave = $('#sg_imageGenAutoSave').is(':checked');
+  s.imageGenSavePath = String($('#sg_imageGenSavePath').val() || '').trim();
+  s.imageGenLookbackMessages = clampInt($('#sg_imageGenLookbackMessages').val(), 1, 30, s.imageGenLookbackMessages || 5);
+  s.imageGenReadStatData = $('#sg_imageGenReadStatData').is(':checked');
+  s.imageGenStatVarName = String($('#sg_imageGenStatVarName').val() || 'stat_data').trim() || 'stat_data';
+  s.imageGenCustomEndpoint = String($('#sg_imageGenCustomEndpoint').val() || '').trim();
+  s.imageGenCustomApiKey = String($('#sg_imageGenCustomApiKey').val() || '').trim();
+  s.imageGenCustomModel = String($('#sg_imageGenCustomModel').val() || 'gpt-4o-mini');
+  s.imageGenCustomMaxTokens = clampInt($('#sg_imageGenCustomMaxTokens').val(), 128, 200000, s.imageGenCustomMaxTokens || 1024);
+
+  s.imageGenSystemPrompt = String($('#sg_imageGenSystemPrompt').val() || '').trim() || DEFAULT_SETTINGS.imageGenSystemPrompt;
+  s.imageGenArtistPromptEnabled = $('#sg_imageGenArtistPromptEnabled').is(':checked');
+  s.imageGenArtistPrompt = String($('#sg_imageGenArtistPrompt').val() || '').trim();
+  s.imageGenPromptRulesEnabled = $('#sg_imageGenPromptRulesEnabled').is(':checked');
+  s.imageGenPromptRules = String($('#sg_imageGenPromptRules').val() || '').trim();
+  s.imageGenBatchEnabled = $('#sg_imageGenBatchEnabled').is(':checked');
+  s.imageGenBatchPatterns = String($('#sg_imageGenBatchPatterns').val() || '').trim();
+
+  // 在线图库设置
+
+  s.imageGalleryEnabled = $('#sg_imageGalleryEnabled').is(':checked');
+  s.imageGalleryUrl = String($('#sg_imageGalleryUrl').val() || '').trim();
+
+  // 角色标签世界书设置
+  s.imageGenCharacterProfilesEnabled = $('#sg_imageGenProfilesEnabled').is(':checked');
+  s.imageGenCharacterProfiles = collectCharacterProfilesFromUi();
+  s.imageGenCharacterProfiles = s.imageGenCharacterProfiles || [];
+  s.imageGenCustomFemalePrompt1 = String($('#sg_imageGenCustomFemalePrompt1').val() || '').trim();
+  s.imageGenCustomFemalePrompt2 = String($('#sg_imageGenCustomFemalePrompt2').val() || '').trim();
+
 
   s.wiTriggerMatchMode = String($('#sg_wiTriggerMatchMode').val() || s.wiTriggerMatchMode || 'local');
   s.wiIndexPrefilterTopK = clampInt($('#sg_wiIndexPrefilterTopK').val(), 5, 80, s.wiIndexPrefilterTopK ?? 24);
@@ -9546,7 +12826,7 @@ function createFloatingButton() {
   btn.id = 'sg_floating_btn';
   btn.className = 'sg-floating-btn';
   btn.innerHTML = '📘';
-  btn.title = '剧情指导';
+  btn.title= '剧情指导';
   // Allow dragging but also clicking. We need to distinguish click from drag.
   btn.style.touchAction = 'none';
 
@@ -9675,6 +12955,7 @@ function createFloatingPanel() {
         <div class="sg-floating-actions">
           <button class="sg-floating-action-btn" id="sg_floating_show_report" title="查看分析">📖</button>
           <button class="sg-floating-action-btn" id="sg_floating_show_map" title="查看地图">🗺️</button>
+          <button class="sg-floating-action-btn" id="sg_floating_show_image" title="图像生成">🖼️</button>
           <button class="sg-floating-action-btn" id="sg_floating_roll_logs" title="ROLL日志">🎲</button>
           <button class="sg-floating-action-btn" id="sg_floating_settings" title="打开设置">⚙️</button>
           <button class="sg-floating-action-btn" id="sg_floating_close" title="关闭">✕</button>
@@ -9685,6 +12966,7 @@ function createFloatingPanel() {
         点击 <button class="sg-inner-refresh-btn" style="background:none; border:none; cursor:pointer; font-size:1.2em;">🔄</button> 生成
       </div>
     </div>
+
   `;
 
   document.body.appendChild(panel);
@@ -9710,47 +12992,174 @@ function createFloatingPanel() {
     hideFloatingPanel();
   });
 
-    $('#sg_floating_show_report').on('click', () => {
-      showFloatingReport();
-    });
+  $('#sg_floating_show_report').on('click', () => {
+    showFloatingReport();
+  });
 
-    $('#sg_floating_show_map').on('click', () => {
+  $('#sg_floating_show_map').on('click', () => {
+    showFloatingMap();
+  });
+
+  $('#sg_floating_show_image').on('click', () => {
+    showFloatingImageGen();
+  });
+
+
+  // Delegate inner refresh click
+  $(document).on('click', '.sg-inner-refresh-btn', async (e) => {
+    // Only handle if inside our panel
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    await refreshFloatingPanelContent();
+  });
+
+  $(document).on('click', '.sg-inner-map-reset-btn', async (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    try {
+      await setMapData(getDefaultMapData());
       showFloatingMap();
-    });
+    } catch (err) {
+      console.warn('[StoryGuide] map reset failed:', err);
+    }
+  });
 
-    // Delegate inner refresh click
-    $(document).on('click', '.sg-inner-refresh-btn', async (e) => {
-      // Only handle if inside our panel
-      if (!$(e.target).closest('#sg_floating_panel').length) return;
-      await refreshFloatingPanelContent();
-    });
+  $(document).on('click', '.sg-inner-map-toggle-btn', (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    const s = ensureSettings();
+    s.mapAutoUpdate = !isMapAutoUpdateEnabled(s);
+    saveSettings();
+    showFloatingMap();
+  });
 
-    $(document).on('click', '.sg-inner-map-reset-btn', async (e) => {
-      if (!$(e.target).closest('#sg_floating_panel').length) return;
-      try {
-        await setMapData(getDefaultMapData());
-        showFloatingMap();
-      } catch (err) {
-        console.warn('[StoryGuide] map reset failed:', err);
-      }
-    });
+  $(document).on('click', '#sg_imagegen_generate', async (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    if (imageGenBatchBusy) return;
+    await generateImageFromBatch();
+  });
 
-    $(document).on('click', '.sg-inner-map-toggle-btn', (e) => {
-      if (!$(e.target).closest('#sg_floating_panel').length) return;
-      const s = ensureSettings();
-      s.mapAutoUpdate = !isMapAutoUpdateEnabled(s);
-      saveSettings();
-      showFloatingMap();
-    });
+  $(document).on('click', '#sg_imagegen_generate_all', async (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    if (imageGenBatchBusy) return;
+    await generateAllImagesFromBatch();
+  });
 
-    $('#sg_floating_roll_logs').on('click', () => {
-      showFloatingRollLogs();
-    });
+
+  $(document).on('click', '#sg_imagegen_build_batch', async (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    if (imageGenBatchBusy) return;
+    imageGenBatchBusy = true;
+    imageGenBatchStatus = '正在生成提示词…';
+    renderImageGenBatchPreview();
+    try {
+      imageGenBatchPrompts = await generateImagePromptBatch();
+      imageGenBatchIndex = 0;
+      imageGenPreviewIndex = 0;
+      imageGenBatchStatus = '提示词已生成';
+    } catch (err) {
+      imageGenBatchStatus = `生成失败：${err?.message || err}`;
+    } finally {
+      imageGenBatchBusy = false;
+      renderImageGenBatchPreview();
+    }
+  });
+
+  $(document).on('click', '#sg_imagegen_clear', (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    clearImageGenBatch();
+  });
+
+  $(document).on('click', '#sg_imagegen_prev', (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    if (!imageGenBatchPrompts.length) return;
+    imageGenPreviewIndex = (imageGenPreviewIndex - 1 + imageGenBatchPrompts.length) % imageGenBatchPrompts.length;
+    renderImageGenBatchPreview();
+  });
+
+  $(document).on('click', '#sg_imagegen_next', (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    if (!imageGenBatchPrompts.length) return;
+    imageGenPreviewIndex = (imageGenPreviewIndex + 1) % imageGenBatchPrompts.length;
+    renderImageGenBatchPreview();
+  });
+
+
+  $('#sg_floating_roll_logs').on('click', () => {
+    showFloatingRollLogs();
+  });
 
   $('#sg_floating_settings').on('click', () => {
     openModal();
     hideFloatingPanel();
   });
+
+  // Image regen click (floating panel)
+  $(document).on('click', '#sg_imagegen_regen', async (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    if (imageGenBatchBusy) return;
+    const current = imageGenBatchPrompts[imageGenPreviewIndex];
+    if (!current || !current.positive) return;
+    try {
+      imageGenBatchBusy = true;
+      imageGenBatchStatus = `重新生成：${current.label || '当前'}`;
+      renderImageGenBatchPreview();
+      const url = await generateImageWithNovelAI(current.positive, current.negative || '');
+      imageGenImageUrls[imageGenPreviewIndex] = url;
+      imageGenBatchStatus = `已重新生成：${current.label || '当前'}`;
+    } catch (err) {
+      imageGenBatchStatus = `重生成失败：${err?.message || err}`;
+    } finally {
+      imageGenBatchBusy = false;
+      renderImageGenBatchPreview();
+    }
+  });
+
+  $(document).on('click', '#sg_imagegen_copy_payload', async (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    if (!lastNovelaiPayload) {
+      imageGenBatchStatus = '暂无可复制的请求参数';
+      renderImageGenBatchPreview();
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(lastNovelaiPayload, null, 2));
+      imageGenBatchStatus = '已复制请求参数';
+    } catch (err) {
+      imageGenBatchStatus = `复制失败：${err?.message || err}`;
+    }
+    renderImageGenBatchPreview();
+  });
+
+  $(document).on('click', '#sg_imagegen_toggle_preview', (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    imageGenPreviewExpanded = !imageGenPreviewExpanded;
+    renderImageGenBatchPreview();
+  });
+
+  $(document).on('click', '#sg_imagegen_download', async (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    const url = imageGenImageUrls[imageGenPreviewIndex];
+    if (!url) {
+      imageGenBatchStatus = '暂无可下载图像';
+      renderImageGenBatchPreview();
+      return;
+    }
+    try {
+      const response = await fetch(url);
+      const blob = await response.blob();
+      const filename = `storyguide-image-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+      imageGenBatchStatus = '图像已下载';
+    } catch (err) {
+      imageGenBatchStatus = `下载失败：${err?.message || err}`;
+    }
+    renderImageGenBatchPreview();
+  });
+
 
   // Drag logic
   const header = panel.querySelector('.sg-floating-header');
@@ -9929,15 +13338,16 @@ function showFloatingPanel() {
       panel.style.transform = '';
       panel.style.maxWidth = '';
       panel.style.maxHeight = '';
-      panel.style.display = '';
+      panel.style.display = 'flex';
       panel.style.height = '';
       panel.style.opacity = '';
       panel.style.visibility = '';
       panel.style.transition = '';
       panel.style.borderRadius = '';
     } else {
-      panel.style.display = '';
+      panel.style.display = 'flex';
     }
+
 
     panel.classList.add('visible');
     floatingPanelVisible = true;
@@ -9959,60 +13369,59 @@ function hideFloatingPanel() {
   if (panel) {
     panel.classList.remove('visible');
     floatingPanelVisible = false;
-    if (isMobilePortrait()) {
-      panel.style.display = 'none';
-    }
+    // 始终清除内联 display 样式以确保面板隐藏
+    panel.style.display = 'none';
   }
 }
 
-  async function refreshFloatingPanelContent() {
-    const $body = $('#sg_floating_body');
-    if (!$body.length) return;
+async function refreshFloatingPanelContent() {
+  const $body = $('#sg_floating_body');
+  if (!$body.length) return;
 
-    $body.html('<div class="sg-floating-loading">正在分析剧情...</div>');
+  $body.html('<div class="sg-floating-loading">正在分析剧情...</div>');
 
-    try {
-      const s = ensureSettings();
-      const { snapshotText } = buildSnapshot();
-      const modules = getModules('panel');
+  try {
+    const s = ensureSettings();
+    const { snapshotText } = buildSnapshot();
+    const modules = getModules('panel');
 
-      if (!modules.length) {
-        $body.html('<div class="sg-floating-loading">没有配置模块</div>');
-        return;
-      }
+    if (!modules.length) {
+      $body.html('<div class="sg-floating-loading">没有配置模块</div>');
+      return;
+    }
 
-      const schema = buildSchemaFromModules(modules);
-      const messages = buildPromptMessages(snapshotText, s.spoilerLevel, modules, 'panel');
+    const schema = buildSchemaFromModules(modules);
+    const messages = buildPromptMessages(snapshotText, s.spoilerLevel, modules, 'panel');
 
-      let jsonText = '';
-      if (s.provider === 'custom') {
-        jsonText = await callViaCustom(s.customEndpoint, s.customApiKey, s.customModel, messages, s.temperature, s.customMaxTokens, s.customTopP, s.customStream);
-      } else {
-        jsonText = await callViaSillyTavern(messages, schema, s.temperature);
-        if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
-      }
+    let jsonText = '';
+    if (s.provider === 'custom') {
+      jsonText = await callViaCustom(s.customEndpoint, s.customApiKey, s.customModel, messages, s.temperature, s.customMaxTokens, s.customTopP, s.customStream);
+    } else {
+      jsonText = await callViaSillyTavern(messages, schema, s.temperature);
+      if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
+    }
 
-      const parsed = safeJsonParse(jsonText);
-      if (!parsed) {
-        $body.html('<div class="sg-floating-loading">解析失败</div>');
-        return;
-      }
+    const parsed = safeJsonParse(jsonText);
+    if (!parsed) {
+      $body.html('<div class="sg-floating-loading">解析失败</div>');
+      return;
+    }
 
-      // 合并静态模块
-      const mergedParsed = mergeStaticModulesIntoResult(parsed, modules);
-      updateStaticModulesCache(mergedParsed, modules).catch(() => void 0);
+    // 合并静态模块
+    const mergedParsed = mergeStaticModulesIntoResult(parsed, modules);
+    updateStaticModulesCache(mergedParsed, modules).catch(() => void 0);
 
-      // 渲染内容
-      // Filter out quick_actions from main Markdown body to avoid duplication
-      const bodyModules = modules.filter(m => m.key !== 'quick_actions');
-      const md = renderReportMarkdownFromModules(mergedParsed, bodyModules);
-      const html = renderMarkdownToHtml(md);
+    // 渲染内容
+    // Filter out quick_actions from main Markdown body to avoid duplication
+    const bodyModules = modules.filter(m => m.key !== 'quick_actions');
+    const md = renderReportMarkdownFromModules(mergedParsed, bodyModules);
+    const html = renderMarkdownToHtml(md);
 
-      await updateMapFromSnapshot(snapshotText);
+    await updateMapFromSnapshot(snapshotText);
 
-      // 添加快捷选项
-      const quickActions = Array.isArray(mergedParsed.quick_actions) ? mergedParsed.quick_actions : [];
-      const optionsHtml = renderDynamicQuickActionsHtml(quickActions, 'panel');
+    // 添加快捷选项
+    const quickActions = Array.isArray(mergedParsed.quick_actions) ? mergedParsed.quick_actions : [];
+    const optionsHtml = renderDynamicQuickActionsHtml(quickActions, 'panel');
 
     const refreshBtnHtml = `
       <div style="padding:2px 8px; border-bottom:1px solid rgba(128,128,128,0.2); margin-bottom:4px; text-align:right;">
@@ -10037,9 +13446,36 @@ function updateFloatingPanelBody(html) {
   }
 }
 
-  function showFloatingRollLogs() {
-    const $body = $('#sg_floating_body');
-    if (!$body.length) return;
+function showFloatingImageGen() {
+  const $body = $('#sg_floating_body');
+  if (!$body.length) return;
+  const s = ensureSettings();
+  if (!s.imageGenEnabled) {
+    $body.html('<div class="sg-floating-loading">图像生成功能未启用</div>');
+    return;
+  }
+
+  const header = `
+    <div class="sg-floating-row">
+      <div class="sg-floating-title-sm">图像生成</div>
+      <div class="sg-floating-actions-mini">
+        <button class="sg-floating-mini-btn" id="sg_imagegen_build_batch">生成12组提示词</button>
+
+        <button class="sg-floating-mini-btn" id="sg_imagegen_generate">生成当前图</button>
+        <button class="sg-floating-mini-btn" id="sg_imagegen_generate_all">生成全部</button>
+
+      </div>
+    </div>
+  `;
+
+  $body.html(`${header}<div id="sg_imagegen_batch" class="sg-floating-section"></div>`);
+  renderImageGenBatchPreview();
+}
+
+function showFloatingRollLogs() {
+
+  const $body = $('#sg_floating_body');
+  if (!$body.length) return;
 
   const meta = getSummaryMeta();
   const logs = Array.isArray(meta?.rollLogs) ? meta.rollLogs : [];
@@ -10078,32 +13514,32 @@ function updateFloatingPanelBody(html) {
     `;
   }).join('');
 
-    $body.html(`<div style="padding:10px; overflow-y:auto; max-height:100%; box-sizing:border-box;">${html}</div>`);
-  }
+  $body.html(`<div style="padding:10px; overflow-y:auto; max-height:100%; box-sizing:border-box;">${html}</div>`);
+}
 
-  function showFloatingMap() {
-    const $body = $('#sg_floating_body');
-    if (!$body.length) return;
-    const s = ensureSettings();
-    if (!s.mapEnabled) {
-      $body.html('<div class="sg-floating-loading">地图功能未启用</div>');
-      return;
-    }
-    const mapData = getMapData();
-    const html = renderGridMap(mapData);
-    const autoLabel = isMapAutoUpdateEnabled(s) ? '自动更新：开' : '自动更新：关';
-    const tools = `
+function showFloatingMap() {
+  const $body = $('#sg_floating_body');
+  if (!$body.length) return;
+  const s = ensureSettings();
+  if (!s.mapEnabled) {
+    $body.html('<div class="sg-floating-loading">地图功能未启用</div>');
+    return;
+  }
+  const mapData = getMapData();
+  const html = renderGridMap(mapData);
+  const autoLabel = isMapAutoUpdateEnabled(s) ? '自动更新：开' : '自动更新：关';
+  const tools = `
       <div style="padding:2px 8px; border-bottom:1px solid rgba(128,128,128,0.2); margin-bottom:4px; text-align:right;">
         <button class="sg-inner-map-toggle-btn" title="切换自动更新" style="background:none; border:none; cursor:pointer; font-size:0.95em; opacity:0.85; margin-right:6px;">${autoLabel}</button>
         <button class="sg-inner-map-reset-btn" title="重置地图" style="background:none; border:none; cursor:pointer; font-size:1.1em; opacity:0.8;">🗑</button>
       </div>
     `;
-    $body.html(`${tools}<div style="padding:10px; overflow:auto; max-height:100%; box-sizing:border-box;">${html}</div>`);
-  }
+  $body.html(`${tools}<div style="padding:10px; overflow:auto; max-height:100%; box-sizing:border-box;">${html}</div>`);
+}
 
-  function showFloatingReport() {
-    const $body = $('#sg_floating_body');
-    if (!$body.length) return;
+function showFloatingReport() {
+  const $body = $('#sg_floating_body');
+  if (!$body.length) return;
 
   // Use last cached content if available, otherwise show empty state
   if (lastFloatingContent) {
@@ -10157,7 +13593,7 @@ function injectFixedInputButton() {
     btn.style.padding = '5px 10px';
     btn.style.userSelect = 'none';
     btn.innerHTML = '📘 剧情';
-    btn.title = '打开剧情指导悬浮窗';
+    btn.title= '打开剧情指导悬浮窗';
     // Ensure height consistency
     btn.style.height = 'var(--input-height, auto)';
 
@@ -10225,6 +13661,16 @@ function init() {
     createFloatingButton();
     injectFixedInputButton();
     installRollPreSendHook();
+
+    // 浮动面板图像点击放大（使用 document 级别事件委托确保动态元素可响应）
+    $(document).on('click', '#sg_floating_panel .sg-image-zoom, #sg_floating_panel .sg-floating-image', (e) => {
+      const $img = $(e.currentTarget);
+      const src = String($img.attr('data-full') || $img.attr('src') || '').trim();
+      if (!src) return;
+      e.preventDefault();
+      e.stopPropagation();
+      openImagePreviewModal(src, $img.attr('alt') || 'Image preview');
+    });
   });
 
   // 聊天切换时自动绑定世界书
