@@ -2557,9 +2557,16 @@ function parseWorldbookJson(rawText) {
       e.content ?? e.entry ?? e.text ?? e.description ?? e.desc ?? e.body ?? e.value ?? e.prompt ?? ''
     ).trim();
 
+    const disabledRaw =
+      e.disable ??
+      e.disabled ??
+      e.isDisabled ??
+      (Object.hasOwn(e, 'enabled') ? !e.enabled : null);
+    const disabled = (disabledRaw === 1 || disabledRaw === '1' || disabledRaw === true);
+
     if (!content) continue;
     const resolvedTitle = title || (keys[0] ? `条目：${keys[0]}` : '条目');
-    norm.push({ title: resolvedTitle, comment: comment || resolvedTitle, keys, content });
+    norm.push({ title: resolvedTitle, comment: comment || resolvedTitle, keys, content, disabled });
   }
   return norm;
 }
@@ -4094,7 +4101,7 @@ async function syncGreenWorldInfoFromBlue() {
         keys: Array.isArray(entry.keys) ? entry.keys : [],
         content: entry.content || '',
         comment: label,
-      }, { constant: 0, disable: 0 });
+      }, { constant: 0, disable: entry?.disabled ? 1 : 0 });
       greenSet.add(label);
       created += 1;
     }
