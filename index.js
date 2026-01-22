@@ -135,19 +135,21 @@ const DEFAULT_STRUCTURED_ENTRIES_SYSTEM_PROMPT = `你是一个"剧情记忆管�
 【任务】
 1. 识别本次对话中出现的重要 NPC（不含主角）
 2. 识别主角当前持有/装备的关键物品
-3. 识别剧情中出现/变化的重要势力
-4. 识别剧情中的成就记录
-5. 识别主角的副职业变化
-6. 识别当前或新增的任务记录
-7. 识别需要删除的条目（死亡的角色、卖掉/分解的装备等）
-8. 生成档案式的客观第三人称描述
+3. 识别主角物品栏内的重要道具/材料/消耗品（含数量与状态）
+4. 识别剧情中出现/变化的重要势力
+5. 识别剧情中的成就记录
+6. 识别主角的副职业变化
+7. 识别当前或新增的任务记录
+8. 识别需要删除的条目（死亡的角色、卖掉/分解的装备等）
+9. 生成档案式的客观第三人称描述
 
 【筛选标准】
 - NPC：只记录有名有姓的角色，忽略杂兵、无名NPC、普通敌人
 - 装备：只记录绿色品质以上的装备，或紫色品质以上的重要物品
+- 物品栏：记录与剧情有关的关键道具/材料/消耗品（避免过度琐碎）
 
 【去重规则（重要）】
-- 仔细检查【已知人物列表】、【已知装备列表】、【已知势力列表】、【已知成就列表】、【已知副职业列表】、【已知任务列表】，避免重复创建条目
+- 仔细检查【已知人物列表】、【已知装备列表】、【已知物品栏列表】、【已知势力列表】、【已知成就列表】、【已知副职业列表】、【已知任务列表】，避免重复创建条目
 - 同一角色可能有多种写法（如繁体/简体、英文/中文翻译），必须识别为同一人
 - 如果发现角色已存在于列表中，使用 isUpdated=true 更新而不是创建新条目
 - 将不同名称写法添加到 aliases 数组中
@@ -155,6 +157,7 @@ const DEFAULT_STRUCTURED_ENTRIES_SYSTEM_PROMPT = `你是一个"剧情记忆管�
 【删除条目规则】
 - 若角色在对话中明确死亡/永久离开，将其加入 deletedCharacters 数组
 - 若装备被卖掉/分解/丢弃/彻底损坏，将其加入 deletedEquipments 数组
+- 若物品被消耗/丢弃/转移且不再持有，将其加入 deletedInventories 数组
 - 若势力解散/覆灭/被吞并，将其加入 deletedFactions 数组
 - 若成就被撤销/失效，将其加入 deletedAchievements 数组
 - 若副职业被放弃/失去，将其加入 deletedSubProfessions 数组
@@ -171,7 +174,7 @@ const DEFAULT_STRUCTURED_ENTRIES_SYSTEM_PROMPT = `你是一个"剧情记忆管�
 - 评估「关系阶段」：陌生/初识/熟悉/信任/亲密，关系发展应循序渐进`;
 const LEGACY_STRUCTURED_ENTRIES_USER_TEMPLATE_V1 = `【楼层范围】{{fromFloor}}-{{toFloor}}\\n【对话片段】\\n{{chunk}}\\n【已知人物列表】\\n{{knownCharacters}}\\n【已知装备列表】\\n{{knownEquipments}}`;
 const LEGACY_STRUCTURED_ENTRIES_USER_TEMPLATE_V2 = `【楼层范围】{{fromFloor}}-{{toFloor}}\\n【对话片段】\\n{{chunk}}\\n【已知人物列表】\\n{{knownCharacters}}\\n【已知装备列表】\\n{{knownEquipments}}\\n【已知势力列表】\\n{{knownFactions}}`;
-const DEFAULT_STRUCTURED_ENTRIES_USER_TEMPLATE = `【楼层范围】{{fromFloor}}-{{toFloor}}\\n【对话片段】\\n{{chunk}}\\n【已知人物列表】\\n{{knownCharacters}}\\n【已知装备列表】\\n{{knownEquipments}}\\n【已知势力列表】\\n{{knownFactions}}\\n【已知成就列表】\\n{{knownAchievements}}\\n【已知副职业列表】\\n{{knownSubProfessions}}\\n【已知任务列表】\\n{{knownQuests}}`;
+const DEFAULT_STRUCTURED_ENTRIES_USER_TEMPLATE = `【楼层范围】{{fromFloor}}-{{toFloor}}\\n【对话片段】\\n{{chunk}}\\n【已知人物列表】\\n{{knownCharacters}}\\n【已知装备列表】\\n{{knownEquipments}}\\n【已知物品栏列表】\\n{{knownInventories}}\\n【已知势力列表】\\n{{knownFactions}}\\n【已知成就列表】\\n{{knownAchievements}}\\n【已知副职业列表】\\n{{knownSubProfessions}}\\n【已知任务列表】\\n{{knownQuests}}`;
 const DEFAULT_STRUCTURED_CHARACTER_PROMPT = `只记录有名有姓的重要NPC（不含主角），忽略杂兵、无名敌人、路人。
 
 【必填字段】阵营身份、性格特点、背景故事、与主角关系及发展、关键事件
@@ -183,17 +186,20 @@ const DEFAULT_STRUCTURED_CHARACTER_PROMPT = `只记录有名有姓的重要NPC�
 
 若角色死亡/永久离开，将其名字加入 deletedCharacters。若有 statData，在 statInfo 中精简总结。信息不足写"待确认"。`;
 const DEFAULT_STRUCTURED_EQUIPMENT_PROMPT = `只记录绿色品质以上的装备，或紫色品质以上的重要物品（忽略白色/灰色普通物品）。必须记录：获得时间、获得地点、来源（掉落/购买/锻造/奖励等）、当前状态。若有强化/升级，描述主角如何培养这件装备。若装备被卖掉/分解/丢弃/损坏，将其名字加入 deletedEquipments。若有 statData，精简总结其属性。`;
+const DEFAULT_STRUCTURED_INVENTORY_PROMPT = `记录主角物品栏中的重要道具/材料/消耗品（避免过度琐碎）。必须记录：数量、来源、当前状态/用途。若物品被消耗/丢弃/转移且不再持有，将其名字加入 deletedInventories。若有 statData，精简总结其属性。`;
 const DEFAULT_STRUCTURED_FACTION_PROMPT = `记录重要势力/组织/阵营。说明性质、范围、领导者、理念、与主角关系、当前状态。若势力解散/覆灭/被吞并，将其名字加入 deletedFactions。若有 statData，精简总结其数值。`;
 const DEFAULT_STRUCTURED_ACHIEVEMENT_PROMPT = `记录主角获得的成就。说明达成条件、影响、获得时间与当前状态。若成就被撤销/失效，将其名字加入 deletedAchievements。若有 statData，精简总结其数值。`;
 const DEFAULT_STRUCTURED_SUBPROFESSION_PROMPT = `记录主角的副职业/第二职业。说明定位、等级/进度、核心技能、获得方式、当前状态。若副职业被放弃/失去，将其名字加入 deletedSubProfessions。若有 statData，精简总结其数值。`;
 const DEFAULT_STRUCTURED_QUEST_PROMPT = `记录任务/委托。说明目标、发布者、进度、奖励、期限/地点。若任务完成/失败/取消，将其名字加入 deletedQuests。若有 statData，精简总结其数值。`;
 const STRUCTURED_ENTRIES_JSON_REQUIREMENT = `输出要求：只输出严格 JSON。各字段要填写完整，statInfo 只填关键数值的精简总结（1-2行）。
 
-结构：{"characters":[...],"equipments":[...],"factions":[...],"achievements":[...],"subProfessions":[...],"quests":[...],"deletedCharacters":[...],"deletedEquipments":[...],"deletedFactions":[...],"deletedAchievements":[...],"deletedSubProfessions":[...],"deletedQuests":[...]}
+结构：{"characters":[...],"equipments":[...],"inventories":[...],"factions":[...],"achievements":[...],"subProfessions":[...],"quests":[...],"deletedCharacters":[...],"deletedEquipments":[...],"deletedInventories":[...],"deletedFactions":[...],"deletedAchievements":[...],"deletedSubProfessions":[...],"deletedQuests":[...]}
 
 characters 条目结构：{name,uid,aliases[],faction,status,personality,corePersonality:"核心性格锚点（不轻易改变）",motivation:"角色独立动机/目标",relationshipStage:"陌生|初识|熟悉|信任|亲密",background,relationToProtagonist,keyEvents[],statInfo,isNew,isUpdated}
 
 equipments 条目结构：{name,uid,type,rarity,effects,source,currentState,statInfo,boundEvents[],isNew}
+
+inventories 条目结构：{name,uid,aliases[],type,rarity,quantity,effects,source,currentState,statInfo,boundEvents[],isNew,isUpdated}
 
 factions 条目结构：{name,uid,aliases[],type,scope,leader,ideology,relationToProtagonist,status,keyEvents[],statInfo,isNew,isUpdated}
 
@@ -361,6 +367,10 @@ const DEFAULT_SETTINGS = Object.freeze({
   summaryReadStatData: false,
   summaryStatVarName: 'stat_data',
 
+  // 结构化条目频率（按楼层计数）
+  structuredEntriesEvery: 1,
+  structuredEntriesCountMode: 'assistant',
+
   // 总结调用方式：st=走酒馆当前已连接的 LLM；custom=独立 OpenAI 兼容 API
   summaryProvider: 'st',
   summaryTemperature: 0.4,
@@ -371,6 +381,9 @@ const DEFAULT_SETTINGS = Object.freeze({
   megaSummarySystemPrompt: '',
   megaSummaryUserTemplate: '',
   megaSummaryCommentPrefix: '大总结',
+  megaSummaryIndexPrefix: 'R-',
+  megaSummaryIndexPad: 3,
+  megaSummaryIndexStart: 1,
 
   // 自定义总结提示词（可选）
   // - system：决定总结风格/重点
@@ -408,10 +421,6 @@ const DEFAULT_SETTINGS = Object.freeze({
   summaryToBlueWorldInfo: true,
   summaryBlueWorldInfoFile: '',
   summaryBlueWorldInfoCommentPrefix: '剧情总结',
-
-  // —— 自动绑定世界书（每个聊天自动生成专属世界书）——
-  autoBindWorldInfo: false,
-  autoBindWorldInfoPrefix: 'SG',
 
   // —— 蓝灯索引 → 绿灯触发 ——
   wiTriggerEnabled: false,
@@ -506,10 +515,11 @@ const DEFAULT_SETTINGS = Object.freeze({
   customSystemPreamble: '',     // 附加在默认 system 之后
   customConstraints: '',        // 附加在默认 constraints 之后
 
-  // ===== 结构化世界书条目（人物/装备/势力/成就/副职业/任务） =====
+  // ===== 结构化世界书条目（人物/装备/物品栏/势力/成就/副职业/任务） =====
   structuredEntriesEnabled: true,
   characterEntriesEnabled: true,
   equipmentEntriesEnabled: true,
+  inventoryEntriesEnabled: false,
   factionEntriesEnabled: false, // 默认关闭
   structuredReenableEntriesEnabled: false,
   achievementEntriesEnabled: false,
@@ -517,6 +527,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   questEntriesEnabled: false,
   characterEntryPrefix: '人物',
   equipmentEntryPrefix: '装备',
+  inventoryEntryPrefix: '物品栏',
   factionEntryPrefix: '势力',
   achievementEntryPrefix: '成就',
   subProfessionEntryPrefix: '副职业',
@@ -525,6 +536,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   structuredEntriesUserTemplate: '',
   structuredCharacterPrompt: '',
   structuredEquipmentPrompt: '',
+  structuredInventoryPrompt: '',
   structuredFactionPrompt: '',
   structuredAchievementPrompt: '',
   structuredSubProfessionPrompt: '',
@@ -663,11 +675,11 @@ const META_KEYS = Object.freeze({
   world: 'storyguide_world_setup',
   summaryMeta: 'storyguide_summary_meta',
   staticModulesCache: 'storyguide_static_modules_cache',
-  boundGreenWI: 'storyguide_bound_green_wi',
-  boundBlueWI: 'storyguide_bound_blue_wi',
-  autoBindCreated: 'storyguide_auto_bind_created',
   mapData: 'storyguide_map_data',
 });
+
+const SG_SUMMARY_WI_FILE_KEY = 'storyguide_summary_worldinfo_file_v1';
+const SG_SUMMARY_BLUE_WI_FILE_KEY = 'storyguide_summary_blue_worldinfo_file_v1';
 
 let lastReport = null;
 let lastJsonText = '';
@@ -676,7 +688,9 @@ let lastSummaryText = '';
 let refreshTimer = null;
 let appendTimer = null;
 let summaryTimer = null;
+let structuredTimer = null;
 let isSummarizing = false;
+let isStructuring = false;
 let summaryCancelled = false;
 let sgToastTimer = null;
 
@@ -738,6 +752,40 @@ function getStRequestHeadersCompat() {
 
 function clone(obj) { try { return structuredClone(obj); } catch { return JSON.parse(JSON.stringify(obj)); } }
 
+function readLocalStorageString(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw == null ? '' : String(raw);
+  } catch {
+    return '';
+  }
+}
+
+function writeLocalStorageString(key, value) {
+  try {
+    localStorage.setItem(key, String(value ?? ''));
+  } catch { /* ignore */ }
+}
+
+function normalizeWorldInfoFileName(fileName) {
+  const raw = String(fileName || '').trim();
+  if (!raw) return '';
+  return raw.endsWith('.json') ? raw.slice(0, -5) : raw;
+}
+
+function ensureMvuPlotPrefix(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return '[mvu_plot]';
+  return raw.startsWith('[mvu_plot]') ? raw : `[mvu_plot]${raw}`;
+}
+
+function resolveGreenWorldInfoTarget(settings) {
+  const s = settings || ensureSettings();
+  const file = normalizeWorldInfoFileName(s.summaryWorldInfoFile);
+  if (file) return { target: 'file', file };
+  return { target: 'file', file: '' };
+}
+
 function ensureSettings() {
   const { extensionSettings, saveSettingsDebounced } = SillyTavern.getContext();
   if (!extensionSettings[MODULE_NAME]) {
@@ -778,6 +826,14 @@ function ensureSettings() {
   if (extensionSettings[MODULE_NAME].summaryToBlueWorldInfo === false) {
     extensionSettings[MODULE_NAME].summaryToBlueWorldInfo = true;
     saveSettingsDebounced();
+  }
+
+  if (!String(extensionSettings[MODULE_NAME].summaryWorldInfoFile || '').trim()) {
+    const storedGreen = readLocalStorageString(SG_SUMMARY_WI_FILE_KEY).trim();
+    if (storedGreen) {
+      extensionSettings[MODULE_NAME].summaryWorldInfoFile = normalizeWorldInfoFileName(storedGreen);
+      saveSettingsDebounced();
+    }
   }
 
   // 迁移：结构化条目从“能力”改为“势力”
@@ -1410,8 +1466,11 @@ function getDefaultSummaryMeta() {
   return {
     lastFloor: 0,
     lastChatLen: 0,
+    lastStructuredFloor: 0,
+    lastStructuredChatLen: 0,
     // 用于“索引编号触发”（A-001/A-002…）的递增计数器（按聊天存储）
     nextIndex: 1,
+    nextMegaIndex: 1,
     megaSummaryCount: 0,
     history: [], // [{title, summary, keywords, createdAt, range:{fromFloor,toFloor,fromIdx,toIdx}, worldInfo:{file,uid}}]
     wiTriggerLogs: [], // [{ts,userText,picked:[{title,score,keywordsPreview}], injectedKeywords, lookback, style, tag}]
@@ -1419,12 +1478,14 @@ function getDefaultSummaryMeta() {
     // 结构化条目缓存（用于去重与更新 - 方案C混合策略）
     characterEntries: {}, // { uid: { name, aliases, lastUpdated, wiEntryUid, content } }
     equipmentEntries: {}, // { uid: { name, aliases, lastUpdated, wiEntryUid, content } }
+    inventoryEntries: {}, // { uid: { name, aliases, lastUpdated, wiEntryUid, content } }
     factionEntries: {}, // { uid: { name, lastUpdated, wiEntryUid, content } }
     achievementEntries: {}, // { uid: { name, lastUpdated, wiEntryUid, content } }
     subProfessionEntries: {}, // { uid: { name, lastUpdated, wiEntryUid, content } }
     questEntries: {}, // { uid: { name, lastUpdated, wiEntryUid, content } }
     nextCharacterIndex: 1, // NPC-001, NPC-002...
     nextEquipmentIndex: 1, // EQP-001, EQP-002...
+    nextInventoryIndex: 1, // INV-001, INV-002...
     nextFactionIndex: 1, // FCT-001, FCT-002...
     nextAchievementIndex: 1, // ACH-001, ACH-002...
     nextSubProfessionIndex: 1, // SUB-001, SUB-002...
@@ -2057,12 +2118,14 @@ async function clearStructuredEntriesCache() {
   const meta = getSummaryMeta();
   meta.characterEntries = {};
   meta.equipmentEntries = {};
+  meta.inventoryEntries = {};
   meta.factionEntries = {};
   meta.achievementEntries = {};
   meta.subProfessionEntries = {};
   meta.questEntries = {};
   meta.nextCharacterIndex = 1;
   meta.nextEquipmentIndex = 1;
+  meta.nextInventoryIndex = 1;
   meta.nextFactionIndex = 1;
   meta.nextAchievementIndex = 1;
   meta.nextSubProfessionIndex = 1;
@@ -2070,259 +2133,6 @@ async function clearStructuredEntriesCache() {
   await setSummaryMeta(meta);
 }
 
-// -------------------- 自动绑定世界书（每个聊天专属世界书） --------------------
-// 生成唯一的世界书文件名
-function generateBoundWorldInfoName(type) {
-  const ctx = SillyTavern.getContext();
-  const charName = String(ctx.characterId || ctx.name2 || ctx.name || 'UnknownChar')
-    .replace(/[^a-zA-Z0-9\u4e00-\u9fa5_-]/g, '')
-    .slice(0, 20);
-  const ts = Date.now().toString(36);
-  const prefix = ensureSettings().autoBindWorldInfoPrefix || 'SG';
-  return `${prefix}_${charName}_${ts}_${type} `;
-}
-
-// 检查并确保当前聊天启用了自动绑定（使用 chatbook 模式）
-async function ensureBoundWorldInfo(opts = {}) {
-  const s = ensureSettings();
-  if (!s.autoBindWorldInfo) return false;
-
-  const alreadyApplied = !!getChatMetaValue(META_KEYS.autoBindCreated);
-
-  // 如果已经应用过，只需重新应用设置
-  if (alreadyApplied) {
-    await applyBoundWorldInfoToSettings();
-    return false;
-  }
-
-  // 首次启用：设置标记并应用
-  await setChatMetaValue(META_KEYS.autoBindCreated, '1');
-
-  // 显示用户提示
-  showToast(`已启用自动写入世界书\n绿灯总结将写入聊天绑定的世界书\n（由 SillyTavern 自动创建和管理）`, {
-    kind: 'ok', spinner: false, sticky: false, duration: 3500
-  });
-
-  // 应用设置
-  await applyBoundWorldInfoToSettings();
-  return true;
-}
-
-// 创建世界书文件（通过多种方法尝试）
-async function createWorldInfoFile(fileName, initialContent = '初始化条目') {
-  if (!fileName) throw new Error('文件名为空');
-
-  console.log('[StoryGuide] 尝试创建世界书文件:', fileName);
-
-  // 方法1: 尝试使用 SillyTavern 内部的 world_info 模块
-  try {
-    const worldInfoModule = await import('/scripts/world-info.js');
-    if (worldInfoModule && typeof worldInfoModule.createNewWorldInfo === 'function') {
-      await worldInfoModule.createNewWorldInfo(fileName);
-      console.log('[StoryGuide] 使用内部模块创建成功:', fileName);
-      return true;
-    }
-  } catch (e) {
-    console.log('[StoryGuide] 内部模块方法失败:', e?.message || e);
-  }
-
-  // 方法2: 尝试使用导入 API (模拟文件上传)
-  try {
-    const headers = getStRequestHeadersCompat();
-    const worldInfoData = {
-      entries: {
-        0: {
-          uid: 0,
-          key: ['__SG_INIT__'],
-          keysecondary: [],
-          comment: '由 StoryGuide 自动创建',
-          content: initialContent,
-          constant: false,
-          disable: false,
-          order: 100,
-          position: 0,
-        }
-      }
-    };
-
-    // 创建一个 Blob 作为 JSON 文件
-    const blob = new Blob([JSON.stringify(worldInfoData)], { type: 'application/json' });
-    const formData = new FormData();
-    formData.append('avatar', blob, `${fileName}.json`);
-
-    const res = await fetch('/api/worldinfo/import', {
-      method: 'POST',
-      headers: { ...headers },
-      body: formData,
-    });
-
-    if (res.ok) {
-      console.log('[StoryGuide] 使用导入 API 创建成功:', fileName);
-      return true;
-    }
-    console.log('[StoryGuide] 导入 API 响应:', res.status);
-  } catch (e) {
-    console.log('[StoryGuide] 导入 API 方法失败:', e?.message || e);
-  }
-
-  // 方法3: 尝试直接 POST 到 /api/worldinfo/edit (编辑/创建)
-  try {
-    const headers = {
-      'Content-Type': 'application/json',
-      ...getStRequestHeadersCompat(),
-    };
-
-    const res = await fetch('/api/worldinfo/edit', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        name: fileName,
-        data: {
-          entries: {
-            0: {
-              uid: 0,
-              key: ['__SG_INIT__'],
-              content: initialContent,
-              comment: '由 StoryGuide 自动创建',
-            }
-          }
-        }
-      }),
-    });
-
-    if (res.ok) {
-      console.log('[StoryGuide] 使用 edit API 创建成功:', fileName);
-      return true;
-    }
-    console.log('[StoryGuide] edit API 响应:', res.status);
-  } catch (e) {
-    console.log('[StoryGuide] edit API 方法失败:', e?.message || e);
-  }
-
-  // 方法4: 最后尝试 STscript (可能需要文件已存在)
-  try {
-    const safeFileName = quoteSlashValue(fileName);
-    const safeKey = quoteSlashValue('__SG_INIT__');
-    const safeContent = quoteSlashValue(initialContent);
-    const cmd = `/ createentry file = ${safeFileName} key = ${safeKey} ${safeContent} `;
-    await execSlash(cmd);
-    console.log('[StoryGuide] STscript 方式可能成功');
-    return true;
-  } catch (e) {
-    console.log('[StoryGuide] STscript 方式失败:', e?.message || e);
-  }
-
-  // 所有方法都失败 - 显示警告但不阻断
-  console.warn('[StoryGuide] 无法自动创建世界书文件，请手动创建:', fileName);
-  return false;
-}
-
-// 解析当前聊天绑定的 chatbook 文件名（用于持久绑定）
-async function resolveChatbookFileName() {
-  const varName = '__sg_chatbook_name';
-  try {
-    const out = await execSlash(`/ getchatbook | /setvar key=${varName} | /getvar ${varName} | /flushvar ${varName}`);
-    const raw = slashOutputToText(out).trim();
-    if (!raw) return '';
-    const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-    const name = lines[lines.length - 1] || '';
-    return name.replace(/^"+|"+$/g, '');
-  } catch (e) {
-    console.warn('[StoryGuide] resolveChatbookFileName failed:', e?.message || e);
-    return '';
-  }
-}
-
-// 将绑定的世界书应用到设置
-async function applyBoundWorldInfoToSettings() {
-  const s = ensureSettings();
-  if (!s.autoBindWorldInfo) return;
-
-  console.log('[StoryGuide] 应用自动绑定设置（使用 chatbook 模式）');
-
-  let greenWI = String(getChatMetaValue(META_KEYS.boundGreenWI) || '').trim();
-  if (!greenWI) {
-    greenWI = await resolveChatbookFileName();
-    if (greenWI) await setChatMetaValue(META_KEYS.boundGreenWI, greenWI);
-  }
-
-  // 绿灯世界书：优先使用已解析的绑定文件名，避免切换/刷新后产生新文件
-  s.summaryToWorldInfo = true;
-  if (greenWI) {
-    s.summaryWorldInfoTarget = 'file';
-    s.summaryWorldInfoFile = greenWI;
-    console.log('[StoryGuide] 绿灯设置: file（绑定文件）', greenWI);
-  } else {
-    s.summaryWorldInfoTarget = 'chatbook';
-    s.summaryWorldInfoFile = '';
-    console.log('[StoryGuide] 绿灯设置: chatbook（将使用聊天绑定的世界书）');
-  }
-
-  // 蓝灯世界书：暂时禁用（因为无法自动创建独立文件）
-  // 用户如需蓝灯功能，需要手动创建世界书文件并在设置中指定
-  s.summaryToBlueWorldInfo = false;
-  console.log('[StoryGuide] 蓝灯设置: 禁用（无法自动创建独立文件）');
-
-  // 更新 UI（如果面板已打开）
-  updateAutoBindUI();
-  saveSettings();
-}
-
-// 更新自动绑定UI显示
-function updateAutoBindUI() {
-  const s = ensureSettings();
-  const $info = $('#sg_autoBindInfo');
-
-  if ($info.length) {
-    if (s.autoBindWorldInfo) {
-      $info.html(`<span style="color: var(--SmartThemeQuoteColor)">✅ 已启用：总结将写入聊天绑定的世界书</span>`);
-      $info.show();
-    } else {
-      $info.hide();
-    }
-  }
-}
-
-// 聊天切换时的处理（带提示）
-async function onChatSwitched() {
-  const s = ensureSettings();
-
-  console.log('[StoryGuide] onChatSwitched 被调用, autoBindWorldInfo =', s.autoBindWorldInfo);
-
-  if (!s.autoBindWorldInfo) {
-    console.log('[StoryGuide] autoBindWorldInfo 未开启，跳过自动绑定');
-    return;
-  }
-
-  // 等待 chatMetadata 加载完成（增加重试机制）
-  let retries = 0;
-  const maxRetries = 5;
-  while (retries < maxRetries) {
-    await new Promise(r => setTimeout(r, 200));
-    const { chatMetadata } = SillyTavern.getContext();
-    if (chatMetadata && Object.keys(chatMetadata).length > 0) {
-      console.log('[StoryGuide] chatMetadata 已加载，keys:', Object.keys(chatMetadata).length);
-      break;
-    }
-    retries++;
-    console.log(`[StoryGuide] 等待 chatMetadata 加载... (${retries}/${maxRetries})`);
-  }
-
-  const greenWI = getChatMetaValue(META_KEYS.boundGreenWI);
-  const blueWI = getChatMetaValue(META_KEYS.boundBlueWI);
-  const autoBindCreated = getChatMetaValue(META_KEYS.autoBindCreated);
-
-  console.log('[StoryGuide] 当前聊天绑定信息:', { greenWI, blueWI, autoBindCreated });
-
-  // 如果已经创建过绑定（即使 greenWI 为空也尝试恢复）
-  if (autoBindCreated || greenWI || blueWI) {
-    console.log('[StoryGuide] 恢复已有绑定');
-    await applyBoundWorldInfoToSettings();
-  } else {
-    // 不再自动为新聊天创建世界书（用户反馈：每次新对话都会创建）
-    console.log('[StoryGuide] 新聊天，跳过自动创建世界书');
-  }
-}
 
 function setStatus(text, kind = '') {
   const $s = $('#sg_status');
@@ -2706,6 +2516,7 @@ function parseWorldbookJson(rawText) {
   for (const e of entries) {
     if (!e || typeof e !== 'object') continue;
 
+    const comment = String(e.comment ?? '').trim();
     const title= String(e.title ?? e.name ?? e.comment ?? e.uid ?? e.id ?? '').trim();
 
     // keys can be stored in many variants in ST exports
@@ -2747,7 +2558,8 @@ function parseWorldbookJson(rawText) {
     ).trim();
 
     if (!content) continue;
-    norm.push({ title: title || (keys[0] ? `条目：${keys[0]}` : '条目'), keys, content });
+    const resolvedTitle = title || (keys[0] ? `条目：${keys[0]}` : '条目');
+    norm.push({ title: resolvedTitle, comment: comment || resolvedTitle, keys, content });
   }
   return norm;
 }
@@ -3952,23 +3764,24 @@ async function createMegaSummaryForSlice(slice, meta, settings) {
   let keywords = modelKeywords;
 
   if (String(s.summaryWorldInfoKeyMode || 'keywords') === 'indexId') {
-    if (!Number.isFinite(Number(meta.nextIndex))) {
+    if (!Number.isFinite(Number(meta.nextMegaIndex))) {
       let maxN = 0;
-      const pref = String(s.summaryIndexPrefix || 'A-');
+      const pref = String(s.megaSummaryIndexPrefix || 'R-');
       const re = new RegExp('^' + escapeRegExp(pref) + '(\\d+)$');
       for (const h of (Array.isArray(meta.history) ? meta.history : [])) {
+        if (!h?.isMega) continue;
         const id0 = String(h?.indexId || '').trim();
         const m = id0.match(re);
         if (m) maxN = Math.max(maxN, Number.parseInt(m[1], 10) || 0);
       }
-      meta.nextIndex = Math.max(clampInt(s.summaryIndexStart, 1, 1000000, 1), maxN + 1);
+      meta.nextMegaIndex = Math.max(clampInt(s.megaSummaryIndexStart, 1, 1000000, 1), maxN + 1);
     }
-    const pref = String(s.summaryIndexPrefix || 'A-');
-    const pad = clampInt(s.summaryIndexPad, 1, 12, 3);
-    const n = clampInt(meta.nextIndex, 1, 100000000, 1);
+    const pref = String(s.megaSummaryIndexPrefix || 'R-');
+    const pad = clampInt(s.megaSummaryIndexPad, 1, 12, 3);
+    const n = clampInt(meta.nextMegaIndex, 1, 100000000, 1);
     indexId = `${pref}${String(n).padStart(pad, '0')}`;
     keywords = [indexId];
-    meta.nextIndex = clampInt(Number(meta.nextIndex) + 1, 1, 1000000000, Number(meta.nextIndex) + 1);
+    meta.nextMegaIndex = clampInt(Number(meta.nextMegaIndex) + 1, 1, 1000000000, Number(meta.nextMegaIndex) + 1);
   }
 
   const range = {
@@ -3996,9 +3809,10 @@ async function createMegaSummaryForSlice(slice, meta, settings) {
 
   if (s.summaryToWorldInfo) {
     try {
+      const greenTarget = resolveGreenWorldInfoTarget(s);
       await writeSummaryToWorldInfoEntry(rec, meta, {
-        target: String(s.summaryWorldInfoTarget || 'chatbook'),
-        file: String(s.summaryWorldInfoFile || ''),
+        target: greenTarget.target,
+        file: greenTarget.file,
         commentPrefix: megaPrefix,
         constant: 0,
       });
@@ -4011,7 +3825,7 @@ async function createMegaSummaryForSlice(slice, meta, settings) {
       await writeSummaryToWorldInfoEntry(rec, meta, {
         target: 'file',
         file: String(s.summaryBlueWorldInfoFile || ''),
-        commentPrefix: megaPrefix,
+        commentPrefix: ensureMvuPlotPrefix(megaPrefix),
         constant: 1,
       });
     } catch (e) {
@@ -4048,9 +3862,10 @@ async function createMegaSummaryForSlice(slice, meta, settings) {
     }
     if (greenComment) {
       try {
+        const greenTarget = resolveGreenWorldInfoTarget(s);
         await disableWorldInfoEntryByComment(greenComment, s, {
-          target: String(s.summaryWorldInfoTarget || 'chatbook'),
-          file: String(s.summaryWorldInfoFile || ''),
+          target: greenTarget.target,
+          file: greenTarget.file,
         });
       } catch (e) {
         console.warn('[StoryGuide] disable summary entry failed:', e);
@@ -4147,7 +3962,7 @@ async function disableWorldInfoEntryByComment(comment, settings, {
 } = {}) {
   const s = settings || ensureSettings();
   const targetMode = String(target || 'file');
-  const fileName = String(file || '').trim();
+  const fileName = normalizeWorldInfoFileName(file || '');
   if (targetMode === 'file' && !fileName) return null;
 
   let findExpr;
@@ -4193,6 +4008,104 @@ async function disableWorldInfoEntryByComment(comment, settings, {
   }
 
   return { uid };
+}
+
+function getWorldInfoEntryLabel(entry) {
+  return String(entry?.comment || entry?.title || '').trim();
+}
+
+function filterWorldInfoEntriesByPrefix(entries, prefix) {
+  const p = String(prefix || '').trim();
+  if (!p) return Array.isArray(entries) ? entries : [];
+  const list = Array.isArray(entries) ? entries : [];
+  const filtered = list.filter(e => getWorldInfoEntryLabel(e).includes(p));
+  return filtered.length ? filtered : list;
+}
+
+async function createWorldInfoEntryInFile(fileName, { keys = [], content = '', comment = '' }, {
+  constant = 0,
+  disable = 0,
+} = {}) {
+  const file = normalizeWorldInfoFileName(fileName);
+  if (!file) throw new Error('世界书文件名为空');
+
+  const keyValue = Array.isArray(keys) ? keys.filter(Boolean).join(',') : String(keys || '');
+  const safeContent = String(content || '').replace(/\|/g, '｜').trim();
+  const safeComment = String(comment || '').replace(/\|/g, '｜').trim();
+  const uidVar = '__sg_sync_uid';
+  const fileExpr = quoteSlashValue(file);
+  const constantVal = (Number(constant) === 1) ? 1 : 0;
+  const disableVal = (Number(disable) === 1) ? 1 : 0;
+
+  const parts = [];
+  parts.push(`/createentry file=${fileExpr} key=${quoteSlashValue(keyValue)} ${quoteSlashValue(safeContent)}`);
+  parts.push(`/setvar key=${uidVar}`);
+  if (safeComment) parts.push(`/setentryfield file=${fileExpr} uid={{getvar::${uidVar}}} field=comment ${quoteSlashValue(safeComment)}`);
+  parts.push(`/setentryfield file=${fileExpr} uid={{getvar::${uidVar}}} field=disable ${disableVal}`);
+  parts.push(`/setentryfield file=${fileExpr} uid={{getvar::${uidVar}}} field=constant ${constantVal}`);
+  if (keyValue) parts.push(`/setentryfield file=${fileExpr} uid={{getvar::${uidVar}}} field=key ${quoteSlashValue(keyValue)}`);
+  parts.push(`/flushvar ${uidVar}`);
+
+  const out = await execSlash(parts.join(' | '));
+  if (out && typeof out === 'object' && (out.isError || out.isAborted || out.isQuietlyAborted)) {
+    throw new Error(`写入世界书失败（返回：${safeStringifyShort(out)}）`);
+  }
+}
+
+async function syncGreenWorldInfoFromBlue() {
+  const s = ensureSettings();
+  const greenTarget = resolveGreenWorldInfoTarget(s);
+  const greenFile = greenTarget.file;
+  const blueFile = normalizeWorldInfoFileName(s.summaryBlueWorldInfoFile);
+  if (!greenFile) {
+    setStatus('绿灯世界书文件名为空', 'warn');
+    return;
+  }
+  if (!blueFile) {
+    setStatus('蓝灯世界书文件名为空', 'warn');
+    return;
+  }
+
+  setStatus('正在对齐蓝灯→绿灯…', 'warn');
+  showToast('正在对齐绿灯世界书…', { kind: 'warn', spinner: true, sticky: true });
+
+  try {
+    const [blueJson, greenJson] = await Promise.all([
+      fetchWorldInfoFileJsonCompat(blueFile),
+      fetchWorldInfoFileJsonCompat(greenFile),
+    ]);
+
+    let blueEntries = parseWorldbookJson(JSON.stringify(blueJson || {}));
+    let greenEntries = parseWorldbookJson(JSON.stringify(greenJson || {}));
+
+    if (!blueEntries.length) {
+      setStatus('对齐完成 ✅（蓝灯世界书为空）', 'ok');
+      return;
+    }
+
+    const greenSet = new Set(greenEntries.map(getWorldInfoEntryLabel).filter(Boolean));
+    let created = 0;
+
+    for (const entry of blueEntries) {
+      const label = getWorldInfoEntryLabel(entry);
+      if (!label) continue;
+      if (greenSet.has(label)) continue;
+      await createWorldInfoEntryInFile(greenFile, {
+        keys: Array.isArray(entry.keys) ? entry.keys : [],
+        content: entry.content || '',
+        comment: label,
+      }, { constant: 0, disable: 0 });
+      greenSet.add(label);
+      created += 1;
+    }
+
+    if (created > 0) setStatus(`对齐完成 ✅（补全 ${created} 条）`, 'ok');
+    else setStatus('对齐完成 ✅（无缺失条目）', 'ok');
+  } catch (e) {
+    setStatus(`对齐失败：${e?.message ?? e}`, 'err');
+  } finally {
+    try { if ($('#sg_toast').hasClass('spinner')) hideToast(); } catch { /* ignore */ }
+  }
 }
 
 async function maybeGenerateMegaSummary(meta, settings) {
@@ -4323,6 +4236,7 @@ function buildStructuredEntriesPromptMessages(chunkText, fromFloor, toFloor, met
   if (!sys) sys = DEFAULT_STRUCTURED_ENTRIES_SYSTEM_PROMPT;
   const charPrompt = String(s.structuredCharacterPrompt || '').trim() || DEFAULT_STRUCTURED_CHARACTER_PROMPT;
   const equipPrompt = String(s.structuredEquipmentPrompt || '').trim() || DEFAULT_STRUCTURED_EQUIPMENT_PROMPT;
+  const inventoryPrompt = String(s.structuredInventoryPrompt || '').trim() || DEFAULT_STRUCTURED_INVENTORY_PROMPT;
   const factionPrompt = String(s.structuredFactionPrompt || '').trim() || DEFAULT_STRUCTURED_FACTION_PROMPT;
   const achievementPrompt = String(s.structuredAchievementPrompt || '').trim() || DEFAULT_STRUCTURED_ACHIEVEMENT_PROMPT;
   const subProfessionPrompt = String(s.structuredSubProfessionPrompt || '').trim() || DEFAULT_STRUCTURED_SUBPROFESSION_PROMPT;
@@ -4331,6 +4245,7 @@ function buildStructuredEntriesPromptMessages(chunkText, fromFloor, toFloor, met
     sys,
     `【人物条目要求】\n${charPrompt}`,
     `【装备条目要求】\n${equipPrompt}`,
+    `【物品栏条目要求】\n${inventoryPrompt}`,
     `【势力条目要求】\n${factionPrompt}`,
     `【成就条目要求】\n${achievementPrompt}`,
     `【副职业条目要求】\n${subProfessionPrompt}`,
@@ -4346,6 +4261,10 @@ function buildStructuredEntriesPromptMessages(chunkText, fromFloor, toFloor, met
   const knownEquips = Object.values(meta.equipmentEntries || {}).map(e => {
     const aliases = Array.isArray(e.aliases) && e.aliases.length > 0 ? `[别名:${e.aliases.join('/')}]` : '';
     return `${e.name}${aliases}`;
+  }).join('、') || '无';
+  const knownInventories = Object.values(meta.inventoryEntries || {}).map(i => {
+    const aliases = Array.isArray(i.aliases) && i.aliases.length > 0 ? `[别名:${i.aliases.join('/')}]` : '';
+    return `${i.name}${aliases}`;
   }).join('、') || '无';
   const knownFactions = Object.values(meta.factionEntries || {}).map(f => {
     const aliases = Array.isArray(f.aliases) && f.aliases.length > 0 ? `[别名:${f.aliases.join('/')}]` : '';
@@ -4379,6 +4298,7 @@ function buildStructuredEntriesPromptMessages(chunkText, fromFloor, toFloor, met
     chunk: String(chunkText || ''),
     knownCharacters: knownChars,
     knownEquipments: knownEquips,
+    knownInventories: knownInventories,
     knownFactions: knownFactions,
     knownAchievements: knownAchievements,
     knownSubProfessions: knownSubProfessions,
@@ -4409,17 +4329,125 @@ async function generateStructuredEntries(chunkText, fromFloor, toFloor, meta, se
   return {
     characters: Array.isArray(parsed.characters) ? parsed.characters : [],
     equipments: Array.isArray(parsed.equipments) ? parsed.equipments : [],
+    inventories: Array.isArray(parsed.inventories) ? parsed.inventories : (Array.isArray(parsed.inventory) ? parsed.inventory : []),
     factions: Array.isArray(parsed.factions) ? parsed.factions : (Array.isArray(parsed.abilities) ? parsed.abilities : []),
     achievements: Array.isArray(parsed.achievements) ? parsed.achievements : [],
     subProfessions: Array.isArray(parsed.subProfessions) ? parsed.subProfessions : [],
     quests: Array.isArray(parsed.quests) ? parsed.quests : [],
     deletedCharacters: Array.isArray(parsed.deletedCharacters) ? parsed.deletedCharacters : [],
     deletedEquipments: Array.isArray(parsed.deletedEquipments) ? parsed.deletedEquipments : [],
+    deletedInventories: Array.isArray(parsed.deletedInventories) ? parsed.deletedInventories : [],
     deletedFactions: Array.isArray(parsed.deletedFactions) ? parsed.deletedFactions : (Array.isArray(parsed.deletedAbilities) ? parsed.deletedAbilities : []),
     deletedAchievements: Array.isArray(parsed.deletedAchievements) ? parsed.deletedAchievements : [],
     deletedSubProfessions: Array.isArray(parsed.deletedSubProfessions) ? parsed.deletedSubProfessions : [],
     deletedQuests: Array.isArray(parsed.deletedQuests) ? parsed.deletedQuests : [],
   };
+}
+
+async function processStructuredEntriesChunk(chunkText, fromFloor, toFloor, meta, settings, statData = null) {
+  const s = settings || ensureSettings();
+  if (!chunkText) return false;
+  if (!s.structuredEntriesEnabled) return false;
+  if (!s.summaryToWorldInfo && !s.summaryToBlueWorldInfo) return false;
+
+  const structuredResult = await generateStructuredEntries(chunkText, fromFloor, toFloor, meta, s, statData);
+  if (!structuredResult) return false;
+
+  // 写入/更新人物条目（去重由 writeOrUpdate 内部处理）
+  if (s.characterEntriesEnabled && structuredResult.characters?.length) {
+    console.log(`[StoryGuide] Processing ${structuredResult.characters.length} character(s)`);
+    for (const char of structuredResult.characters) {
+      await writeOrUpdateCharacterEntry(char, meta, s);
+    }
+  }
+  // 写入/更新装备条目
+  if (s.equipmentEntriesEnabled && structuredResult.equipments?.length) {
+    console.log(`[StoryGuide] Processing ${structuredResult.equipments.length} equipment(s)`);
+    for (const equip of structuredResult.equipments) {
+      await writeOrUpdateEquipmentEntry(equip, meta, s);
+    }
+  }
+  if (s.inventoryEntriesEnabled && structuredResult.inventories?.length) {
+    console.log(`[StoryGuide] Processing ${structuredResult.inventories.length} inventory item(s)`);
+    for (const item of structuredResult.inventories) {
+      await writeOrUpdateInventoryEntry(item, meta, s);
+    }
+  }
+  // 写入/更新势力条目
+  if (s.factionEntriesEnabled && structuredResult.factions?.length) {
+    console.log(`[StoryGuide] Processing ${structuredResult.factions.length} faction(s)`);
+    for (const faction of structuredResult.factions) {
+      await writeOrUpdateFactionEntry(faction, meta, s);
+    }
+  }
+  // 写入/更新成就条目
+  if (s.achievementEntriesEnabled && structuredResult.achievements?.length) {
+    console.log(`[StoryGuide] Processing ${structuredResult.achievements.length} achievement(s)`);
+    for (const achievement of structuredResult.achievements) {
+      await writeOrUpdateAchievementEntry(achievement, meta, s);
+    }
+  }
+  // 写入/更新副职业条目
+  if (s.subProfessionEntriesEnabled && structuredResult.subProfessions?.length) {
+    console.log(`[StoryGuide] Processing ${structuredResult.subProfessions.length} sub profession(s)`);
+    for (const subProfession of structuredResult.subProfessions) {
+      await writeOrUpdateSubProfessionEntry(subProfession, meta, s);
+    }
+  }
+  // 写入/更新任务条目
+  if (s.questEntriesEnabled && structuredResult.quests?.length) {
+    console.log(`[StoryGuide] Processing ${structuredResult.quests.length} quest(s)`);
+    for (const quest of structuredResult.quests) {
+      await writeOrUpdateQuestEntry(quest, meta, s);
+    }
+  }
+
+  // 处理删除的条目
+  if (structuredResult.deletedCharacters?.length) {
+    console.log(`[StoryGuide] Deleting ${structuredResult.deletedCharacters.length} character(s)`);
+    for (const charName of structuredResult.deletedCharacters) {
+      await deleteCharacterEntry(charName, meta, s);
+    }
+  }
+  if (structuredResult.deletedEquipments?.length) {
+    console.log(`[StoryGuide] Deleting ${structuredResult.deletedEquipments.length} equipment(s)`);
+    for (const equipName of structuredResult.deletedEquipments) {
+      await deleteEquipmentEntry(equipName, meta, s);
+    }
+  }
+  if (structuredResult.deletedInventories?.length) {
+    console.log(`[StoryGuide] Deleting ${structuredResult.deletedInventories.length} inventory item(s)`);
+    for (const itemName of structuredResult.deletedInventories) {
+      await deleteInventoryEntry(itemName, meta, s);
+    }
+  }
+  if (structuredResult.deletedFactions?.length) {
+    console.log(`[StoryGuide] Deleting ${structuredResult.deletedFactions.length} faction(s)`);
+    for (const factionName of structuredResult.deletedFactions) {
+      await deleteFactionEntry(factionName, meta, s);
+    }
+  }
+  if (structuredResult.deletedAchievements?.length) {
+    console.log(`[StoryGuide] Deleting ${structuredResult.deletedAchievements.length} achievement(s)`);
+    for (const achievementName of structuredResult.deletedAchievements) {
+      await deleteAchievementEntry(achievementName, meta, s);
+    }
+  }
+  if (structuredResult.deletedSubProfessions?.length) {
+    console.log(`[StoryGuide] Deleting ${structuredResult.deletedSubProfessions.length} sub profession(s)`);
+    for (const subProfessionName of structuredResult.deletedSubProfessions) {
+      await deleteSubProfessionEntry(subProfessionName, meta, s);
+    }
+  }
+  if (structuredResult.deletedQuests?.length) {
+    console.log(`[StoryGuide] Deleting ${structuredResult.deletedQuests.length} quest(s)`);
+    for (const questName of structuredResult.deletedQuests) {
+      await deleteQuestEntry(questName, meta, s);
+    }
+  }
+
+  await setSummaryMeta(meta);
+  return true;
 }
 
 // 构建条目的 key（用于世界书触发词和去重）
@@ -4465,6 +4493,24 @@ function buildEquipmentContent(equip) {
     parts.push(`属性数据：${infoStr}`);
   }
   if (equip.boundEvents?.length) parts.push(`相关事件：${equip.boundEvents.join('；')}`);
+  return parts.join('\n');
+}
+
+function buildInventoryContent(item) {
+  const parts = [];
+  if (item.name) parts.push(`【物品栏】${item.name}`);
+  if (item.aliases?.length) parts.push(`别名：${item.aliases.join('、')}`);
+  if (item.type) parts.push(`类型：${item.type}`);
+  if (item.rarity) parts.push(`品质：${item.rarity}`);
+  if (item.quantity !== undefined && item.quantity !== null) parts.push(`数量：${item.quantity}`);
+  if (item.effects) parts.push(`效果：${item.effects}`);
+  if (item.source) parts.push(`来源：${item.source}`);
+  if (item.currentState) parts.push(`当前状态：${item.currentState}`);
+  if (item.statInfo) {
+    const infoStr = typeof item.statInfo === 'object' ? JSON.stringify(item.statInfo, null, 2) : String(item.statInfo);
+    parts.push(`属性数据：${infoStr}`);
+  }
+  if (item.boundEvents?.length) parts.push(`相关事件：${item.boundEvents.join('；')}`);
   return parts.join('\n');
 }
 
@@ -4589,12 +4635,13 @@ async function writeOrUpdateStructuredEntry(entryType, entryData, meta, settings
   let target, file, constant;
   if (targetType === 'blue') {
     target = 'file';
-    file = String(settings.summaryBlueWorldInfoFile || '');
+    file = normalizeWorldInfoFileName(settings.summaryBlueWorldInfoFile);
     constant = 1; // 蓝灯=常开
     if (!file) return null; // 蓝灯必须指定文件名
   } else {
-    target = String(settings.summaryWorldInfoTarget || 'chatbook');
-    file = String(settings.summaryWorldInfoFile || '');
+    const greenTarget = resolveGreenWorldInfoTarget(settings);
+    target = greenTarget.target;
+    file = greenTarget.file;
     constant = 0; // 绿灯=触发词触发
   }
   const fileExprForQuery = (target === 'chatbook') ? '{{getchatbook}}' : file;
@@ -4872,6 +4919,32 @@ async function writeOrUpdateFactionEntry(faction, meta, settings) {
   return results.length ? results : null;
 }
 
+async function writeOrUpdateInventoryEntry(item, meta, settings) {
+  if (!item?.name) return null;
+  const results = [];
+  if (settings.summaryToWorldInfo) {
+    const r = await writeOrUpdateStructuredEntry('inventory', item, meta, settings, {
+      buildContent: buildInventoryContent,
+      entriesCache: meta.inventoryEntries,
+      nextIndexKey: 'nextInventoryIndex',
+      prefix: settings.inventoryEntryPrefix || '物品栏',
+      targetType: 'green',
+    });
+    if (r) results.push(r);
+  }
+  if (settings.summaryToBlueWorldInfo) {
+    const r = await writeOrUpdateStructuredEntry('inventory', item, meta, settings, {
+      buildContent: buildInventoryContent,
+      entriesCache: meta.inventoryEntries,
+      nextIndexKey: 'nextInventoryIndex',
+      prefix: settings.inventoryEntryPrefix || '物品栏',
+      targetType: 'blue',
+    });
+    if (r) results.push(r);
+  }
+  return results.length ? results : null;
+}
+
 async function writeOrUpdateAchievementEntry(achievement, meta, settings) {
   if (!achievement?.name) return null;
   const results = [];
@@ -4975,17 +5048,15 @@ async function deleteStructuredEntry(entryType, entryName, meta, settings, {
   let file = '';
   if (targetType === 'blue') {
     target = 'file';
-    file = settings.summaryBlueWorldInfoFile || '';
+    file = normalizeWorldInfoFileName(settings.summaryBlueWorldInfoFile);
     if (!file) {
       console.warn(`[StoryGuide] No blue world info file configured for deletion`);
       return null;
     }
   } else {
-    const t = String(settings.summaryWorldInfoTarget || 'chatbook');
-    if (t === 'file') {
-      target = 'file';
-      file = settings.summaryWorldInfoFile || '';
-    }
+    const greenTarget = resolveGreenWorldInfoTarget(settings);
+    target = greenTarget.target;
+    file = greenTarget.file;
   }
 
   // 使用 /findentry 查找条目 UID
@@ -5130,6 +5201,28 @@ async function deleteFactionEntry(factionName, meta, settings) {
     const r = await deleteStructuredEntry('faction', factionName, meta, settings, {
       entriesCache: meta.factionEntries,
       prefix: settings.factionEntryPrefix || '势力',
+      targetType: 'blue',
+    });
+    if (r) results.push(r);
+  }
+  return results.length ? results : null;
+}
+
+// 删除物品栏条目
+async function deleteInventoryEntry(itemName, meta, settings) {
+  const results = [];
+  if (settings.summaryToWorldInfo) {
+    const r = await deleteStructuredEntry('inventory', itemName, meta, settings, {
+      entriesCache: meta.inventoryEntries,
+      prefix: settings.inventoryEntryPrefix || '物品栏',
+      targetType: 'green',
+    });
+    if (r) results.push(r);
+  }
+  if (settings.summaryToBlueWorldInfo) {
+    const r = await deleteStructuredEntry('inventory', itemName, meta, settings, {
+      entriesCache: meta.inventoryEntries,
+      prefix: settings.inventoryEntryPrefix || '物品栏',
       targetType: 'blue',
     });
     if (r) results.push(r);
@@ -5436,7 +5529,7 @@ async function writeSummaryToWorldInfoEntry(rec, meta, {
     .replace(/\|/g, '｜');
 
   const t = String(target || 'file');
-  const f = String(file || '').trim();
+  const f = normalizeWorldInfoFileName(file || '');
   if (t === 'file' && !f) throw new Error('WorldInfo 目标为 file 时必须填写世界书文件名。');
 
   // We purposely avoid parsing UID in JS, because some ST builds return only a status object
@@ -5707,94 +5800,13 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
       // 同步进蓝灯索引缓存（用于本地匹配/预筛选）
       try { appendToBlueIndexCache(rec); } catch { /* ignore */ }
 
-      // 生成结构化世界书条目（人物/装备/势力/成就/副职业/任务 - 与剧情总结同一事务）
+      // 生成结构化世界书条目（人物/装备/物品栏/势力/成就/副职业/任务 - 与剧情总结同一事务）
       if (s.structuredEntriesEnabled && (s.summaryToWorldInfo || s.summaryToBlueWorldInfo)) {
         try {
-          const structuredResult = await generateStructuredEntries(chunkText, fromFloor, toFloor, meta, s, summaryStatData);
-          console.log('[StoryGuide] Structured entries result:', structuredResult);
-          if (structuredResult) {
-            // 写入/更新人物条目（去重由 writeOrUpdate 内部处理）
-            if (s.characterEntriesEnabled && structuredResult.characters?.length) {
-              console.log(`[StoryGuide] Processing ${structuredResult.characters.length} character(s)`);
-              for (const char of structuredResult.characters) {
-                await writeOrUpdateCharacterEntry(char, meta, s);
-              }
-            }
-            // 写入/更新装备条目
-            if (s.equipmentEntriesEnabled && structuredResult.equipments?.length) {
-              console.log(`[StoryGuide] Processing ${structuredResult.equipments.length} equipment(s)`);
-              for (const equip of structuredResult.equipments) {
-                await writeOrUpdateEquipmentEntry(equip, meta, s);
-              }
-            }
-            // 写入/更新势力条目
-            if (s.factionEntriesEnabled && structuredResult.factions?.length) {
-              console.log(`[StoryGuide] Processing ${structuredResult.factions.length} faction(s)`);
-              for (const faction of structuredResult.factions) {
-                await writeOrUpdateFactionEntry(faction, meta, s);
-              }
-            }
-            // 写入/更新成就条目
-            if (s.achievementEntriesEnabled && structuredResult.achievements?.length) {
-              console.log(`[StoryGuide] Processing ${structuredResult.achievements.length} achievement(s)`);
-              for (const achievement of structuredResult.achievements) {
-                await writeOrUpdateAchievementEntry(achievement, meta, s);
-              }
-            }
-            // 写入/更新副职业条目
-            if (s.subProfessionEntriesEnabled && structuredResult.subProfessions?.length) {
-              console.log(`[StoryGuide] Processing ${structuredResult.subProfessions.length} sub profession(s)`);
-              for (const subProfession of structuredResult.subProfessions) {
-                await writeOrUpdateSubProfessionEntry(subProfession, meta, s);
-              }
-            }
-            // 写入/更新任务条目
-            if (s.questEntriesEnabled && structuredResult.quests?.length) {
-              console.log(`[StoryGuide] Processing ${structuredResult.quests.length} quest(s)`);
-              for (const quest of structuredResult.quests) {
-                await writeOrUpdateQuestEntry(quest, meta, s);
-              }
-            }
-
-            // 处理删除的条目
-            if (structuredResult.deletedCharacters?.length) {
-              console.log(`[StoryGuide] Deleting ${structuredResult.deletedCharacters.length} character(s)`);
-              for (const charName of structuredResult.deletedCharacters) {
-                await deleteCharacterEntry(charName, meta, s);
-              }
-            }
-            if (structuredResult.deletedEquipments?.length) {
-              console.log(`[StoryGuide] Deleting ${structuredResult.deletedEquipments.length} equipment(s)`);
-              for (const equipName of structuredResult.deletedEquipments) {
-                await deleteEquipmentEntry(equipName, meta, s);
-              }
-            }
-            if (structuredResult.deletedFactions?.length) {
-              console.log(`[StoryGuide] Deleting ${structuredResult.deletedFactions.length} faction(s)`);
-              for (const factionName of structuredResult.deletedFactions) {
-                await deleteFactionEntry(factionName, meta, s);
-              }
-            }
-            if (structuredResult.deletedAchievements?.length) {
-              console.log(`[StoryGuide] Deleting ${structuredResult.deletedAchievements.length} achievement(s)`);
-              for (const achievementName of structuredResult.deletedAchievements) {
-                await deleteAchievementEntry(achievementName, meta, s);
-              }
-            }
-            if (structuredResult.deletedSubProfessions?.length) {
-              console.log(`[StoryGuide] Deleting ${structuredResult.deletedSubProfessions.length} sub profession(s)`);
-              for (const subProfessionName of structuredResult.deletedSubProfessions) {
-                await deleteSubProfessionEntry(subProfessionName, meta, s);
-              }
-            }
-            if (structuredResult.deletedQuests?.length) {
-              console.log(`[StoryGuide] Deleting ${structuredResult.deletedQuests.length} quest(s)`);
-              for (const questName of structuredResult.deletedQuests) {
-                await deleteQuestEntry(questName, meta, s);
-              }
-            }
-
-            await setSummaryMeta(meta);
+          const structuredOk = await processStructuredEntriesChunk(chunkText, fromFloor, toFloor, meta, s, summaryStatData);
+          if (structuredOk && affectsProgress) {
+            meta.lastStructuredFloor = toFloor;
+            meta.lastStructuredChatLen = chat.length;
           }
         } catch (e) {
           console.warn('[StoryGuide] Structured entries generation failed:', e);
@@ -5806,9 +5818,10 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
       if (s.summaryToWorldInfo || s.summaryToBlueWorldInfo) {
         if (s.summaryToWorldInfo) {
           try {
+            const greenTarget = resolveGreenWorldInfoTarget(s);
             await writeSummaryToWorldInfoEntry(rec, meta, {
-              target: String(s.summaryWorldInfoTarget || 'chatbook'),
-              file: String(s.summaryWorldInfoFile || ''),
+              target: greenTarget.target,
+              file: greenTarget.file,
               commentPrefix: String(s.summaryWorldInfoCommentPrefix || '剧情总结'),
               constant: 0,
             });
@@ -5824,7 +5837,7 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
           await writeSummaryToWorldInfoEntry(rec, meta, {
             target: 'file',
             file: String(s.summaryBlueWorldInfoFile || ''),
-            commentPrefix: String(s.summaryBlueWorldInfoCommentPrefix || s.summaryWorldInfoCommentPrefix || '剧情总结'),
+            commentPrefix: ensureMvuPlotPrefix(String(s.summaryBlueWorldInfoCommentPrefix || s.summaryWorldInfoCommentPrefix || '剧情总结')),
             constant: 1,
           });
           wroteBlueOk += 1;
@@ -5953,6 +5966,116 @@ async function maybeAutoSummary(reason = '') {
   if (floorNow <= last) return;
 
   await runSummary({ reason: 'auto' });
+}
+
+function scheduleAutoStructuredEntries(reason = '') {
+  const s = ensureSettings();
+  if (!s.enabled) return;
+  if (!s.structuredEntriesEnabled) return;
+  if (!s.summaryToWorldInfo && !s.summaryToBlueWorldInfo) return;
+  const delay = clampInt(s.debounceMs, 300, 10000, DEFAULT_SETTINGS.debounceMs);
+  if (structuredTimer) clearTimeout(structuredTimer);
+  structuredTimer = setTimeout(() => {
+    structuredTimer = null;
+    maybeAutoStructuredEntries(reason).catch(() => void 0);
+  }, delay);
+}
+
+async function maybeAutoStructuredEntries(reason = '') {
+  const s = ensureSettings();
+  if (!s.enabled) return;
+  if (!s.structuredEntriesEnabled) return;
+  if (!s.summaryToWorldInfo && !s.summaryToBlueWorldInfo) return;
+  if (isStructuring || isSummarizing) return;
+
+  const ctx = SillyTavern.getContext();
+  const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+  const mode = String(s.structuredEntriesCountMode || s.summaryCountMode || 'assistant');
+  const every = clampInt(s.structuredEntriesEvery, 1, 200, 1);
+  const floorNow = computeFloorCount(chat, mode);
+  if (floorNow <= 0) return;
+  if (floorNow % every !== 0) return;
+
+  const meta = getSummaryMeta();
+  const last = Number(meta?.lastStructuredFloor || 0);
+  if (floorNow <= last) return;
+
+  await runStructuredEntries({ reason: 'auto' });
+}
+
+async function runStructuredEntries({ reason = 'auto' } = {}) {
+  const s = ensureSettings();
+  if (!s.enabled) return 0;
+  if (!s.structuredEntriesEnabled) return 0;
+  if (!s.summaryToWorldInfo && !s.summaryToBlueWorldInfo) return 0;
+  if (isStructuring) return 0;
+
+  isStructuring = true;
+  try {
+    const ctx = SillyTavern.getContext();
+    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+    if (!chat.length) return 0;
+
+    const mode = String(s.structuredEntriesCountMode || s.summaryCountMode || 'assistant');
+    const every = clampInt(s.structuredEntriesEvery, 1, 200, 1);
+    const floorNow = computeFloorCount(chat, mode);
+
+    let meta = getSummaryMeta();
+    if (!meta || typeof meta !== 'object') meta = getDefaultSummaryMeta();
+
+    const segments = [];
+    if (reason === 'auto' && meta.lastStructuredChatLen > 0 && meta.lastStructuredChatLen < chat.length) {
+      const startIdx = meta.lastStructuredChatLen;
+      const fromFloor = Math.max(1, Number(meta.lastStructuredFloor || 0) + 1);
+      const toFloor = floorNow;
+      const endIdx = Math.max(0, chat.length - 1);
+      segments.push({ startIdx, endIdx, fromFloor, toFloor, floorNow });
+    } else {
+      const startIdx = findStartIndexForLastNFloors(chat, mode, every);
+      const fromFloor = Math.max(1, floorNow - every + 1);
+      const toFloor = floorNow;
+      const endIdx = Math.max(0, chat.length - 1);
+      segments.push({ startIdx, endIdx, fromFloor, toFloor, floorNow });
+    }
+
+    if (!segments.length) return 0;
+
+    let summaryStatData = null;
+    if (s.summaryReadStatData) {
+      try {
+        const statSettings = {
+          ...s,
+          wiRollStatVarName: s.summaryStatVarName || 'stat_data'
+        };
+        const { statData } = await resolveStatDataComprehensive(chat, statSettings);
+        if (statData) summaryStatData = statData;
+      } catch (e) {
+        console.warn('[StoryGuide] Structured entries read stat_data failed:', e);
+      }
+    }
+
+    let processed = 0;
+    for (const seg of segments) {
+      const chunkText = buildSummaryChunkTextRange(chat, seg.startIdx, seg.endIdx, s.summaryMaxCharsPerMessage, s.summaryMaxTotalChars);
+      if (!chunkText) continue;
+      const ok = await processStructuredEntriesChunk(chunkText, seg.fromFloor, seg.toFloor, meta, s, summaryStatData);
+      if (ok) processed += 1;
+    }
+
+    if (processed > 0) {
+      const lastSeg = segments[segments.length - 1];
+      meta.lastStructuredFloor = lastSeg.toFloor;
+      meta.lastStructuredChatLen = chat.length;
+      await setSummaryMeta(meta);
+    }
+
+    return processed;
+  } catch (e) {
+    console.warn('[StoryGuide] Structured entries run failed:', e);
+    return 0;
+  } finally {
+    isStructuring = false;
+  }
 }
 
 // -------------------- 蓝灯索引 → 绿灯触发（发送消息时注入触发词） --------------------
@@ -10033,12 +10156,23 @@ function buildModalHtml() {
             </div>
 
             <div class="sg-card sg-subcard">
-              <div class="sg-card-title">结构化条目（人物/装备/势力/成就/副职业/任务）</div>
+              <div class="sg-card-title">结构化条目（人物/装备/物品栏/势力/成就/副职业/任务）</div>
               <div class="sg-row sg-inline">
                 <label class="sg-check"><input type="checkbox" id="sg_structuredEntriesEnabled">启用结构化条目</label>
                 <label class="sg-check"><input type="checkbox" id="sg_characterEntriesEnabled">人物</label>
                 <label class="sg-check"><input type="checkbox" id="sg_equipmentEntriesEnabled">装备</label>
+                <label class="sg-check"><input type="checkbox" id="sg_inventoryEntriesEnabled">物品栏</label>
                 <label class="sg-check"><input type="checkbox" id="sg_factionEntriesEnabled">势力</label>
+              </div>
+              <div class="sg-row sg-inline" style="margin-top:6px">
+                <span>更新频率</span>
+                <span>每</span>
+                <input id="sg_structuredEntriesEvery" type="number" min="1" max="200" style="width:90px">
+                <span>层</span>
+                <select id="sg_structuredEntriesCountMode">
+                  <option value="assistant">按 AI 回复计数</option>
+                  <option value="all">按全部消息计数</option>
+                </select>
               </div>
               <div class="sg-row sg-inline">
                 <label class="sg-check"><input type="checkbox" id="sg_structuredReenableEntriesEnabled">自动重新启用人物/势力</label>
@@ -10084,9 +10218,15 @@ function buildModalHtml() {
               </div>
               <div class="sg-grid2">
                 <div class="sg-field">
+                  <label>物品栏条目前缀</label>
+                  <input id="sg_inventoryEntryPrefix" type="text" placeholder="物品栏">
+                </div>
+                <div class="sg-field">
                   <label>势力条目前缀</label>
                   <input id="sg_factionEntryPrefix" type="text" placeholder="势力">
                 </div>
+              </div>
+              <div class="sg-grid2">
                 <div class="sg-field">
                   <label>成就条目前缀</label>
                   <input id="sg_achievementEntryPrefix" type="text" placeholder="成就">
@@ -10108,7 +10248,7 @@ function buildModalHtml() {
               </div>
               <div class="sg-field">
                 <label>结构化提取模板（User，可选）</label>
-                <textarea id="sg_structuredEntriesUserTemplate" rows="4" placeholder="支持占位符：{{fromFloor}} {{toFloor}} {{chunk}} {{knownCharacters}} {{knownEquipments}} {{knownFactions}} {{knownAchievements}} {{knownSubProfessions}} {{knownQuests}}"></textarea>
+                <textarea id="sg_structuredEntriesUserTemplate" rows="4" placeholder="支持占位符：{{fromFloor}} {{toFloor}} {{chunk}} {{knownCharacters}} {{knownEquipments}} {{knownInventories}} {{knownFactions}} {{knownAchievements}} {{knownSubProfessions}} {{knownQuests}}"></textarea>
               </div>
               <div class="sg-field">
                 <label>人物条目提示词（可选）</label>
@@ -10117,6 +10257,10 @@ function buildModalHtml() {
               <div class="sg-field">
                 <label>装备条目提示词（可选）</label>
                 <textarea id="sg_structuredEquipmentPrompt" rows="3" placeholder="例如：强调来源/稀有度/当前状态…"></textarea>
+              </div>
+              <div class="sg-field">
+                <label>物品栏条目提示词（可选）</label>
+                <textarea id="sg_structuredInventoryPrompt" rows="3" placeholder="例如：强调数量/用途/消耗状态…"></textarea>
               </div>
               <div class="sg-field">
                 <label>势力条目提示词（可选）</label>
@@ -10137,7 +10281,7 @@ function buildModalHtml() {
               <div class="sg-row sg-inline">
                 <button class="menu_button sg-btn" id="sg_structuredResetPrompt">恢复默认结构化提示词</button>
                 <button class="menu_button sg-btn" id="sg_clearStructuredCache">清除结构化条目缓存</button>
-                <div class="sg-hint" style="margin-left:auto">占位符：{{fromFloor}} {{toFloor}} {{chunk}} {{knownCharacters}} {{knownEquipments}} {{knownFactions}} {{knownAchievements}} {{knownSubProfessions}} {{knownQuests}}。</div>
+                <div class="sg-hint" style="margin-left:auto">占位符：{{fromFloor}} {{toFloor}} {{chunk}} {{knownCharacters}} {{knownEquipments}} {{knownInventories}} {{knownFactions}} {{knownAchievements}} {{knownSubProfessions}} {{knownQuests}}。</div>
               </div>
             </div>
 
@@ -10179,15 +10323,6 @@ function buildModalHtml() {
             <div class="sg-row sg-inline">
               <label class="sg-check"><input type="checkbox" id="sg_summaryToBlueWorldInfo" checked>同时写入蓝灯世界书（常开索引）</label>
               <input id="sg_summaryBlueWorldInfoFile" type="text" placeholder="蓝灯世界书文件名（建议单独建一个）" style="flex:1; min-width: 260px;">
-            </div>
-
-            <div class="sg-card sg-subcard" style="background: var(--SmartThemeBlurTintColor); margin-top: 8px; display: none;">
-              <div class="sg-row sg-inline" style="align-items: center;">
-                <label class="sg-check"><input type="checkbox" id="sg_autoBindWorldInfo">📒 自动绑定世界书（每个聊天生成专属世界书）</label>
-                <input id="sg_autoBindWorldInfoPrefix" type="text" placeholder="前缀" style="width: 80px;" title="世界书文件名前缀，默认 SG">
-              </div>
-              <div class="sg-hint" style="margin-top: 4px;">开启后，每个聊天会自动创建专属的绿灯/蓝灯世界书，切换聊天时自动加载。</div>
-              <div id="sg_autoBindInfo" class="sg-hint" style="margin-top: 6px; display: none; font-size: 12px;"></div>
             </div>
 
             <div class="sg-hint" style="margin-top: 8px; color: var(--SmartThemeQuoteColor);">
@@ -10471,6 +10606,7 @@ function buildModalHtml() {
               <button class="menu_button sg-btn" id="sg_summarizeNow">立即总结</button>
               <button class="menu_button sg-btn" id="sg_stopSummary" style="background: var(--SmartThemeBodyColor); color: var(--SmartThemeQuoteColor);">停止总结</button>
               <button class="menu_button sg-btn" id="sg_resetSummaryState">重置本聊天总结进度</button>
+              <button class="menu_button sg-btn" id="sg_syncGreenFromBlue">对齐蓝灯→绿灯</button>
               <div class="sg-hint" id="sg_summaryInfo" style="margin-left:auto">（未生成）</div>
             </div>
 
@@ -11104,6 +11240,7 @@ function ensureModal() {
     $('#sg_structuredEntriesUserTemplate').val(DEFAULT_STRUCTURED_ENTRIES_USER_TEMPLATE);
     $('#sg_structuredCharacterPrompt').val(DEFAULT_STRUCTURED_CHARACTER_PROMPT);
     $('#sg_structuredEquipmentPrompt').val(DEFAULT_STRUCTURED_EQUIPMENT_PROMPT);
+    $('#sg_structuredInventoryPrompt').val(DEFAULT_STRUCTURED_INVENTORY_PROMPT);
     $('#sg_structuredFactionPrompt').val(DEFAULT_STRUCTURED_FACTION_PROMPT);
     $('#sg_structuredAchievementPrompt').val(DEFAULT_STRUCTURED_ACHIEVEMENT_PROMPT);
     $('#sg_structuredSubProfessionPrompt').val(DEFAULT_STRUCTURED_SUBPROFESSION_PROMPT);
@@ -11141,6 +11278,16 @@ function ensureModal() {
       await runSummary({ reason: 'manual' });
     } catch (e) {
       setStatus(`总结失败：${e?.message ?? e}`, 'err');
+    }
+  });
+
+  $('#sg_syncGreenFromBlue').on('click', async () => {
+    try {
+      pullUiToSettings();
+      saveSettings();
+      await syncGreenWorldInfoFromBlue();
+    } catch (e) {
+      setStatus(`对齐失败：${e?.message ?? e}`, 'err');
     }
   });
 
@@ -11186,6 +11333,20 @@ function ensureModal() {
   });
 
   // auto-save summary settings
+  $('#sg_inventoryEntriesEnabled, #sg_inventoryEntryPrefix, #sg_structuredInventoryPrompt').on('input change', () => {
+    pullUiToSettings();
+    saveSettings();
+    updateSummaryInfoLabel();
+    updateBlueIndexInfoLabel();
+    updateSummaryManualRangeHint(false);
+  });
+  $('#sg_structuredEntriesEvery, #sg_structuredEntriesCountMode').on('input change', () => {
+    pullUiToSettings();
+    saveSettings();
+    updateSummaryInfoLabel();
+    updateBlueIndexInfoLabel();
+    updateSummaryManualRangeHint(false);
+  });
   $('#sg_summaryEnabled, #sg_summaryEvery, #sg_summaryCountMode, #sg_summaryTemperature, #sg_summarySystemPrompt, #sg_summaryUserTemplate, #sg_summaryReadStatData, #sg_summaryStatVarName, #sg_structuredEntriesEnabled, #sg_characterEntriesEnabled, #sg_equipmentEntriesEnabled, #sg_abilityEntriesEnabled, #sg_characterEntryPrefix, #sg_equipmentEntryPrefix, #sg_abilityEntryPrefix, #sg_structuredEntriesSystemPrompt, #sg_structuredEntriesUserTemplate, #sg_structuredCharacterPrompt, #sg_structuredEquipmentPrompt, #sg_structuredAbilityPrompt, #sg_summaryCustomEndpoint, #sg_summaryCustomApiKey, #sg_summaryCustomModel, #sg_summaryCustomMaxTokens, #sg_summaryCustomStream, #sg_summaryToWorldInfo, #sg_summaryWorldInfoFile, #sg_summaryWorldInfoCommentPrefix, #sg_summaryWorldInfoKeyMode, #sg_summaryIndexPrefix, #sg_summaryIndexPad, #sg_summaryIndexStart, #sg_summaryIndexInComment, #sg_summaryToBlueWorldInfo, #sg_summaryBlueWorldInfoFile, #sg_wiTriggerEnabled, #sg_wiTriggerLookbackMessages, #sg_wiTriggerIncludeUserMessage, #sg_wiTriggerUserMessageWeight, #sg_wiTriggerStartAfterAssistantMessages, #sg_wiTriggerMaxEntries, #sg_wiTriggerMaxCharacters, #sg_wiTriggerMaxEquipments, #sg_wiTriggerMaxPlot, #sg_wiTriggerMinScore, #sg_wiTriggerMaxKeywords, #sg_wiTriggerInjectStyle, #sg_wiTriggerDebugLog, #sg_wiBlueIndexMode, #sg_wiBlueIndexFile, #sg_summaryMaxChars, #sg_summaryMaxTotalChars, #sg_wiTriggerMatchMode, #sg_wiIndexPrefilterTopK, #sg_wiIndexProvider, #sg_wiIndexTemperature, #sg_wiIndexSystemPrompt, #sg_wiIndexUserTemplate, #sg_wiIndexCustomEndpoint, #sg_wiIndexCustomApiKey, #sg_wiIndexCustomModel, #sg_wiIndexCustomMaxTokens, #sg_wiIndexTopP, #sg_wiIndexCustomStream, #sg_wiRollEnabled, #sg_wiRollStatSource, #sg_wiRollStatVarName, #sg_wiRollRandomWeight, #sg_wiRollDifficulty, #sg_wiRollInjectStyle, #sg_wiRollDebugLog, #sg_wiRollStatParseMode, #sg_wiRollProvider, #sg_wiRollCustomEndpoint, #sg_wiRollCustomApiKey, #sg_wiRollCustomModel, #sg_wiRollCustomMaxTokens, #sg_wiRollCustomTopP, #sg_wiRollCustomTemperature, #sg_wiRollCustomStream, #sg_wiRollSystemPrompt, #sg_imageGenEnabled, #sg_novelaiApiKey, #sg_novelaiModel, #sg_novelaiResolution, #sg_novelaiSteps, #sg_novelaiScale, #sg_novelaiNegativePrompt, #sg_imageGenAutoSave, #sg_imageGenSavePath, #sg_imageGenLookbackMessages, #sg_imageGenReadStatData, #sg_imageGenStatVarName, #sg_imageGenCustomEndpoint, #sg_imageGenCustomApiKey, #sg_imageGenCustomModel, #sg_imageGenSystemPrompt, #sg_imageGalleryEnabled, #sg_imageGalleryUrl, #sg_imageGenWorldBookEnabled, #sg_imageGenWorldBookFile').on('change input', () => {
     pullUiToSettings();
     saveSettings();
@@ -11699,22 +11860,6 @@ function ensureModal() {
     }
   });
 
-  // 自动绑定世界书事件
-  $('#sg_autoBindWorldInfo').on('change', async () => {
-    pullUiToSettings();
-    saveSettings();
-    const s = ensureSettings();
-    if (s.autoBindWorldInfo) {
-      await ensureBoundWorldInfo();
-    }
-    updateAutoBindUI();
-  });
-
-  $('#sg_autoBindWorldInfoPrefix').on('input', () => {
-    pullUiToSettings();
-    saveSettings();
-  });
-
   // 快捷选项按钮事件
   $('#sg_resetQuickOptions').on('click', () => {
     const defaultOptions = JSON.stringify([
@@ -11948,6 +12093,8 @@ function pullSettingsToUi() {
   $('#sg_summaryUserTemplate').val(String(s.summaryUserTemplate || DEFAULT_SUMMARY_USER_TEMPLATE));
   $('#sg_summaryReadStatData').prop('checked', !!s.summaryReadStatData);
   $('#sg_summaryStatVarName').val(String(s.summaryStatVarName || 'stat_data'));
+  $('#sg_structuredEntriesEvery').val(s.structuredEntriesEvery ?? 1);
+  $('#sg_structuredEntriesCountMode').val(String(s.structuredEntriesCountMode || 'assistant'));
   $('#sg_megaSummaryEnabled').prop('checked', !!s.megaSummaryEnabled);
   $('#sg_megaSummaryEvery').val(s.megaSummaryEvery || 40);
   $('#sg_megaSummaryCommentPrefix').val(String(s.megaSummaryCommentPrefix || '大总结'));
@@ -11956,6 +12103,7 @@ function pullSettingsToUi() {
   $('#sg_structuredEntriesEnabled').prop('checked', !!s.structuredEntriesEnabled);
   $('#sg_characterEntriesEnabled').prop('checked', !!s.characterEntriesEnabled);
   $('#sg_equipmentEntriesEnabled').prop('checked', !!s.equipmentEntriesEnabled);
+  $('#sg_inventoryEntriesEnabled').prop('checked', !!s.inventoryEntriesEnabled);
   $('#sg_factionEntriesEnabled').prop('checked', !!s.factionEntriesEnabled);
   $('#sg_structuredReenableEntriesEnabled').prop('checked', !!s.structuredReenableEntriesEnabled);
   $('#sg_achievementEntriesEnabled').prop('checked', !!s.achievementEntriesEnabled);
@@ -11963,6 +12111,7 @@ function pullSettingsToUi() {
   $('#sg_questEntriesEnabled').prop('checked', !!s.questEntriesEnabled);
   $('#sg_characterEntryPrefix').val(String(s.characterEntryPrefix || '人物'));
   $('#sg_equipmentEntryPrefix').val(String(s.equipmentEntryPrefix || '装备'));
+  $('#sg_inventoryEntryPrefix').val(String(s.inventoryEntryPrefix || '物品栏'));
   $('#sg_factionEntryPrefix').val(String(s.factionEntryPrefix || '势力'));
   $('#sg_achievementEntryPrefix').val(String(s.achievementEntryPrefix || '成就'));
   $('#sg_subProfessionEntryPrefix').val(String(s.subProfessionEntryPrefix || '副职业'));
@@ -11971,6 +12120,7 @@ function pullSettingsToUi() {
   $('#sg_structuredEntriesUserTemplate').val(String(s.structuredEntriesUserTemplate || DEFAULT_STRUCTURED_ENTRIES_USER_TEMPLATE));
   $('#sg_structuredCharacterPrompt').val(String(s.structuredCharacterPrompt || DEFAULT_STRUCTURED_CHARACTER_PROMPT));
   $('#sg_structuredEquipmentPrompt').val(String(s.structuredEquipmentPrompt || DEFAULT_STRUCTURED_EQUIPMENT_PROMPT));
+  $('#sg_structuredInventoryPrompt').val(String(s.structuredInventoryPrompt || DEFAULT_STRUCTURED_INVENTORY_PROMPT));
   $('#sg_structuredFactionPrompt').val(String(s.structuredFactionPrompt || DEFAULT_STRUCTURED_FACTION_PROMPT));
   $('#sg_structuredAchievementPrompt').val(String(s.structuredAchievementPrompt || DEFAULT_STRUCTURED_ACHIEVEMENT_PROMPT));
   $('#sg_structuredSubProfessionPrompt').val(String(s.structuredSubProfessionPrompt || DEFAULT_STRUCTURED_SUBPROFESSION_PROMPT));
@@ -11992,11 +12142,6 @@ function pullSettingsToUi() {
   $('#sg_summaryIndexInComment').prop('checked', !!s.summaryIndexInComment);
   $('#sg_summaryToBlueWorldInfo').prop('checked', !!s.summaryToBlueWorldInfo);
   $('#sg_summaryBlueWorldInfoFile').val(String(s.summaryBlueWorldInfoFile || ''));
-
-  // 自动绑定世界书
-  $('#sg_autoBindWorldInfo').prop('checked', !!s.autoBindWorldInfo);
-  $('#sg_autoBindWorldInfoPrefix').val(String(s.autoBindWorldInfoPrefix || 'SG'));
-  updateAutoBindUI();
 
   // 地图功能
   $('#sg_mapEnabled').prop('checked', !!s.mapEnabled);
@@ -12479,6 +12624,8 @@ function pullUiToSettings() {
   s.summaryUserTemplate = String($('#sg_summaryUserTemplate').val() || '').trim() || DEFAULT_SUMMARY_USER_TEMPLATE;
   s.summaryReadStatData = $('#sg_summaryReadStatData').is(':checked');
   s.summaryStatVarName = String($('#sg_summaryStatVarName').val() || 'stat_data').trim() || 'stat_data';
+  s.structuredEntriesEvery = clampInt($('#sg_structuredEntriesEvery').val(), 1, 200, s.structuredEntriesEvery || 1);
+  s.structuredEntriesCountMode = String($('#sg_structuredEntriesCountMode').val() || 'assistant');
   s.megaSummaryEnabled = $('#sg_megaSummaryEnabled').is(':checked');
   s.megaSummaryEvery = clampInt($('#sg_megaSummaryEvery').val(), 5, 5000, s.megaSummaryEvery || 40);
   s.megaSummaryCommentPrefix = String($('#sg_megaSummaryCommentPrefix').val() || '大总结').trim() || '大总结';
@@ -12487,6 +12634,7 @@ function pullUiToSettings() {
   s.structuredEntriesEnabled = $('#sg_structuredEntriesEnabled').is(':checked');
   s.characterEntriesEnabled = $('#sg_characterEntriesEnabled').is(':checked');
   s.equipmentEntriesEnabled = $('#sg_equipmentEntriesEnabled').is(':checked');
+  s.inventoryEntriesEnabled = $('#sg_inventoryEntriesEnabled').is(':checked');
   s.factionEntriesEnabled = $('#sg_factionEntriesEnabled').is(':checked');
   s.structuredReenableEntriesEnabled = $('#sg_structuredReenableEntriesEnabled').is(':checked');
   s.achievementEntriesEnabled = $('#sg_achievementEntriesEnabled').is(':checked');
@@ -12494,6 +12642,7 @@ function pullUiToSettings() {
   s.questEntriesEnabled = $('#sg_questEntriesEnabled').is(':checked');
   s.characterEntryPrefix = String($('#sg_characterEntryPrefix').val() || '人物').trim() || '人物';
   s.equipmentEntryPrefix = String($('#sg_equipmentEntryPrefix').val() || '装备').trim() || '装备';
+  s.inventoryEntryPrefix = String($('#sg_inventoryEntryPrefix').val() || '物品栏').trim() || '物品栏';
   s.factionEntryPrefix = String($('#sg_factionEntryPrefix').val() || '势力').trim() || '势力';
   s.achievementEntryPrefix = String($('#sg_achievementEntryPrefix').val() || '成就').trim() || '成就';
   s.subProfessionEntryPrefix = String($('#sg_subProfessionEntryPrefix').val() || '副职业').trim() || '副职业';
@@ -12502,6 +12651,7 @@ function pullUiToSettings() {
   s.structuredEntriesUserTemplate = String($('#sg_structuredEntriesUserTemplate').val() || '').trim() || DEFAULT_STRUCTURED_ENTRIES_USER_TEMPLATE;
   s.structuredCharacterPrompt = String($('#sg_structuredCharacterPrompt').val() || '').trim() || DEFAULT_STRUCTURED_CHARACTER_PROMPT;
   s.structuredEquipmentPrompt = String($('#sg_structuredEquipmentPrompt').val() || '').trim() || DEFAULT_STRUCTURED_EQUIPMENT_PROMPT;
+  s.structuredInventoryPrompt = String($('#sg_structuredInventoryPrompt').val() || '').trim() || DEFAULT_STRUCTURED_INVENTORY_PROMPT;
   s.structuredFactionPrompt = String($('#sg_structuredFactionPrompt').val() || '').trim() || DEFAULT_STRUCTURED_FACTION_PROMPT;
   s.structuredAchievementPrompt = String($('#sg_structuredAchievementPrompt').val() || '').trim() || DEFAULT_STRUCTURED_ACHIEVEMENT_PROMPT;
   s.structuredSubProfessionPrompt = String($('#sg_structuredSubProfessionPrompt').val() || '').trim() || DEFAULT_STRUCTURED_SUBPROFESSION_PROMPT;
@@ -12513,7 +12663,7 @@ function pullUiToSettings() {
   s.summaryCustomStream = $('#sg_summaryCustomStream').is(':checked');
   s.summaryToWorldInfo = $('#sg_summaryToWorldInfo').is(':checked');
   s.summaryWorldInfoTarget = String($('#sg_summaryWorldInfoTarget').val() || 'chatbook');
-  s.summaryWorldInfoFile = String($('#sg_summaryWorldInfoFile').val() || '').trim();
+  s.summaryWorldInfoFile = normalizeWorldInfoFileName($('#sg_summaryWorldInfoFile').val());
   s.summaryWorldInfoCommentPrefix = String($('#sg_summaryWorldInfoCommentPrefix').val() || '剧情总结').trim() || '剧情总结';
   s.summaryWorldInfoKeyMode = String($('#sg_summaryWorldInfoKeyMode').val() || 'keywords');
   s.summaryIndexPrefix = String($('#sg_summaryIndexPrefix').val() || 'A-').trim() || 'A-';
@@ -12521,11 +12671,10 @@ function pullUiToSettings() {
   s.summaryIndexStart = clampInt($('#sg_summaryIndexStart').val(), 1, 1000000, s.summaryIndexStart ?? 1);
   s.summaryIndexInComment = $('#sg_summaryIndexInComment').is(':checked');
   s.summaryToBlueWorldInfo = $('#sg_summaryToBlueWorldInfo').is(':checked');
-  s.summaryBlueWorldInfoFile = String($('#sg_summaryBlueWorldInfoFile').val() || '').trim();
+  s.summaryBlueWorldInfoFile = normalizeWorldInfoFileName($('#sg_summaryBlueWorldInfoFile').val());
 
-  // 自动绑定世界书
-  s.autoBindWorldInfo = $('#sg_autoBindWorldInfo').is(':checked');
-  s.autoBindWorldInfoPrefix = String($('#sg_autoBindWorldInfoPrefix').val() || 'SG').trim() || 'SG';
+  writeLocalStorageString(SG_SUMMARY_WI_FILE_KEY, s.summaryWorldInfoFile);
+  writeLocalStorageString(SG_SUMMARY_BLUE_WI_FILE_KEY, s.summaryBlueWorldInfoFile);
 
   // 地图功能
   s.mapEnabled = $('#sg_mapEnabled').is(':checked');
@@ -12759,6 +12908,7 @@ function setupEventListeners() {
       scheduleReapplyAll('msg_received');
       // 自动总结（独立功能）
       scheduleAutoSummary('msg_received');
+      scheduleAutoStructuredEntries('msg_received');
     });
 
     eventSource.on(event_types.MESSAGE_SENT, () => {
@@ -12768,6 +12918,7 @@ function setupEventListeners() {
       // 蓝灯索引 → 绿灯触发（尽量在生成前完成）
       maybeInjectWorldInfoTriggers('msg_sent').catch(() => void 0);
       scheduleAutoSummary('msg_sent');
+      scheduleAutoStructuredEntries('msg_sent');
     });
   });
 }
@@ -13671,29 +13822,6 @@ function init() {
       e.stopPropagation();
       openImagePreviewModal(src, $img.attr('alt') || 'Image preview');
     });
-  });
-
-  // 聊天切换时自动绑定世界书
-  eventSource.on(event_types.CHAT_CHANGED, async () => {
-    console.log('[StoryGuide] CHAT_CHANGED 事件触发');
-
-    const ctx = SillyTavern.getContext();
-    const hasChat = ctx.chat && Array.isArray(ctx.chat);
-    const chatLength = hasChat ? ctx.chat.length : 0;
-
-    console.log('[StoryGuide] 聊天状态:', { hasChat, chatLength, chatMetadata: !!ctx.chatMetadata });
-
-    // 放宽检查：只要有 chatMetadata 就尝试运行
-    if (!ctx.chatMetadata) {
-      console.log('[StoryGuide] 没有 chatMetadata，跳过自动绑定');
-      return;
-    }
-
-    try {
-      await onChatSwitched();
-    } catch (e) {
-      console.warn('[StoryGuide] 自动绑定世界书失败:', e);
-    }
   });
 
   globalThis.StoryGuide = {
