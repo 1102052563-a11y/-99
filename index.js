@@ -3817,12 +3817,16 @@ async function createMegaSummaryForSlice(slice, meta, settings) {
   if (s.summaryToWorldInfo) {
     try {
       const greenTarget = resolveGreenWorldInfoTarget(s);
+      if (!greenTarget.file) {
+        console.warn('[StoryGuide] Green world info file missing, skip mega summary write');
+      } else {
       await writeSummaryToWorldInfoEntry(rec, meta, {
         target: greenTarget.target,
         file: greenTarget.file,
         commentPrefix: megaPrefix,
         constant: 0,
       });
+      }
     } catch (e) {
       console.warn('[StoryGuide] write mega summary (green) failed:', e);
     }
@@ -4019,6 +4023,27 @@ async function disableWorldInfoEntryByComment(comment, settings, {
 
 function getWorldInfoEntryLabel(entry) {
   return String(entry?.comment || entry?.title || '').trim();
+}
+
+function parseFindEntryUid(findResult) {
+  if (findResult === null || findResult === undefined) return null;
+  if (typeof findResult === 'number') return String(findResult);
+  if (typeof findResult === 'string') {
+    const trimmed = findResult.trim();
+    if (trimmed.match(/^\d+$/)) return trimmed;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (typeof parsed === 'number') return String(parsed);
+      if (parsed?.pipe !== undefined) return String(parsed.pipe);
+      if (parsed?.result !== undefined) return String(parsed.result);
+    } catch { /* not JSON */ }
+    return null;
+  }
+  if (typeof findResult === 'object') {
+    if (findResult?.pipe !== undefined) return String(findResult.pipe);
+    if (findResult?.result !== undefined) return String(findResult.result);
+  }
+  return null;
 }
 
 function filterWorldInfoEntriesByPrefix(entries, prefix) {
@@ -4462,9 +4487,64 @@ function buildStructuredEntryKey(prefix, name, indexId) {
   return `${prefix}｜${name}｜${indexId}`;
 }
 
+const STRUCTURED_ENTRY_META_KEYS = new Set([
+  'isNew',
+  'isUpdated',
+  'indexId',
+  'index',
+  'uid',
+  'id',
+  'type',
+  'comment',
+  'key',
+  'keys',
+  'disabled',
+  'disable',
+  'constant',
+  'targetType',
+]);
+
+function appendExtraFields(parts, data, knownKeys) {
+  if (!data || typeof data !== 'object') return;
+  const known = new Set([...(knownKeys || []), ...STRUCTURED_ENTRY_META_KEYS]);
+  for (const [key, value] of Object.entries(data)) {
+    if (known.has(key)) continue;
+    if (value === null || value === undefined) continue;
+    if (typeof value === 'string' && !value.trim()) continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+    if (typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0) continue;
+
+    let rendered = '';
+    if (Array.isArray(value)) {
+      const allPrimitive = value.every(v => ['string', 'number', 'boolean'].includes(typeof v));
+      rendered = allPrimitive ? value.map(v => String(v).trim()).filter(Boolean).join('、') : JSON.stringify(value, null, 2);
+    } else if (typeof value === 'object') {
+      rendered = JSON.stringify(value, null, 2);
+    } else {
+      rendered = String(value).trim();
+    }
+    if (!rendered) continue;
+    parts.push(`${key}：${rendered}`);
+  }
+}
+
 // 构建条目内容（档案式描述）
 function buildCharacterContent(char) {
   const parts = [];
+  const knownKeys = [
+    'name',
+    'aliases',
+    'faction',
+    'status',
+    'personality',
+    'corePersonality',
+    'motivation',
+    'relationshipStage',
+    'background',
+    'relationToProtagonist',
+    'keyEvents',
+    'statInfo',
+  ];
   if (char.name) parts.push(`【人物】${char.name}`);
   if (char.aliases?.length) parts.push(`别名：${char.aliases.join('、')}`);
   if (char.faction) parts.push(`阵营/身份：${char.faction}`);
@@ -4483,11 +4563,23 @@ function buildCharacterContent(char) {
     const infoStr = typeof char.statInfo === 'object' ? JSON.stringify(char.statInfo, null, 2) : String(char.statInfo);
     parts.push(`属性数据：${infoStr}`);
   }
+  appendExtraFields(parts, char, knownKeys);
   return parts.join('\n');
 }
 
 function buildEquipmentContent(equip) {
   const parts = [];
+  const knownKeys = [
+    'name',
+    'aliases',
+    'type',
+    'rarity',
+    'effects',
+    'source',
+    'currentState',
+    'statInfo',
+    'boundEvents',
+  ];
   if (equip.name) parts.push(`【装备】${equip.name}`);
   if (equip.aliases?.length) parts.push(`别名：${equip.aliases.join('、')}`);
   if (equip.type) parts.push(`类型：${equip.type}`);
@@ -4500,11 +4592,24 @@ function buildEquipmentContent(equip) {
     parts.push(`属性数据：${infoStr}`);
   }
   if (equip.boundEvents?.length) parts.push(`相关事件：${equip.boundEvents.join('；')}`);
+  appendExtraFields(parts, equip, knownKeys);
   return parts.join('\n');
 }
 
 function buildInventoryContent(item) {
   const parts = [];
+  const knownKeys = [
+    'name',
+    'aliases',
+    'type',
+    'rarity',
+    'quantity',
+    'effects',
+    'source',
+    'currentState',
+    'statInfo',
+    'boundEvents',
+  ];
   if (item.name) parts.push(`【物品栏】${item.name}`);
   if (item.aliases?.length) parts.push(`别名：${item.aliases.join('、')}`);
   if (item.type) parts.push(`类型：${item.type}`);
@@ -4518,11 +4623,24 @@ function buildInventoryContent(item) {
     parts.push(`属性数据：${infoStr}`);
   }
   if (item.boundEvents?.length) parts.push(`相关事件：${item.boundEvents.join('；')}`);
+  appendExtraFields(parts, item, knownKeys);
   return parts.join('\n');
 }
 
 function buildFactionContent(faction) {
   const parts = [];
+  const knownKeys = [
+    'name',
+    'aliases',
+    'type',
+    'scope',
+    'leader',
+    'ideology',
+    'relationToProtagonist',
+    'status',
+    'keyEvents',
+    'statInfo',
+  ];
   if (faction.name) parts.push(`【势力】${faction.name}`);
   if (faction.aliases?.length) parts.push(`别名：${faction.aliases.join('、')}`);
   if (faction.type) parts.push(`性质：${faction.type}`);
@@ -4536,11 +4654,22 @@ function buildFactionContent(faction) {
     const infoStr = typeof faction.statInfo === 'object' ? JSON.stringify(faction.statInfo, null, 2) : String(faction.statInfo);
     parts.push(`属性数据：${infoStr}`);
   }
+  appendExtraFields(parts, faction, knownKeys);
   return parts.join('\n');
 }
 
 function buildAchievementContent(achievement) {
   const parts = [];
+  const knownKeys = [
+    'name',
+    'description',
+    'requirements',
+    'obtainedAt',
+    'status',
+    'effects',
+    'keyEvents',
+    'statInfo',
+  ];
   if (achievement.name) parts.push(`【成就】${achievement.name}`);
   if (achievement.description) parts.push(`描述：${achievement.description}`);
   if (achievement.requirements) parts.push(`达成条件：${achievement.requirements}`);
@@ -4552,11 +4681,23 @@ function buildAchievementContent(achievement) {
     const infoStr = typeof achievement.statInfo === 'object' ? JSON.stringify(achievement.statInfo, null, 2) : String(achievement.statInfo);
     parts.push(`属性数据：${infoStr}`);
   }
+  appendExtraFields(parts, achievement, knownKeys);
   return parts.join('\n');
 }
 
 function buildSubProfessionContent(subProfession) {
   const parts = [];
+  const knownKeys = [
+    'name',
+    'role',
+    'level',
+    'progress',
+    'skills',
+    'source',
+    'status',
+    'keyEvents',
+    'statInfo',
+  ];
   if (subProfession.name) parts.push(`【副职业】${subProfession.name}`);
   if (subProfession.role) parts.push(`定位：${subProfession.role}`);
   if (subProfession.level) parts.push(`等级：${subProfession.level}`);
@@ -4569,11 +4710,24 @@ function buildSubProfessionContent(subProfession) {
     const infoStr = typeof subProfession.statInfo === 'object' ? JSON.stringify(subProfession.statInfo, null, 2) : String(subProfession.statInfo);
     parts.push(`属性数据：${infoStr}`);
   }
+  appendExtraFields(parts, subProfession, knownKeys);
   return parts.join('\n');
 }
 
 function buildQuestContent(quest) {
   const parts = [];
+  const knownKeys = [
+    'name',
+    'goal',
+    'progress',
+    'status',
+    'issuer',
+    'reward',
+    'deadline',
+    'location',
+    'keyEvents',
+    'statInfo',
+  ];
   if (quest.name) parts.push(`【任务】${quest.name}`);
   if (quest.goal) parts.push(`目标：${quest.goal}`);
   if (quest.progress) parts.push(`进度：${quest.progress}`);
@@ -4587,6 +4741,7 @@ function buildQuestContent(quest) {
     const infoStr = typeof quest.statInfo === 'object' ? JSON.stringify(quest.statInfo, null, 2) : String(quest.statInfo);
     parts.push(`属性数据：${infoStr}`);
   }
+  appendExtraFields(parts, quest, knownKeys);
   return parts.join('\n');
 }
 
@@ -4650,6 +4805,7 @@ async function writeOrUpdateStructuredEntry(entryType, entryData, meta, settings
     target = greenTarget.target;
     file = greenTarget.file;
     constant = 0; // 绿灯=触发词触发
+    if (!file) return null; // 绿灯强制 file，无文件名直接跳过
   }
   const fileExprForQuery = (target === 'chatbook') ? '{{getchatbook}}' : file;
 
@@ -4667,67 +4823,42 @@ async function writeOrUpdateStructuredEntry(entryType, entryData, meta, settings
       // 使用 /findentry 通过 comment 字段查找条目 UID
       // comment 格式为: "人物｜角色名｜CHA-001"
       const searchName = String(cached?.name || entryName).trim() || entryName;
-      const searchPattern = `${prefix}｜${searchName}`;
+      const searchIndexSuffix = cached?.indexId ? `｜${cached.indexId}` : '';
+      const searchPatterns = [`${prefix}｜${searchName}${searchIndexSuffix}`];
+      if (searchIndexSuffix) searchPatterns.push(`${prefix}｜${searchName}`);
 
-      // 构建查找脚本
-      let findParts = [];
-      const findUidVar = '__sg_find_uid';
-      const findFileVar = '__sg_find_file';
-
-      if (target === 'chatbook') {
-        findParts.push('/getchatbook');
-        findParts.push(`/setvar key=${findFileVar}`);
-        findParts.push(`/findentry file={{getvar::${findFileVar}}} field=comment ${quoteSlashValue(searchPattern)}`);
-      } else {
-        findParts.push(`/findentry file=${quoteSlashValue(file)} field=comment ${quoteSlashValue(searchPattern)}`);
-      }
-      findParts.push(`/setvar key=${findUidVar}`);
-      findParts.push(`/getvar ${findUidVar}`);
-
-      const findResult = await execSlash(findParts.join(' | '));
-
-      // DEBUG: 查看 findentry 返回值
-      console.log(`[StoryGuide] DEBUG /findentry result:`, findResult, `type:`, typeof findResult);
-
-      // 解析 UID - 处理多种可能的返回格式
       let foundUid = null;
-      if (findResult !== null && findResult !== undefined) {
-        // 如果是数字，直接使用
-        if (typeof findResult === 'number') {
-          foundUid = String(findResult);
-        } else if (typeof findResult === 'string') {
-          const trimmed = findResult.trim();
-          // 直接是数字字符串
-          if (trimmed.match(/^\d+$/)) {
-            foundUid = trimmed;
-          } else {
-            // 尝试解析 JSON
-            try {
-              const parsed = JSON.parse(trimmed);
-              if (typeof parsed === 'number') {
-                foundUid = String(parsed);
-              } else if (parsed?.pipe !== undefined) {
-                foundUid = String(parsed.pipe);
-              } else if (parsed?.result !== undefined) {
-                foundUid = String(parsed.result);
-              }
-            } catch { /* not JSON */ }
-          }
-        } else if (typeof findResult === 'object') {
-          // 对象形式 {pipe: xxx} 或 {result: xxx}
-          if (findResult?.pipe !== undefined) {
-            foundUid = String(findResult.pipe);
-          } else if (findResult?.result !== undefined) {
-            foundUid = String(findResult.result);
-          }
-        }
-      }
-      console.log(`[StoryGuide] DEBUG parsed foundUid:`, foundUid);
+      for (const searchPattern of searchPatterns) {
+        // 构建查找脚本
+        let findParts = [];
+        const findUidVar = '__sg_find_uid';
+        const findFileVar = '__sg_find_file';
 
-      // 清理临时变量
-      try { await execSlash(`/flushvar ${findUidVar}`); } catch { /* ignore */ }
-      if (target === 'chatbook') {
-        try { await execSlash(`/flushvar ${findFileVar}`); } catch { /* ignore */ }
+        if (target === 'chatbook') {
+          findParts.push('/getchatbook');
+          findParts.push(`/setvar key=${findFileVar}`);
+          findParts.push(`/findentry file={{getvar::${findFileVar}}} field=comment ${quoteSlashValue(searchPattern)}`);
+        } else {
+          findParts.push(`/findentry file=${quoteSlashValue(file)} field=comment ${quoteSlashValue(searchPattern)}`);
+        }
+        findParts.push(`/setvar key=${findUidVar}`);
+        findParts.push(`/getvar ${findUidVar}`);
+
+        const findResult = await execSlash(findParts.join(' | '));
+
+        // DEBUG: 查看 findentry 返回值
+        console.log(`[StoryGuide] DEBUG /findentry result:`, findResult, `type:`, typeof findResult, `pattern:`, searchPattern);
+
+        foundUid = parseFindEntryUid(findResult);
+        console.log(`[StoryGuide] DEBUG parsed foundUid:`, foundUid);
+
+        // 清理临时变量
+        try { await execSlash(`/flushvar ${findUidVar}`); } catch { /* ignore */ }
+        if (target === 'chatbook') {
+          try { await execSlash(`/flushvar ${findFileVar}`); } catch { /* ignore */ }
+        }
+
+        if (foundUid) break;
       }
 
       if (foundUid) {
@@ -5826,13 +5957,17 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
         if (s.summaryToWorldInfo) {
           try {
             const greenTarget = resolveGreenWorldInfoTarget(s);
-            await writeSummaryToWorldInfoEntry(rec, meta, {
-              target: greenTarget.target,
-              file: greenTarget.file,
-              commentPrefix: String(s.summaryWorldInfoCommentPrefix || '剧情总结'),
-              constant: 0,
-            });
-            wroteGreenOk += 1;
+            if (!greenTarget.file) {
+              console.warn('[StoryGuide] Green world info file missing, skip summary write');
+            } else {
+              await writeSummaryToWorldInfoEntry(rec, meta, {
+                target: greenTarget.target,
+                file: greenTarget.file,
+                commentPrefix: String(s.summaryWorldInfoCommentPrefix || '剧情总结'),
+                constant: 0,
+              });
+              wroteGreenOk += 1;
+            }
           } catch (e) {
             console.warn('[StoryGuide] write green world info failed:', e);
             writeErrs.push(`${fromFloor}-${toFloor} 绿灯：${e?.message ?? e}`);
