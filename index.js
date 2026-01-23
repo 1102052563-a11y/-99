@@ -668,6 +668,25 @@ const DEFAULT_SETTINGS = Object.freeze({
   imageGenCharacterProfilesEnabled: false,
   imageGenCharacterProfiles: [],
 
+  // ===== 自定义角色生成 =====
+  characterProvider: 'st',
+  characterTemperature: 0.7,
+  characterCustomEndpoint: '',
+  characterCustomApiKey: '',
+  characterCustomModel: 'gpt-4o-mini',
+  characterCustomMaxTokens: 2048,
+  characterCustomStream: false,
+  characterDifficulty: 30,
+  characterPark: '',
+  characterParkCustom: '',
+  characterParkTraits: '',
+  characterRace: '',
+  characterRaceCustom: '',
+  characterTalent: '',
+  characterTalentCustom: '',
+  characterContractId: '',
+  characterAttributes: { con: 0, int: 0, cha: 0, str: 0, agi: 0, luk: 0 },
+
 });
 
 const META_KEYS = Object.freeze({
@@ -2140,6 +2159,391 @@ function setStatus(text, kind = '') {
   $s.text(text || '');
 }
 
+// -------------------- character builder --------------------
+
+function setCharacterStatus(text, kind = '') {
+  const $s = $('#sg_char_status');
+  if (!$s.length) return;
+  $s.removeClass('ok err warn').addClass(kind || '');
+  $s.text(text || '');
+}
+
+function updateCharacterCustomRows() {
+  const parkVal = String($('#sg_char_park').val() || '');
+  const raceVal = String($('#sg_char_race').val() || '');
+  const talentVal = String($('#sg_char_talent').val() || '');
+  $('#sg_char_park_custom_row').toggle(parkVal === 'CUSTOM');
+  $('#sg_char_park_traits_row').toggle(parkVal === 'CUSTOM' || !!$('#sg_char_park_traits').val());
+  $('#sg_char_race_custom_row').toggle(raceVal === 'CUSTOM');
+  $('#sg_char_race_desc_row').toggle(raceVal === 'CUSTOM' || !!$('#sg_char_race_desc').val());
+  $('#sg_char_talent_custom_row').toggle(talentVal === 'CUSTOM');
+  $('#sg_char_talent_desc_row').toggle(talentVal === 'CUSTOM' || !!$('#sg_char_talent_desc').val());
+}
+
+function getCharacterDifficulty() {
+  return clampInt($('#sg_char_difficulty').val(), 10, 50, 30);
+}
+
+function getCharacterAttributes() {
+  return {
+    con: clampInt($('#sg_char_attr_con').val(), 0, 20, 0),
+    int: clampInt($('#sg_char_attr_int').val(), 0, 20, 0),
+    cha: clampInt($('#sg_char_attr_cha').val(), 0, 20, 0),
+    str: clampInt($('#sg_char_attr_str').val(), 0, 20, 0),
+    agi: clampInt($('#sg_char_attr_agi').val(), 0, 20, 0),
+    luk: clampInt($('#sg_char_attr_luk').val(), 0, 20, 0),
+  };
+}
+
+function updateCharacterAttributeSummary() {
+  const max = getCharacterDifficulty();
+  const attrs = getCharacterAttributes();
+  const total = Object.values(attrs).reduce((sum, val) => sum + val, 0);
+  const remain = max - total;
+  $('#sg_char_attr_total').text(`已分配：${total}`);
+  $('#sg_char_attr_remain').text(`剩余：${remain}`).toggleClass('sg-character-over', remain < 0);
+}
+
+function updateCharacterForm() {
+  updateCharacterCustomRows();
+  updateCharacterAttributeSummary();
+}
+
+function applyCharacterSelectValue($select, value, $customInput) {
+  const val = String(value || '').trim();
+  // Safe filtering that handles quotes correctly
+  const hasOption = val && $select.find('option').filter(function () {
+    return this.value === val;
+  }).length > 0;
+
+  if (hasOption) {
+    $select.val(val);
+    if ($customInput) $customInput.val('');
+    return;
+  }
+  if (val) {
+    $select.val('CUSTOM');
+    if ($customInput) $customInput.val(val);
+    return;
+  }
+  $select.val('');
+  if ($customInput) $customInput.val('');
+}
+
+function randomChoice(items) {
+  return items[Math.floor(Math.random() * items.length)];
+}
+
+function randomSelectOption($select, allowCustom, customSetter) {
+  const values = $select.find('option').map((_, opt) => opt.value).get().filter(Boolean);
+  let pick = randomChoice(values);
+  if (allowCustom && Math.random() < 0.25) pick = 'CUSTOM';
+  $select.val(pick);
+  if (pick === 'CUSTOM' && typeof customSetter === 'function') customSetter();
+}
+
+function allocateRandomAttributes(maxPoints) {
+  const keys = ['con', 'int', 'cha', 'str', 'agi', 'luk'];
+  const values = Object.fromEntries(keys.map((key) => [key, 0]));
+  let remaining = Math.max(0, maxPoints);
+  while (remaining > 0) {
+    const available = keys.filter((key) => values[key] < 20);
+    if (!available.length) break;
+    const key = randomChoice(available);
+    values[key] += 1;
+    remaining -= 1;
+  }
+  $('#sg_char_attr_con').val(values.con);
+  $('#sg_char_attr_int').val(values.int);
+  $('#sg_char_attr_cha').val(values.cha);
+  $('#sg_char_attr_str').val(values.str);
+  $('#sg_char_attr_agi').val(values.agi);
+  $('#sg_char_attr_luk').val(values.luk);
+}
+
+function randomizeCharacterLocal() {
+  const parkCustomNames = ['灰雾乐园', '霜烬乐园', '星痕乐园', '寂潮乐园', '暮影乐园'];
+  const parkTraits = [
+    '规则偏向高风险试炼，奖励倾向增幅型契约。',
+    '惩罚与补偿并行，任务节奏偏向短而密集。',
+    '鼓励情报交换与团队协同，独行者收益衰减。',
+    '以存活为先，任务失败会触发连锁惩戒。',
+    '偏向潜行与智谋型任务，正面突破收益降低。'
+  ];
+  const raceCustomNames = ['灰雾族', '霜纹族', '星砂族', '赤潮裔', '幽烬裔'];
+  const talentCustomNames = ['雾行者', '刻印猎手', '逆光共鸣', '星幕行旅', '零度誓约'];
+
+  randomSelectOption($('#sg_char_park'), true, () => {
+    $('#sg_char_park_custom').val(randomChoice(parkCustomNames));
+    $('#sg_char_park_traits').val(randomChoice(parkTraits));
+  });
+
+  randomSelectOption($('#sg_char_race'), true, () => {
+    $('#sg_char_race_custom').val(randomChoice(raceCustomNames));
+  });
+
+  randomSelectOption($('#sg_char_talent'), true, () => {
+    $('#sg_char_talent_custom').val(randomChoice(talentCustomNames));
+  });
+
+  $('#sg_char_contract').val(`R-${Math.floor(Math.random() * 9000) + 1000}`);
+
+  const difficultyValues = ['10', '20', '30', '40', '50'];
+  $('#sg_char_difficulty').val(randomChoice(difficultyValues));
+  allocateRandomAttributes(getCharacterDifficulty());
+
+  updateCharacterForm();
+  setCharacterStatus('· 已随机生成，可继续调整后生成文本 ·', 'ok');
+}
+
+
+async function randomizeCharacterWithLLM() {
+  const s = ensureSettings();
+  setCharacterStatus('· 正在请求 AI 随机设定… ·', 'warn');
+
+  // Construct prompt
+  const customPrompt = String(s.characterRandomPrompt || '').trim();
+  const userPrompt = customPrompt || `请为“轮回乐园”设计一个全新的契约者角色。
+要求：
+1. 随机选择一个乐园（轮回/圣域/守望/圣光/死亡/天启）。
+2. 随机选择一个种族（人类/精灵/兽人/半魔/机巧/异界）。
+3. 随机设计一个初始天赋（名字+简述）。
+4. 设定难度为"30"（灰雾常阶）。
+5. 分配30点属性（体质/智力/魅力/力量/敏捷/幸运），每项0-20，总和必须等于30。
+6. 输出 JSON 格式：
+{
+  "park": "乐园名",
+  "race": "种族名",
+  "talent": "天赋名",
+  "attrs": { "con": 5, "int": 5, "cha": 5, "str": 5, "agi": 5, "luk": 5 }
+}`;
+
+  try {
+    let result = '';
+    // Use the character provider settings (same as character text generation)
+    if (String(s.characterProvider || 'st') === 'custom') {
+      result = await callViaCustom(
+        s.characterCustomEndpoint,
+        s.characterCustomApiKey,
+        s.characterCustomModel,
+        [{ role: 'user', content: userPrompt }],
+        0.7,
+        s.characterCustomMaxTokens || 2048,
+        0.95,
+        false
+      );
+    } else {
+      result = await callViaSillyTavern([{ role: 'user', content: userPrompt }], null, 0.7);
+    }
+
+    // Parse JSON
+    // 1. Try to find JSON block code
+    let text = result;
+    const codeBlockMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/i);
+    if (codeBlockMatch) {
+      text = codeBlockMatch[1];
+    } else {
+      // 2. Fallback: match first { to last }
+      const braceMatch = text.match(/\{[\s\S]*\}/);
+      if (braceMatch) text = braceMatch[0];
+    }
+
+    // 3. Cleanup comments if any (simple)
+    // text = text.replace(/\/\/.*$/gm, ''); // risky if url contains //
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (err) {
+      console.error('JSON Parse Error:', err, text);
+      throw new Error('AI 返回数据格式错误（非标准 JSON）');
+    }
+
+    if (!data.park || !data.race || !data.talent || !data.attrs) throw new Error('JSON 缺少必要字段');
+
+    // Helper to sanitize
+    const sanitize = (val) => {
+      if (typeof val === 'string') return val;
+      if (Array.isArray(val) && val.length > 0) return sanitize(val[0]);
+      if (typeof val === 'object' && val !== null) {
+        if (val.name) return String(val.name);
+        if (val.title) return String(val.title);
+        if (val.value) return String(val.value);
+        // fallback to stringify
+        return JSON.stringify(val);
+      }
+      return String(val || '');
+    };
+
+    const getDesc = (val) => {
+      if (typeof val === 'object' && val !== null) {
+        if (val.desc) return String(val.desc);
+        // Construct desc from talent fields if available
+        let parts = [];
+        if (val.mechanism) parts.push(`机制：${val.mechanism}`);
+        if (val.benefit) parts.push(`收益：${val.benefit}`);
+        if (val.cost) parts.push(`代价：${val.cost}`);
+        if (val.trigger) parts.push(`触发：${val.trigger}`);
+        if (val.growth) parts.push(`成长：${val.growth}`);
+        if (parts.length) return parts.join('\n');
+      }
+      return '';
+    };
+
+    // Fill UI
+    $('#sg_char_park').val('CUSTOM');
+    $('#sg_char_park_custom').val(sanitize(data.park));
+    // If park is object with desc, fill traits
+    if (typeof data.park === 'object' && data.park.desc) {
+      $('#sg_char_park_traits').val(String(data.park.desc));
+    }
+
+    $('#sg_char_race').val('CUSTOM');
+    $('#sg_char_race_custom').val(sanitize(data.race));
+    $('#sg_char_race_desc').val(getDesc(data.race));
+
+    $('#sg_char_talent').val('CUSTOM');
+    $('#sg_char_talent_custom').val(sanitize(data.talent));
+    $('#sg_char_talent_desc').val(getDesc(data.talent));
+
+    // Difficulty
+    let diffVal = '30';
+    if (data.difficulty) {
+      if (typeof data.difficulty === 'object') diffVal = String(data.difficulty.value || '30');
+      else diffVal = String(data.difficulty);
+    }
+    $('#sg_char_difficulty').val(diffVal);
+
+    // Attributes
+    const attrs = data.attrs || {};
+    $('#sg_char_attr_con').val(attrs.con || 0);
+    $('#sg_char_attr_int').val(attrs.int || 0);
+    $('#sg_char_attr_cha').val(attrs.cha || 0);
+    $('#sg_char_attr_str').val(attrs.str || 0);
+    $('#sg_char_attr_agi').val(attrs.agi || 0);
+    $('#sg_char_attr_luk').val(attrs.luk || 0);
+
+    // Contract ID (Stage if present, or generate)
+    if (data.stage && !data.contractId) {
+      // Just keep existing or random? 
+    }
+    if (data.contractId) $('#sg_char_contract').val(data.contractId);
+    else if (!$('#sg_char_contract').val()) {
+      $('#sg_char_contract').val(`R-${Math.floor(Math.random() * 9000) + 1000}`);
+    }
+
+    updateCharacterForm(); // Will handle visibility of custom rows
+
+    // Explicitly show desc rows if they have content
+    if ($('#sg_char_race_desc').val()) $('#sg_char_race_desc_row').show();
+    if ($('#sg_char_talent_desc').val()) $('#sg_char_talent_desc_row').show();
+    setCharacterStatus('· AI 随机设定已完成 ·', 'ok');
+
+  } catch (e) {
+    console.error('AI Random Failed:', e);
+    setCharacterStatus(`· AI 随机失败：${e.message} ·`, 'err');
+  }
+}
+
+function buildCharacterPayload() {
+  const parkValue = String($('#sg_char_park').val() || '');
+  const raceValue = String($('#sg_char_race').val() || '');
+  const talentValue = String($('#sg_char_talent').val() || '');
+  const parkCustom = String($('#sg_char_park_custom').val() || '').trim();
+  const parkTraits = String($('#sg_char_park_traits').val() || '').trim();
+  const raceCustom = String($('#sg_char_race_custom').val() || '').trim();
+  const raceDesc = String($('#sg_char_race_desc').val() || '').trim();
+  const talentCustom = String($('#sg_char_talent_custom').val() || '').trim();
+  const talentDesc = String($('#sg_char_talent_desc').val() || '').trim();
+  const contractId = String($('#sg_char_contract').val() || '').trim();
+
+  const park = parkValue === 'CUSTOM' ? parkCustom : parkValue;
+  const race = raceValue === 'CUSTOM' ? raceCustom : raceValue;
+  const talent = talentValue === 'CUSTOM' ? talentCustom : talentValue;
+  const difficulty = getCharacterDifficulty();
+  const attrs = getCharacterAttributes();
+  const total = Object.values(attrs).reduce((sum, val) => sum + val, 0);
+
+  if (!park) return { error: '请选择乐园或填写自定义乐园。' };
+  if (!race) return { error: '请选择种族或填写自定义种族。' };
+  if (!talent) return { error: '请选择天赋或填写自定义天赋。' };
+  if (total > difficulty) return { error: '属性点超出当前难度上限。' };
+  if (Object.values(attrs).some((v) => v > 20)) return { error: '单项属性不得超过20。' };
+
+  return {
+    park,
+    parkTraits,
+    race,
+    raceDesc,
+    talent,
+    talentDesc,
+    contractId,
+    difficulty,
+    attrs,
+    total
+  };
+}
+
+async function generateCharacterText() {
+  const s = ensureSettings();
+  const payload = buildCharacterPayload();
+  if (payload.error) {
+    setCharacterStatus(`· ${payload.error} ·`, 'warn');
+    return;
+  }
+
+  const attributeText = `体质${payload.attrs.con} 智力${payload.attrs.int} 魅力${payload.attrs.cha} 力量${payload.attrs.str} 敏捷${payload.attrs.agi} 幸运${payload.attrs.luk}`;
+  const parkTraits = payload.parkTraits ? payload.parkTraits : '未登记';
+  const raceDesc = payload.raceDesc ? payload.raceDesc : '未详细描述';
+  const talentDesc = payload.talentDesc ? payload.talentDesc : '未详细描述';
+  const contractId = payload.contractId || '随机分配中';
+
+  const customOpeningPrompt = String(s.characterOpeningPrompt || '').trim();
+  const systemPrompt = customOpeningPrompt || '你是“轮回乐园”世界观的开场文本写作助手。只输出正文文本，不要 JSON，不要代码块。';
+
+  const userPrompt =
+    `根据以下设定生成开场文本，中文，约 500~900 字：\n` +
+    `- 所属乐园：${payload.park}\n` +
+    `- 乐园特点：${parkTraits}\n` +
+    `- 种族：${payload.race}\n` +
+    `- 种族描述：${raceDesc}\n` +
+    `- 初始天赋：${payload.talent}\n` +
+    `- 天赋详情：${talentDesc}\n` +
+    `- 契约者编号：${contractId}\n` +
+    `- 六维属性：${attributeText}（总计${payload.total}/${payload.difficulty}，单项<=20）\n` +
+    `要求：必须包含一段系统提示块（Markdown 引用 >），其中列出乐园/种族/天赋/编号/六维属性/乐园特点。最后以“触碰印记”作为收束。`;
+
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userPrompt }
+  ];
+
+  setCharacterStatus('· 正在生成开场文本… ·', 'warn');
+
+  try {
+    let text = '';
+    if (String(s.characterProvider || 'st') === 'custom') {
+      text = await callViaCustom(
+        s.characterCustomEndpoint,
+        s.characterCustomApiKey,
+        s.characterCustomModel,
+        messages,
+        s.characterTemperature,
+        s.characterCustomMaxTokens,
+        0.95,
+        s.characterCustomStream
+      );
+    } else {
+      text = await callViaSillyTavern(messages, null, s.characterTemperature);
+    }
+    $('#sg_char_output').val(String(text || '').trim());
+    setCharacterStatus('· 已生成：可复制或填入聊天输入框（不会自动发送） ·', 'ok');
+  } catch (e) {
+    console.error('[StoryGuide] 角色生成失败:', e);
+    setCharacterStatus(`· 生成失败：${e?.message ?? e} ·`, 'err');
+  }
+}
+
 
 function ensureToast() {
   if ($('#sg_toast').length) return;
@@ -2213,7 +2617,7 @@ function validateAndNormalizeModules(raw) {
     const type = String(m.type || 'text').trim();
     if (type !== 'text' && type !== 'list') return { ok: false, error: `模块 ${key} 的 type 必须是 "text" 或 "list"`, modules: null };
 
-    const title= String(m.title || key).trim();
+    const title = String(m.title || key).trim();
     const prompt = String(m.prompt || '').trim();
 
     const required = m.required !== false; // default true
@@ -2273,7 +2677,7 @@ function getImageGenPresetSnapshot() {
     imageGenCharacterProfiles: s.imageGenCharacterProfiles,
     imageGenCustomFemalePrompt1: s.imageGenCustomFemalePrompt1,
     imageGenCustomFemalePrompt2: s.imageGenCustomFemalePrompt2,
-  imageGenProfilesExpanded: s.imageGenProfilesExpanded
+    imageGenProfilesExpanded: s.imageGenProfilesExpanded
 
 
   };
@@ -2517,7 +2921,7 @@ function parseWorldbookJson(rawText) {
     if (!e || typeof e !== 'object') continue;
 
     const comment = String(e.comment ?? '').trim();
-    const title= String(e.title ?? e.name ?? e.comment ?? e.uid ?? e.id ?? '').trim();
+    const title = String(e.title ?? e.name ?? e.comment ?? e.uid ?? e.id ?? '').trim();
 
     // keys can be stored in many variants in ST exports
     const kRaw =
@@ -3218,8 +3622,16 @@ async function callViaCustomBackendProxy(apiBaseUrl, apiKey, model, messages, te
   }
 
   const data = await res.json().catch(() => ({}));
+
+  // Standard OpenAI
   if (data?.choices?.[0]?.message?.content) return String(data.choices[0].message.content);
+  // Flattened
   if (typeof data?.content === 'string') return data.content;
+  // Google Gemini (candidates) - sometimes leaks through proxy
+  if (data?.candidates?.[0]?.content?.parts?.[0]?.text) return String(data.candidates[0].content.parts[0].text);
+
+  if (!Object.keys(data).length) throw new Error('API 返回了空数据 ({})。请检查网络，或尝试取消勾选“流式返回”。');
+
   return JSON.stringify(data ?? '');
 }
 
@@ -3367,37 +3779,39 @@ async function runAnalysis() {
 
 // -------------------- summary (auto + world info) --------------------
 
-function isCountableMessage(m) {
+function isCountableMessage(m, includeHidden = false, includeSystem = false) {
   if (!m) return false;
-  if (m.is_system === true) return false;
-  if (m.is_hidden === true) return false;
+  if (!includeSystem && m.is_system === true) return false;
+  if (!includeHidden && m.is_hidden === true) return false;
   const txt = String(m.mes ?? '').trim();
   return Boolean(txt);
 }
 
-function isCountableAssistantMessage(m) {
-  return isCountableMessage(m) && m.is_user !== true;
+function isCountableAssistantMessage(m, includeHidden = false, includeSystem = false) {
+  return isCountableMessage(m, includeHidden, includeSystem) && m.is_user !== true;
 }
 
-function computeFloorCount(chat, mode) {
+function computeFloorCount(chat, mode, includeHidden = false, includeSystem = false) {
   const arr = Array.isArray(chat) ? chat : [];
   let c = 0;
   for (const m of arr) {
     if (mode === 'assistant') {
-      if (isCountableAssistantMessage(m)) c++;
+      if (isCountableAssistantMessage(m, includeHidden, includeSystem)) c++;
     } else {
-      if (isCountableMessage(m)) c++;
+      if (isCountableMessage(m, includeHidden, includeSystem)) c++;
     }
   }
   return c;
 }
 
-function findStartIndexForLastNFloors(chat, mode, n) {
+function findStartIndexForLastNFloors(chat, mode, n, includeHidden = false, includeSystem = false) {
   const arr = Array.isArray(chat) ? chat : [];
   let remaining = Math.max(1, Number(n) || 1);
   for (let i = arr.length - 1; i >= 0; i--) {
     const m = arr[i];
-    const hit = (mode === 'assistant') ? isCountableAssistantMessage(m) : isCountableMessage(m);
+    const hit = (mode === 'assistant')
+      ? isCountableAssistantMessage(m, includeHidden, includeSystem)
+      : isCountableMessage(m, includeHidden, includeSystem);
     if (!hit) continue;
     remaining -= 1;
     if (remaining <= 0) return i;
@@ -3405,7 +3819,7 @@ function findStartIndexForLastNFloors(chat, mode, n) {
   return 0;
 }
 
-function buildSummaryChunkText(chat, startIdx, maxCharsPerMessage, maxTotalChars) {
+function buildSummaryChunkText(chat, startIdx, maxCharsPerMessage, maxTotalChars, includeHidden = false, includeSystem = false) {
   const arr = Array.isArray(chat) ? chat : [];
   const start = Math.max(0, Math.min(arr.length, Number(startIdx) || 0));
   const perMsg = clampInt(maxCharsPerMessage, 200, 8000, 4000);
@@ -3415,7 +3829,7 @@ function buildSummaryChunkText(chat, startIdx, maxCharsPerMessage, maxTotalChars
   let total = 0;
   for (let i = start; i < arr.length; i++) {
     const m = arr[i];
-    if (!isCountableMessage(m)) continue;
+    if (!isCountableMessage(m, includeHidden, includeSystem)) continue;
     const who = m.is_user === true ? '用户' : (m.name || 'AI');
     let txt = stripHtml(m.mes || '');
     if (!txt) continue;
@@ -3429,13 +3843,15 @@ function buildSummaryChunkText(chat, startIdx, maxCharsPerMessage, maxTotalChars
 }
 
 // 手动楼层范围总结：按 floor 号定位到聊天索引
-function findChatIndexByFloor(chat, mode, floorNo) {
+function findChatIndexByFloor(chat, mode, floorNo, includeHidden = false, includeSystem = false) {
   const arr = Array.isArray(chat) ? chat : [];
   const target = Math.max(1, Number(floorNo) || 1);
   let c = 0;
   for (let i = 0; i < arr.length; i++) {
     const m = arr[i];
-    const hit = (mode === 'assistant') ? isCountableAssistantMessage(m) : isCountableMessage(m);
+    const hit = (mode === 'assistant')
+      ? isCountableAssistantMessage(m, includeHidden, includeSystem)
+      : isCountableMessage(m, includeHidden, includeSystem);
     if (!hit) continue;
     c += 1;
     if (c === target) return i;
@@ -3443,28 +3859,28 @@ function findChatIndexByFloor(chat, mode, floorNo) {
   return -1;
 }
 
-function resolveChatRangeByFloors(chat, mode, fromFloor, toFloor) {
-  const floorNow = computeFloorCount(chat, mode);
+function resolveChatRangeByFloors(chat, mode, fromFloor, toFloor, includeHidden = false, includeSystem = false) {
+  const floorNow = computeFloorCount(chat, mode, includeHidden, includeSystem);
   if (floorNow <= 0) return null;
   let a = clampInt(fromFloor, 1, floorNow, 1);
   let b = clampInt(toFloor, 1, floorNow, floorNow);
   if (b < a) { const t = a; a = b; b = t; }
 
-  let startIdx = findChatIndexByFloor(chat, mode, a);
-  let endIdx = findChatIndexByFloor(chat, mode, b);
+  let startIdx = findChatIndexByFloor(chat, mode, a, includeHidden, includeSystem);
+  let endIdx = findChatIndexByFloor(chat, mode, b, includeHidden, includeSystem);
   if (startIdx < 0 || endIdx < 0) return null;
 
   // 在 assistant 模式下，为了更贴近“回合”，把起始 assistant 楼层前一条用户消息也纳入（若存在）。
   if (mode === 'assistant' && startIdx > 0) {
     const prev = chat[startIdx - 1];
-    if (prev && prev.is_user === true && isCountableMessage(prev)) startIdx -= 1;
+    if (prev && prev.is_user === true && isCountableMessage(prev, includeHidden, includeSystem)) startIdx -= 1;
   }
 
   if (startIdx > endIdx) { const t = startIdx; startIdx = endIdx; endIdx = t; }
   return { fromFloor: a, toFloor: b, startIdx, endIdx, floorNow };
 }
 
-function buildSummaryChunkTextRange(chat, startIdx, endIdx, maxCharsPerMessage, maxTotalChars) {
+function buildSummaryChunkTextRange(chat, startIdx, endIdx, maxCharsPerMessage, maxTotalChars, includeHidden = false, includeSystem = false) {
   const arr = Array.isArray(chat) ? chat : [];
   const start = Math.max(0, Math.min(arr.length - 1, Number(startIdx) || 0));
   const end = Math.max(start, Math.min(arr.length - 1, Number(endIdx) || 0));
@@ -3475,7 +3891,7 @@ function buildSummaryChunkTextRange(chat, startIdx, endIdx, maxCharsPerMessage, 
   let total = 0;
   for (let i = start; i <= end; i++) {
     const m = arr[i];
-    if (!isCountableMessage(m)) continue;
+    if (!isCountableMessage(m, includeHidden, includeSystem)) continue;
     const who = m.is_user === true ? '用户' : (m.name || 'AI');
     let txt = stripHtml(m.mes || '');
     if (!txt) continue;
@@ -3820,12 +4236,12 @@ async function createMegaSummaryForSlice(slice, meta, settings) {
       if (!greenTarget.file) {
         console.warn('[StoryGuide] Green world info file missing, skip mega summary write');
       } else {
-      await writeSummaryToWorldInfoEntry(rec, meta, {
-        target: greenTarget.target,
-        file: greenTarget.file,
-        commentPrefix: megaPrefix,
-        constant: 0,
-      });
+        await writeSummaryToWorldInfoEntry(rec, meta, {
+          target: greenTarget.target,
+          file: greenTarget.file,
+          commentPrefix: megaPrefix,
+          constant: 0,
+        });
       }
     } catch (e) {
       console.warn('[StoryGuide] write mega summary (green) failed:', e);
@@ -4242,7 +4658,7 @@ function appendToBlueIndexCache(rec) {
     range: rec?.range ?? undefined,
   };
   if (!item.summary) return;
-  if (!item.title) item.title= item.keywords?.[0] ? `条目：${item.keywords[0]}` : '条目';
+  if (!item.title) item.title = item.keywords?.[0] ? `条目：${item.keywords[0]}` : '条目';
   const arr = Array.isArray(s.summaryBlueIndex) ? s.summaryBlueIndex : [];
   // de-dup (only check recent items)
   for (let i = arr.length - 1; i >= 0 && i >= arr.length - 10; i--) {
@@ -5746,7 +6162,7 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
   try {
     const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
     const mode = String(s.summaryCountMode || 'assistant');
-    const floorNow = computeFloorCount(chat, mode);
+    const floorNow = computeFloorCount(chat, mode, true, true);
 
     let meta = getSummaryMeta();
     if (!meta || typeof meta !== 'object') meta = getDefaultSummaryMeta();
@@ -5755,7 +6171,7 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
     const segments = [];
 
     if (reason === 'manual_range') {
-      const resolved0 = resolveChatRangeByFloors(chat, mode, manualFromFloor, manualToFloor);
+      const resolved0 = resolveChatRangeByFloors(chat, mode, manualFromFloor, manualToFloor, true, true);
       if (!resolved0) {
         setStatus('手动楼层范围无效（请检查起止层号）', 'warn');
         showToast('手动楼层范围无效（请检查起止层号）', { kind: 'warn', spinner: false, sticky: false, duration: 2200 });
@@ -5771,7 +6187,7 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
         const b0 = resolved0.toFloor;
         for (let f = a0; f <= b0; f += every) {
           const g = Math.min(b0, f + every - 1);
-          const r = resolveChatRangeByFloors(chat, mode, f, g);
+          const r = resolveChatRangeByFloors(chat, mode, f, g, true, true);
           if (r) segments.push(r);
         }
         if (!segments.length) segments.push(resolved0);
@@ -5785,7 +6201,7 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
       const endIdx = Math.max(0, chat.length - 1);
       segments.push({ startIdx, endIdx, fromFloor, toFloor, floorNow });
     } else {
-      const startIdx = findStartIndexForLastNFloors(chat, mode, every);
+      const startIdx = findStartIndexForLastNFloors(chat, mode, every, true, true);
       const fromFloor = Math.max(1, floorNow - every + 1);
       const toFloor = floorNow;
       const endIdx = Math.max(0, chat.length - 1);
@@ -5849,7 +6265,7 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
       if (totalSeg > 1) setStatus(`手动分段总结中…（${i + 1}/${totalSeg}｜${fromFloor}-${toFloor}）`, 'warn');
       else setStatus('总结中…', 'warn');
 
-      const chunkText = buildSummaryChunkTextRange(chat, startIdx, endIdx, s.summaryMaxCharsPerMessage, s.summaryMaxTotalChars);
+      const chunkText = buildSummaryChunkTextRange(chat, startIdx, endIdx, s.summaryMaxCharsPerMessage, s.summaryMaxTotalChars, true, true);
       if (!chunkText) {
         runErrs.push(`${fromFloor}-${toFloor}：片段为空`);
         continue;
@@ -5907,7 +6323,7 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
         keywords = [indexId];
       }
 
-      const title= rawTitle || `${prefix}`;
+      const title = rawTitle || `${prefix}`;
 
       const rec = {
         title,
@@ -5974,30 +6390,30 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
           }
         }
 
-      if (s.summaryToBlueWorldInfo) {
-        try {
-          await writeSummaryToWorldInfoEntry(rec, meta, {
-            target: 'file',
-            file: String(s.summaryBlueWorldInfoFile || ''),
-            commentPrefix: ensureMvuPlotPrefix(String(s.summaryBlueWorldInfoCommentPrefix || s.summaryWorldInfoCommentPrefix || '剧情总结')),
-            constant: 1,
-          });
-          wroteBlueOk += 1;
-        } catch (e) {
-          console.warn('[StoryGuide] write blue world info failed:', e);
-          writeErrs.push(`${fromFloor}-${toFloor} 蓝灯：${e?.message ?? e}`);
+        if (s.summaryToBlueWorldInfo) {
+          try {
+            await writeSummaryToWorldInfoEntry(rec, meta, {
+              target: 'file',
+              file: String(s.summaryBlueWorldInfoFile || ''),
+              commentPrefix: ensureMvuPlotPrefix(String(s.summaryBlueWorldInfoCommentPrefix || s.summaryWorldInfoCommentPrefix || '剧情总结')),
+              constant: 1,
+            });
+            wroteBlueOk += 1;
+          } catch (e) {
+            console.warn('[StoryGuide] write blue world info failed:', e);
+            writeErrs.push(`${fromFloor}-${toFloor} 蓝灯：${e?.message ?? e}`);
+          }
         }
-      }
 
-      // 生成大总结（到达阈值时自动触发）
-      try {
-        const megaCreated = await maybeGenerateMegaSummary(meta, s);
-        if (megaCreated > 0) {
-          console.log(`[StoryGuide] Mega summary created: ${megaCreated}`);
+        // 生成大总结（到达阈值时自动触发）
+        try {
+          const megaCreated = await maybeGenerateMegaSummary(meta, s);
+          if (megaCreated > 0) {
+            console.log(`[StoryGuide] Mega summary created: ${megaCreated}`);
+          }
+        } catch (e) {
+          console.warn('[StoryGuide] Mega summary generation failed:', e);
         }
-      } catch (e) {
-        console.warn('[StoryGuide] Mega summary generation failed:', e);
-      }
       }
     }
 
@@ -6099,7 +6515,7 @@ async function maybeAutoSummary(reason = '') {
   const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
   const mode = String(s.summaryCountMode || 'assistant');
   const every = clampInt(s.summaryEvery, 1, 200, 20);
-  const floorNow = computeFloorCount(chat, mode);
+  const floorNow = computeFloorCount(chat, mode, true, true);
   if (floorNow <= 0) return;
   if (floorNow % every !== 0) return;
 
@@ -6134,7 +6550,7 @@ async function maybeAutoStructuredEntries(reason = '') {
   const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
   const mode = String(s.structuredEntriesCountMode || s.summaryCountMode || 'assistant');
   const every = clampInt(s.structuredEntriesEvery, 1, 200, 1);
-  const floorNow = computeFloorCount(chat, mode);
+  const floorNow = computeFloorCount(chat, mode, true, true);
   if (floorNow <= 0) return;
   if (floorNow % every !== 0) return;
 
@@ -6160,7 +6576,7 @@ async function runStructuredEntries({ reason = 'auto' } = {}) {
 
     const mode = String(s.structuredEntriesCountMode || s.summaryCountMode || 'assistant');
     const every = clampInt(s.structuredEntriesEvery, 1, 200, 1);
-    const floorNow = computeFloorCount(chat, mode);
+  const floorNow = computeFloorCount(chat, mode, true, true);
 
     let meta = getSummaryMeta();
     if (!meta || typeof meta !== 'object') meta = getDefaultSummaryMeta();
@@ -6173,7 +6589,7 @@ async function runStructuredEntries({ reason = 'auto' } = {}) {
       const endIdx = Math.max(0, chat.length - 1);
       segments.push({ startIdx, endIdx, fromFloor, toFloor, floorNow });
     } else {
-      const startIdx = findStartIndexForLastNFloors(chat, mode, every);
+      const startIdx = findStartIndexForLastNFloors(chat, mode, every, true, true);
       const fromFloor = Math.max(1, floorNow - every + 1);
       const toFloor = floorNow;
       const endIdx = Math.max(0, chat.length - 1);
@@ -6198,7 +6614,7 @@ async function runStructuredEntries({ reason = 'auto' } = {}) {
 
     let processed = 0;
     for (const seg of segments) {
-      const chunkText = buildSummaryChunkTextRange(chat, seg.startIdx, seg.endIdx, s.summaryMaxCharsPerMessage, s.summaryMaxTotalChars);
+      const chunkText = buildSummaryChunkTextRange(chat, seg.startIdx, seg.endIdx, s.summaryMaxCharsPerMessage, s.summaryMaxTotalChars, true, true);
       if (!chunkText) continue;
       const ok = await processStructuredEntriesChunk(chunkText, seg.fromFloor, seg.toFloor, meta, s, summaryStatData);
       if (ok) processed += 1;
@@ -6235,7 +6651,7 @@ function stripTriggerInjection(text, tag = 'SG_WI_TRIGGERS') {
   return t.replace(reComment, '').replace(rePlain, '').trimEnd();
 }
 
-function buildTriggerInjection(keywords, tag = 'SG_WI_TRIGGERS', style= 'hidden') {
+function buildTriggerInjection(keywords, tag = 'SG_WI_TRIGGERS', style = 'hidden') {
   const kws = sanitizeKeywords(Array.isArray(keywords) ? keywords : []);
   if (!kws.length) return '';
   if (String(style || 'hidden') === 'plain') {
@@ -6532,7 +6948,7 @@ async function computeRollDecisionViaCustom(userText, statData, settings, random
   return res;
 }
 
-function buildRollInjectionFromResult(res, tag = 'SG_ROLL', style= 'hidden') {
+function buildRollInjectionFromResult(res, tag = 'SG_ROLL', style = 'hidden') {
   if (!res) return '';
   const action = String(res.actionLabel || res.action || '').trim();
   const formula = String(res.formula || '').trim();
@@ -6931,7 +7347,7 @@ async function maybeInjectRollResult(reason = 'msg_sent') {
         userText: lastText,
       });
     }
-    const style= String(s.wiRollInjectStyle || 'hidden').trim() || 'hidden';
+    const style = String(s.wiRollInjectStyle || 'hidden').trim() || 'hidden';
     const rollText = buildRollInjectionFromResult(res, rollTag, style);
     if (rollText) {
       const cleaned = stripTriggerInjection(last.mes ?? last.message ?? '', rollTag);
@@ -7032,7 +7448,7 @@ async function buildRollInjectionForText(userText, chat, settings, logStatus) {
     });
   }
   if (!res.random) res.random = { roll: randomRoll, weight: clampFloat(s.wiRollRandomWeight, 0, 1, 0.3) };
-  const style= String(s.wiRollInjectStyle || 'hidden').trim() || 'hidden';
+  const style = String(s.wiRollInjectStyle || 'hidden').trim() || 'hidden';
   const rollText = buildRollInjectionFromResult(res, rollTag, style);
   if (rollText) logStatus?.('ROLL 已注入：判定完成', 'ok');
   return rollText || null;
@@ -7096,7 +7512,7 @@ async function buildTriggerInjectionForText(userText, chat, settings, logStatus)
   const keywords = Array.from(kwSet);
   if (!keywords.length) return null;
 
-  const style= String(s.wiTriggerInjectStyle || 'hidden').trim() || 'hidden';
+  const style = String(s.wiTriggerInjectStyle || 'hidden').trim() || 'hidden';
   const injected = buildTriggerInjection(keywords, tagForStrip, style);
   if (injected) logStatus?.(`索引已注入：${pickedNames.slice(0, 4).join('、')}${pickedNames.length > 4 ? '…' : ''}`, 'ok');
   return injected || null;
@@ -7481,7 +7897,7 @@ function collectBlueIndexCandidates() {
 
   const fromMeta = Array.isArray(meta?.history) ? meta.history : [];
   for (const r of fromMeta) {
-    const title= String(r?.title || '').trim();
+    const title = String(r?.title || '').trim();
     const summary = String(r?.summary || '').trim();
     const keywords = sanitizeKeywords(r?.keywords);
     if (!summary) continue;
@@ -7493,7 +7909,7 @@ function collectBlueIndexCandidates() {
 
   const fromImported = getBlueIndexEntriesFast();
   for (const r of fromImported) {
-    const title= String(r?.title || '').trim();
+    const title = String(r?.title || '').trim();
     const summary = String(r?.summary || '').trim();
     const keywords = sanitizeKeywords(r?.keywords);
     if (!summary) continue;
@@ -7649,7 +8065,7 @@ async function pickRelevantIndexEntriesLLM(recentText, userText, candidates, max
 
   const candidatesForModel = shortlist.map((x, i) => {
     const e = x.e || x;
-    const title= String(e.title || '').trim();
+    const title = String(e.title || '').trim();
     const summary0 = String(e.summary || '').trim();
     const summary = summary0.length > candMaxChars ? (summary0.slice(0, candMaxChars) + '…') : summary0;
     const kws = Array.isArray(e.keywords) ? e.keywords.slice(0, 24) : [];
@@ -7804,7 +8220,7 @@ async function maybeInjectWorldInfoTriggers(reason = 'msg_sent') {
   if (!keywords.length) return;
 
   const tag = tagForStrip;
-  const style= String(s.wiTriggerInjectStyle || 'hidden').trim() || 'hidden';
+  const style = String(s.wiTriggerInjectStyle || 'hidden').trim() || 'hidden';
   const cleaned = stripTriggerInjection(last.mes ?? last.message ?? '', tag);
   const injected = cleaned + buildTriggerInjection(keywords, tag, style);
   last.mes = injected;
@@ -7866,7 +8282,7 @@ function buildInlineMarkdownFromModules(parsedJson, modules, mode, showEmpty) {
 
     const hasKey = parsedJson && Object.hasOwn(parsedJson, m.key);
     const val = hasKey ? parsedJson[m.key] : undefined;
-    const title= m.title || m.key;
+    const title = m.title || m.key;
 
     if (m.type === 'list') {
       const arr = Array.isArray(val) ? val : [];
@@ -9627,6 +10043,14 @@ async function refreshModels() {
     s.customModelsCache = ids;
     saveSettings();
     fillModelSelect(ids, s.customModel);
+
+    // Update character model datalist
+    const $dl = $('#sg_char_model_list');
+    $dl.empty();
+    ids.forEach(id => {
+      $dl.append($('<option>').val(id));
+    });
+
     setStatus(`已刷新模型：${ids.length} 个（后端代理）`, 'ok');
     return;
   } catch (e) {
@@ -9669,9 +10093,61 @@ async function refreshModels() {
     s.customModelsCache = ids;
     saveSettings();
     fillModelSelect(ids, s.customModel);
-    setStatus(`已刷新模型：${ids.length} 个（直连 fallback）`, 'ok');
+    setStatus(`已刷新模型：${ids.length} 个`, 'ok');
   } catch (e) {
-    setStatus(`刷新模型失败：${e?.message ?? e}`, 'err');
+    const status = e?.status;
+    if (!(status === 404 || status === 405)) {
+      setStatus(`刷新失败：${e?.message ?? e}`, 'err');
+      return;
+    }
+
+    // Fallback: direct /models
+    console.warn('[StoryGuide] custom character status check failed; fallback to direct /models', e);
+    try {
+      const modelsUrl = (function (base) {
+        const u = normalizeBaseUrl(base);
+        if (!u) return '';
+        if (/\/v1$/.test(u)) return u + '/models';
+        if (/\/v1\b/i.test(u)) return u.replace(/\/+$/, '') + '/models';
+        return u + '/v1/models';
+      })(apiBase);
+
+      const headers = { 'Content-Type': 'application/json' };
+      if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+      const res = await fetch(modelsUrl, { method: 'GET', headers });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error(`直连 /models 失败: HTTP ${res.status} ${res.statusText}\n${txt}`);
+      }
+
+      const data = await res.json().catch(() => ({}));
+      let modelsList = [];
+      if (Array.isArray(data?.models)) modelsList = data.models;
+      else if (Array.isArray(data?.data)) modelsList = data.data;
+      else if (Array.isArray(data)) modelsList = data;
+
+      let ids = [];
+      if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
+      ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
+
+      if (!ids.length) {
+        setStatus('刷新成功，但未解析到模型列表', 'warn');
+        return;
+      }
+
+      s.customModelsCache = ids;
+      saveSettings();
+      const $dl = $('#sg_char_model_list');
+      $dl.empty();
+      ids.forEach(id => {
+        $dl.append($('<option>').val(id));
+      });
+      setStatus(`已刷新模型（直连）：${ids.length} 个`, 'ok');
+
+    } catch (e2) {
+      setStatus(`刷新失败：${e2?.message ?? e2}`, 'err');
+    }
   }
 }
 
@@ -9700,7 +10176,7 @@ function createTopbarButton() {
   btn.id = 'sg_topbar_btn';
   btn.type = 'button';
   btn.className = 'sg-topbar-btn';
-  btn.title= '剧情指导 StoryGuide';
+  btn.title = '剧情指导 StoryGuide';
   btn.innerHTML = '<span class="sg-topbar-icon">📘</span>';
   btn.addEventListener('click', () => openModal());
 
@@ -9993,6 +10469,7 @@ function buildModalHtml() {
             <button class="sg-pgtab" id="sg_pgtab_index">索引设置</button>
             <button class="sg-pgtab" id="sg_pgtab_roll">ROLL 设置</button>
             <button class="sg-pgtab" id="sg_pgtab_image">图像生成</button>
+            <button class="sg-pgtab" id="sg_pgtab_character">自定义角色</button>
           </div>
 
           <div class="sg-page active" id="sg_page_guide">
@@ -11193,7 +11670,220 @@ function buildModalHtml() {
               </div>
 
             </div>
+          </div>
           </div> <!-- sg_page_image -->
+
+          <div class="sg-page" id="sg_page_character">
+            <div class="sg-card sg-character-card">
+              <div class="sg-card-title sg-character-title">轮回乐园 · 自定义角色</div>
+
+              <div class="sg-character-grid">
+                <div class="sg-field">
+                  <label>乐园</label>
+                  <select id="sg_char_park">
+                    <option value="">请选择所属乐园</option>
+                    <option value="轮回乐园">轮回乐园</option>
+                    <option value="圣域乐园">圣域乐园</option>
+                    <option value="守望乐园">守望乐园</option>
+                    <option value="圣光乐园">圣光乐园</option>
+                    <option value="死亡乐园">死亡乐园</option>
+                    <option value="天启乐园">天启乐园</option>
+                    <option value="CUSTOM">自定义乐园</option>
+                  </select>
+                </div>
+                <div class="sg-field" id="sg_char_park_custom_row" style="display:none;">
+                  <label>自定义乐园</label>
+                  <input id="sg_char_park_custom" type="text" placeholder="输入乐园名称，例如：灰雾乐园">
+                </div>
+                <div class="sg-field sg-character-full" id="sg_char_park_traits_row" style="display:none;">
+                  <label>乐园特点</label>
+                  <textarea id="sg_char_park_traits" rows="3" placeholder="可选：描述该乐园的规则倾向、奖惩逻辑、常见任务风格等"></textarea>
+                </div>
+
+                <div class="sg-field">
+                  <label>种族</label>
+                  <select id="sg_char_race">
+                    <option value="">请选择初始种族</option>
+                    <option value="人类">人类</option>
+                    <option value="精灵">精灵</option>
+                    <option value="兽人">兽人</option>
+                    <option value="半魔">半魔</option>
+                    <option value="机巧">机巧</option>
+                    <option value="异界">异界</option>
+                    <option value="CUSTOM">自定义种族</option>
+                  </select>
+                </div>
+                <div class="sg-field" id="sg_char_race_custom_row" style="display:none;">
+                  <label>自定义种族</label>
+                  <input id="sg_char_race_custom" type="text" placeholder="输入种族名称，例如：灰雾族">
+                </div>
+                <div class="sg-field sg-character-full" id="sg_char_race_desc_row" style="display:none;">
+                  <label>种族描述</label>
+                  <textarea id="sg_char_race_desc" rows="2" placeholder="种族详细设定..."></textarea>
+                </div>
+
+                <div class="sg-field">
+                  <label>天赋</label>
+                  <select id="sg_char_talent">
+                    <option value="">请选择初始天赋</option>
+                    <option value="刀术专精">刀术专精</option>
+                    <option value="重装精通">重装精通</option>
+                    <option value="雷霆亲和">雷霆亲和</option>
+                    <option value="死灵契印">死灵契印</option>
+                    <option value="狙击专精">狙击专精</option>
+                    <option value="元素疗愈">元素疗愈</option>
+                    <option value="符文锻刻">符文锻刻</option>
+                    <option value="幻象支配">幻象支配</option>
+                    <option value="时空敏锐">时空敏锐</option>
+                    <option value="违约追猎">违约追猎</option>
+                    <option value="血脉觉醒">血脉觉醒</option>
+                    <option value="机械改造">机械改造</option>
+                    <option value="CUSTOM">自定义天赋</option>
+                  </select>
+                </div>
+                <div class="sg-field" id="sg_char_talent_custom_row" style="display:none;">
+                  <label>自定义天赋</label>
+                  <input id="sg_char_talent_custom" type="text" placeholder="输入天赋名称，例如：灰雾行旅者">
+                </div>
+                <div class="sg-field sg-character-full" id="sg_char_talent_desc_row" style="display:none;">
+                  <label>天赋详情</label>
+                  <textarea id="sg_char_talent_desc" rows="3" placeholder="天赋机制、收益、代价..."></textarea>
+                </div>
+
+                <div class="sg-field sg-character-full">
+                  <label>契约者编号</label>
+                  <input id="sg_char_contract" type="text" placeholder="可选：自定义契约者编号，例如：R-1037">
+                </div>
+              </div>
+
+              <div class="sg-character-section-title">属性点分配</div>
+              <div class="sg-character-attr-panel">
+                <div class="sg-character-attr-header">
+                  <div class="sg-character-attr-title">六维基础属性</div>
+                  <div class="sg-character-attr-actions">
+                    <div class="sg-field sg-character-field-inline">
+                      <label>难度</label>
+                      <select id="sg_char_difficulty">
+                        <option value="10">烬火绝境（10）</option>
+                        <option value="20">断崖试炼（20）</option>
+                        <option value="30">灰雾常阶（30）</option>
+                        <option value="40">星辉晋阶（40）</option>
+                        <option value="50">曙光恩典（50）</option>
+                      </select>
+                    </div>
+                    <button class="menu_button sg-btn sg-character-mini" id="sg_char_random">随机设定</button>
+                    <label class="sg-check sg-character-mini" style="margin-left:8px; font-size:12px; height:28px;" title="勾选后使用 AI 生成设定（API）">
+                      <input type="checkbox" id="sg_char_random_llm">AI
+                    </label>
+                  </div>
+                </div>
+
+                <div class="sg-character-attr-grid">
+                  <div class="sg-character-attr-row">
+                    <label>体质</label>
+                    <input id="sg_char_attr_con" type="number" min="0" max="20" value="0">
+                  </div>
+                  <div class="sg-character-attr-row">
+                    <label>智力</label>
+                    <input id="sg_char_attr_int" type="number" min="0" max="20" value="0">
+                  </div>
+                  <div class="sg-character-attr-row">
+                    <label>魅力</label>
+                    <input id="sg_char_attr_cha" type="number" min="0" max="20" value="0">
+                  </div>
+                  <div class="sg-character-attr-row">
+                    <label>力量</label>
+                    <input id="sg_char_attr_str" type="number" min="0" max="20" value="0">
+                  </div>
+                  <div class="sg-character-attr-row">
+                    <label>敏捷</label>
+                    <input id="sg_char_attr_agi" type="number" min="0" max="20" value="0">
+                  </div>
+                  <div class="sg-character-attr-row">
+                    <label>幸运</label>
+                    <input id="sg_char_attr_luk" type="number" min="0" max="20" value="0">
+                  </div>
+                </div>
+
+                <div class="sg-character-attr-meta">
+                  <span id="sg_char_attr_total">已分配：0</span>
+                  <span id="sg_char_attr_remain">剩余：30</span>
+                  <span class="sg-character-cap">单项上限：20</span>
+                </div>
+              </div>
+
+              <div class="sg-card sg-subcard sg-character-provider">
+                <div class="sg-card-title">生成设置</div>
+                <div class="sg-grid2">
+                  <div class="sg-field">
+                    <label>生成API</label>
+                    <select id="sg_char_provider">
+                      <option value="st">使用当前 SillyTavern API（推荐）</option>
+                      <option value="custom">独立API（走酒馆后端代理）</option>
+                    </select>
+                  </div>
+                  <div class="sg-field">
+                    <label>temperature</label>
+                    <input id="sg_char_temperature" type="number" step="0.05" min="0" max="2">
+                  </div>
+                </div>
+
+                <div class="sg-card sg-subcard" id="sg_char_custom_block" style="display:none;">
+                  <div class="sg-card-title">独立API 设置（建议填 API基础URL）</div>
+                  <div class="sg-field">
+                    <label>API基础URL（例如 https://api.openai.com/v1 ）</label>
+                    <input id="sg_char_customEndpoint" type="text" placeholder="https://xxx.com/v1">
+                  </div>
+                  <div class="sg-grid2">
+                    <div class="sg-field">
+                      <label>API Key（可选）</label>
+                      <input id="sg_char_customApiKey" type="password" placeholder="可留空">
+                    </div>
+                    <div class="sg-field">
+                      <label>模型（可手填）</label>
+                      <div class="sg-row sg-inline" style="gap:4px;">
+                        <input id="sg_char_customModel" type="text" placeholder="gpt-4o-mini" style="flex:1;" list="sg_char_model_list">
+                        <datalist id="sg_char_model_list"></datalist>
+                        <button class="menu_button sg-btn sg-character-mini" id="sg_char_refreshModels" title="刷新模型列表（仅 Custom）">🔄</button>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="sg-row">
+                    <div class="sg-field sg-field-full">
+                      <label>最大回复token数</label>
+                      <input id="sg_char_customMaxTokens" type="number" min="256" max="200000" step="1" placeholder="例如：4096">
+                      <label class="sg-check" style="margin-top:8px;">
+                        <input type="checkbox" id="sg_char_customStream"> 使用流式返回（stream=true）
+                      </label>
+                    </div>
+                  </div>
+                </div>
+                <div class="sg-card sg-subcard sg-character-provider">
+                 <div class="sg-card-title">提示词设置</div>
+                 <div class="sg-field">
+                   <label>自定义随机设定提示词（留空使用默认）</label>
+                   <textarea id="sg_char_prompt_random" rows="3" placeholder="默认：请为“轮回乐园”设计一个全新的契约者角色..."></textarea>
+                 </div>
+                 <div class="sg-field">
+                   <label>自定义开场白提示词（留空使用默认）</label>
+                   <textarea id="sg_char_prompt_opening" rows="3" placeholder="默认：请根据以上人物设定写一段开场剧情..."></textarea>
+                 </div>
+              </div>
+              </div>
+
+              <div class="sg-actions-row">
+                <button class="menu_button sg-btn-primary" id="sg_char_generate">生成开场文本</button>
+                <button class="menu_button sg-btn" id="sg_char_copy">复制</button>
+                <button class="menu_button sg-btn" id="sg_char_insert">填入聊天框</button>
+              </div>
+
+              <div class="sg-field" style="margin-top:10px;">
+                <label>开场文本（不会自动发送）</label>
+                <textarea id="sg_char_output" rows="10" spellcheck="false"></textarea>
+                <div class="sg-hint" id="sg_char_status">· 生成后可复制或填入聊天输入框 ·</div>
+              </div>
+            </div>
+          </div> <!-- sg_page_character -->
 
           <div class="sg-status" id="sg_status"></div>
         </div>
@@ -12038,8 +12728,8 @@ function ensureModal() {
 
 function showSettingsPage(page) {
   const p = String(page || 'guide');
-  $('#sg_pgtab_guide, #sg_pgtab_summary, #sg_pgtab_index, #sg_pgtab_roll, #sg_pgtab_image').removeClass('active');
-  $('#sg_page_guide, #sg_page_summary, #sg_page_index, #sg_page_roll, #sg_page_image').removeClass('active');
+  $('#sg_pgtab_guide, #sg_pgtab_summary, #sg_pgtab_index, #sg_pgtab_roll, #sg_pgtab_image, #sg_pgtab_character').removeClass('active');
+  $('#sg_page_guide, #sg_page_summary, #sg_page_index, #sg_page_roll, #sg_page_image, #sg_page_character').removeClass('active');
 
   if (p === 'summary') {
     $('#sg_pgtab_summary').addClass('active');
@@ -12053,6 +12743,9 @@ function showSettingsPage(page) {
   } else if (p === 'image') {
     $('#sg_pgtab_image').addClass('active');
     $('#sg_page_image').addClass('active');
+  } else if (p === 'character') {
+    $('#sg_pgtab_character').addClass('active');
+    $('#sg_page_character').addClass('active');
   } else {
     $('#sg_pgtab_guide').addClass('active');
     $('#sg_page_guide').addClass('active');
@@ -12081,6 +12774,9 @@ function setupSettingsPages() {
   $('#sg_pgtab_index').on('click', () => showSettingsPage('index'));
   $('#sg_pgtab_roll').on('click', () => showSettingsPage('roll'));
   $('#sg_pgtab_image').on('click', () => showSettingsPage('image'));
+  $('#sg_pgtab_character').on('click', () => showSettingsPage('character'));
+
+  setupCharacterPage();
 
   // quick jump
   $('#sg_gotoIndexPage').on('click', () => showSettingsPage('index'));
@@ -12165,6 +12861,84 @@ function setupSettingsPages() {
   });
 }
 
+function setupCharacterPage() {
+  const autoSave = () => {
+    pullUiToSettings();
+    saveSettings();
+  };
+
+  $('#sg_char_provider').on('change', () => {
+    const provider = String($('#sg_char_provider').val() || 'st');
+    $('#sg_char_custom_block').toggle(provider === 'custom');
+    autoSave();
+  });
+
+  $('#sg_char_temperature, #sg_char_customEndpoint, #sg_char_customApiKey, #sg_char_customModel, #sg_char_customMaxTokens, #sg_char_customStream').on('input change', autoSave);
+  $('#sg_char_prompt_random, #sg_char_prompt_opening').on('input change', autoSave);
+
+  $('#sg_char_refreshModels').on('click', async () => {
+    autoSave();
+    await refreshCharacterModels();
+  });
+
+  $('#sg_char_park, #sg_char_race, #sg_char_talent').on('change', () => {
+    updateCharacterForm();
+    autoSave();
+  });
+  $('#sg_char_park_custom, #sg_char_park_traits, #sg_char_race_custom, #sg_char_talent_custom, #sg_char_contract').on('input', () => {
+    updateCharacterForm();
+    autoSave();
+  });
+  $('#sg_char_difficulty').on('change', () => {
+    updateCharacterAttributeSummary();
+    autoSave();
+  });
+  $('#sg_char_attr_con, #sg_char_attr_int, #sg_char_attr_cha, #sg_char_attr_str, #sg_char_attr_agi, #sg_char_attr_luk').on('input', () => {
+    updateCharacterAttributeSummary();
+    autoSave();
+  });
+
+  $('#sg_char_random_llm').on('change', autoSave);
+
+  $('#sg_char_random').on('click', async () => {
+    if ($('#sg_char_random_llm').is(':checked')) {
+      await randomizeCharacterWithLLM();
+    } else {
+      randomizeCharacterLocal();
+    }
+    autoSave();
+  });
+
+  $('#sg_char_generate').on('click', async () => {
+    autoSave();
+    await generateCharacterText();
+  });
+
+  $('#sg_char_copy').on('click', async () => {
+    const text = String($('#sg_char_output').val() || '').trim();
+    if (!text) {
+      setCharacterStatus('· 暂无可复制内容 ·', 'warn');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setCharacterStatus('· 已复制到剪贴板 ·', 'ok');
+    } catch (e) {
+      setCharacterStatus(`· 复制失败：${e?.message ?? e} ·`, 'err');
+    }
+  });
+
+  $('#sg_char_insert').on('click', () => {
+    const text = String($('#sg_char_output').val() || '').trim();
+    if (!text) {
+      setCharacterStatus('· 暂无可填入内容 ·', 'warn');
+      return;
+    }
+    const ok = injectToUserInput(text);
+    setCharacterStatus(ok ? '· 已填入聊天输入框（未发送） ·' : '· 未找到聊天输入框 ·', ok ? 'ok' : 'err');
+  });
+}
+
 function pullSettingsToUi() {
   const s = ensureSettings();
 
@@ -12193,6 +12967,13 @@ function pullSettingsToUi() {
   $('#sg_customModel').val(s.customModel);
 
   fillModelSelect(Array.isArray(s.customModelsCache) ? s.customModelsCache : [], s.customModel);
+
+  // Character model datalist
+  const $charDl = $('#sg_char_model_list');
+  $charDl.empty();
+  (Array.isArray(s.customModelsCache) ? s.customModelsCache : []).forEach(id => {
+    $charDl.append($('<option>').val(id));
+  });
 
   $('#sg_worldText').val(getChatMetaValue(META_KEYS.world));
   $('#sg_canonText').val(getChatMetaValue(META_KEYS.canon));
@@ -12380,6 +13161,41 @@ function pullSettingsToUi() {
   if (s.imageGalleryCache && s.imageGalleryCache.length > 0) {
     $('#sg_galleryInfo').text(`(已缓存 ${s.imageGalleryCache.length} 张)`);
   }
+
+  // 自定义角色设置
+  $('#sg_char_provider').val(String(s.characterProvider || 'st'));
+  $('#sg_char_temperature').val(s.characterTemperature ?? 0.7);
+  $('#sg_char_customEndpoint').val(String(s.characterCustomEndpoint || ''));
+  $('#sg_char_customApiKey').val(String(s.characterCustomApiKey || ''));
+  $('#sg_char_customModel').val(String(s.characterCustomModel || 'gpt-4o-mini'));
+  $('#sg_char_customMaxTokens').val(s.characterCustomMaxTokens || 2048);
+  $('#sg_char_customStream').prop('checked', !!s.characterCustomStream);
+  $('#sg_char_prompt_random').val(s.characterRandomPrompt || '');
+  $('#sg_char_prompt_opening').val(s.characterOpeningPrompt || '');
+  $('#sg_char_custom_block').toggle(String(s.characterProvider || 'st') === 'custom');
+
+  const parkValue = s.characterPark === 'CUSTOM' ? s.characterParkCustom : s.characterPark;
+  applyCharacterSelectValue($('#sg_char_park'), parkValue, $('#sg_char_park_custom'));
+  $('#sg_char_park_traits').val(String(s.characterParkTraits || ''));
+  const raceValue = s.characterRace === 'CUSTOM' ? s.characterRaceCustom : s.characterRace;
+  applyCharacterSelectValue($('#sg_char_race'), raceValue, $('#sg_char_race_custom'));
+  $('#sg_char_race_desc').val(String(s.characterRaceDesc || ''));
+
+  const talentValue = s.characterTalent === 'CUSTOM' ? s.characterTalentCustom : s.characterTalent;
+  applyCharacterSelectValue($('#sg_char_talent'), talentValue, $('#sg_char_talent_custom'));
+  $('#sg_char_talent_desc').val(String(s.characterTalentDesc || ''));
+
+  $('#sg_char_contract').val(String(s.characterContractId || ''));
+  $('#sg_char_difficulty').val(String(s.characterDifficulty || 30));
+  $('#sg_char_random_llm').prop('checked', !!s.characterRandomLLM);
+
+  $('#sg_char_attr_con').val(s.characterAttributes?.con ?? 0);
+  $('#sg_char_attr_int').val(s.characterAttributes?.int ?? 0);
+  $('#sg_char_attr_cha').val(s.characterAttributes?.cha ?? 0);
+  $('#sg_char_attr_str').val(s.characterAttributes?.str ?? 0);
+  $('#sg_char_attr_agi').val(s.characterAttributes?.agi ?? 0);
+  $('#sg_char_attr_luk').val(s.characterAttributes?.luk ?? 0);
+  updateCharacterForm();
 
   // 角色标签世界书设置
   $('#sg_imageGenProfilesEnabled').prop('checked', !!s.imageGenCharacterProfilesEnabled);
@@ -12637,7 +13453,7 @@ function updateSummaryManualRangeHint(setDefaults = false) {
     const ctx = SillyTavern.getContext();
     const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
     const mode = String(s.summaryCountMode || 'assistant');
-    const floorNow = computeFloorCount(chat, mode);
+    const floorNow = computeFloorCount(chat, mode, true, true);
     const every = clampInt(s.summaryEvery, 1, 200, 20);
 
     // Optional: show how many entries would be generated when manual split is enabled.
@@ -12696,7 +13512,7 @@ function renderSummaryPaneFromMeta() {
   lastSummaryText = String(last?.summary || '');
 
   const md = hist.slice(-12).reverse().map((h, idx) => {
-    const title= String(h.title || `${ensureSettings().summaryWorldInfoCommentPrefix || '剧情总结'} #${hist.length - idx}`);
+    const title = String(h.title || `${ensureSettings().summaryWorldInfoCommentPrefix || '剧情总结'} #${hist.length - idx}`);
     const kws = Array.isArray(h.keywords) ? h.keywords : [];
     const when = h.createdAt ? new Date(h.createdAt).toLocaleString() : '';
     const range = h?.range ? `（${h.range.fromFloor}-${h.range.toFloor}）` : '';
@@ -12896,6 +13712,31 @@ function pullUiToSettings() {
 
   s.imageGalleryEnabled = $('#sg_imageGalleryEnabled').is(':checked');
   s.imageGalleryUrl = String($('#sg_imageGalleryUrl').val() || '').trim();
+
+  // 自定义角色设置
+  s.characterProvider = String($('#sg_char_provider').val() || 'st');
+  s.characterTemperature = clampFloat($('#sg_char_temperature').val(), 0, 2, s.characterTemperature ?? 0.7);
+  s.characterCustomEndpoint = String($('#sg_char_customEndpoint').val() || '').trim();
+  s.characterCustomApiKey = String($('#sg_char_customApiKey').val() || '');
+  s.characterCustomModel = String($('#sg_char_customModel').val() || '').trim() || 'gpt-4o-mini';
+  s.characterCustomMaxTokens = clampInt($('#sg_char_customMaxTokens').val(), 256, 200000, s.characterCustomMaxTokens || 2048);
+  s.characterCustomStream = $('#sg_char_customStream').is(':checked');
+  s.characterRandomPrompt = String($('#sg_char_prompt_random').val() || '').trim();
+  s.characterOpeningPrompt = String($('#sg_char_prompt_opening').val() || '').trim();
+
+  s.characterPark = String($('#sg_char_park').val() || '');
+  s.characterParkCustom = String($('#sg_char_park_custom').val() || '').trim();
+  s.characterParkTraits = String($('#sg_char_park_traits').val() || '').trim();
+  s.characterRace = String($('#sg_char_race').val() || '');
+  s.characterRaceCustom = String($('#sg_char_race_custom').val() || '').trim();
+  s.characterRaceDesc = String($('#sg_char_race_desc').val() || '').trim();
+  s.characterTalent = String($('#sg_char_talent').val() || '');
+  s.characterTalentCustom = String($('#sg_char_talent_custom').val() || '').trim();
+  s.characterTalentDesc = String($('#sg_char_talent_desc').val() || '').trim();
+  s.characterContractId = String($('#sg_char_contract').val() || '').trim();
+  s.characterDifficulty = getCharacterDifficulty();
+  s.characterRandomLLM = $('#sg_char_random_llm').is(':checked');
+  s.characterAttributes = getCharacterAttributes();
 
   // 角色标签世界书设置
   s.imageGenCharacterProfilesEnabled = $('#sg_imageGenProfilesEnabled').is(':checked');
@@ -13119,7 +13960,7 @@ function createFloatingButton() {
   btn.id = 'sg_floating_btn';
   btn.className = 'sg-floating-btn';
   btn.innerHTML = '📘';
-  btn.title= '剧情指导';
+  btn.title = '剧情指导';
   // Allow dragging but also clicking. We need to distinguish click from drag.
   btn.style.touchAction = 'none';
 
@@ -13596,8 +14437,61 @@ function bindFloatingPanelResizeGuard() {
     if (!floatingPanelVisible) return;
     const panel = document.getElementById('sg_floating_panel');
     if (!panel) return;
-    requestAnimationFrame(() => ensureFloatingPanelInViewport(panel));
+    requestAnimationFrame(() => {
+      updateFloatingPanelLayoutForViewport(panel);
+      ensureFloatingPanelInViewport(panel);
+    });
   });
+}
+
+function applyMobileFloatingPanelStyles(panel) {
+  if (!panel) return;
+  panel.dataset.sgMobileSheet = '1';
+  panel.style.position = 'fixed';
+  panel.style.top = '0';
+  panel.style.bottom = '0';
+  panel.style.left = '0';
+  panel.style.right = '0';
+  panel.style.width = '100%';
+  panel.style.maxWidth = '100%';
+  panel.style.height = 'calc(var(--sg-vh, 1vh) * 100)';
+  panel.style.maxHeight = 'calc(var(--sg-vh, 1vh) * 100)';
+  panel.style.borderRadius = '0';
+  panel.style.resize = 'none';
+  panel.style.transform = 'none';
+  panel.style.transition = 'none';
+  panel.style.opacity = '1';
+  panel.style.visibility = 'visible';
+  panel.style.display = 'flex';
+}
+
+function clearMobileFloatingPanelStyles(panel) {
+  if (!panel || panel.dataset.sgMobileSheet !== '1') return;
+  panel.style.position = '';
+  panel.style.top = '';
+  panel.style.bottom = '';
+  panel.style.left = '';
+  panel.style.right = '';
+  panel.style.width = '';
+  panel.style.maxWidth = '';
+  panel.style.height = '';
+  panel.style.maxHeight = '';
+  panel.style.borderRadius = '';
+  panel.style.resize = '';
+  panel.style.transform = '';
+  panel.style.transition = '';
+  panel.style.opacity = '';
+  panel.style.visibility = '';
+  panel.style.display = '';
+  delete panel.dataset.sgMobileSheet;
+}
+
+function updateFloatingPanelLayoutForViewport(panel) {
+  if (isMobilePortrait()) {
+    applyMobileFloatingPanelStyles(panel);
+  } else {
+    clearMobileFloatingPanelStyles(panel);
+  }
 }
 
 function showFloatingPanel() {
@@ -13606,23 +14500,9 @@ function showFloatingPanel() {
   if (panel) {
     // 移动端/平板：强制使用底部弹出样式
     if (isMobilePortrait()) {
-      panel.style.position = 'fixed';
-      panel.style.top = '0';
-      panel.style.bottom = '0';
-      panel.style.left = '0';
-      panel.style.right = '0';
-      panel.style.width = '100%';
-      panel.style.maxWidth = '100%';
-      panel.style.height = 'calc(var(--sg-vh, 1vh) * 100)';
-      panel.style.maxHeight = 'calc(var(--sg-vh, 1vh) * 100)';
-      panel.style.borderRadius = '0';
-      panel.style.resize = 'none';
-      panel.style.transform = 'none';
-      panel.style.transition = 'none';
-      panel.style.opacity = '1';
-      panel.style.visibility = 'visible';
-      panel.style.display = 'flex';
+      applyMobileFloatingPanelStyles(panel);
     } else if (window.innerWidth < 1200) {
+      clearMobileFloatingPanelStyles(panel);
       // 桌面端小窗口：清除可能的内联样式，使用 CSS
       panel.style.left = '';
       panel.style.top = '';
@@ -13638,6 +14518,7 @@ function showFloatingPanel() {
       panel.style.transition = '';
       panel.style.borderRadius = '';
     } else {
+      clearMobileFloatingPanelStyles(panel);
       panel.style.display = 'flex';
     }
 
@@ -13886,7 +14767,7 @@ function injectFixedInputButton() {
     btn.style.padding = '5px 10px';
     btn.style.userSelect = 'none';
     btn.innerHTML = '📘 剧情';
-    btn.title= '打开剧情指导悬浮窗';
+    btn.title = '打开剧情指导悬浮窗';
     // Ensure height consistency
     btn.style.height = 'var(--input-height, auto)';
 
