@@ -13203,7 +13203,6 @@ function pullSettingsToUi() {
   const expanded = !!s.imageGenProfilesExpanded;
   $('#sg_imageGenProfiles').toggleClass('sg-profiles-collapsed', !expanded);
   $('#sg_imageGenProfilesToggle').text(expanded ? '折叠' : '展开');
-  $('#sg_imageGenProfilesEnabled').trigger('change');
   $('#sg_imageGenCustomFemalePrompt1').val(String(s.imageGenCustomFemalePrompt1 || ''));
   $('#sg_imageGenCustomFemalePrompt2').val(String(s.imageGenCustomFemalePrompt2 || ''));
 
