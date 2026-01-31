@@ -259,6 +259,42 @@
   line-height: 1.35;
 }
 
+.sg-wb-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.sg-wb-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.sg-wb-meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.sg-wb-name {
+  font-weight: 700;
+  opacity: .92;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sg-wb-sub {
+  opacity: .70;
+  font-size: .85rem;
+  margin-top: 2px;
+}
+
 .sg-warn {
   color: var(--warning, #ffcc66);
 }

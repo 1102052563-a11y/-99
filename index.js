@@ -76,6 +76,16 @@ const DEFAULT_MEGA_SUMMARY_SYSTEM_PROMPT = `你是一个“剧情大总结”助
 3) 只输出 JSON。`;
 const DEFAULT_MEGA_SUMMARY_USER_TEMPLATE = `【待汇总条目】\n{{items}}`;
 
+const DEFAULT_SEX_GUIDE_SYSTEM_PROMPT = `你是一个“性爱指导”助手，基于给定的剧情上下文与设定，提供成熟、尊重、强调自愿与安全的行动建议与注意事项。
+
+要求：
+1) 先确认双方意愿与边界，再给出具体且可执行的动作/节奏建议。
+2) 注意氛围营造、沟通与情绪反馈，避免粗暴与不适。
+3) 给出 3~6 条建议，语言直接但不必低俗。
+4) 若上下文不足，先提出澄清问题或保守建议。`;
+
+const DEFAULT_SEX_GUIDE_USER_TEMPLATE = `【上下文】\n{{snapshot}}\n\n【性爱指导世界书】\n{{worldbook}}\n\n【用户需求】\n{{userNeed}}\n\n【用户输入】\n{{lastUser}}`;
+
 // 无论用户怎么自定义提示词，仍会强制追加 JSON 输出结构要求，避免写入世界书失败
 const SUMMARY_JSON_REQUIREMENT = `输出要求：\n- 只输出严格 JSON，不要 Markdown、不要代码块、不要任何多余文字。\n- JSON 结构必须为：{"title": string, "summary": string, "keywords": string[]}。\n- keywords 为 6~14 个词/短语，尽量去重、避免泛词。`;
 
@@ -456,6 +466,27 @@ const DEFAULT_SETTINGS = Object.freeze({
   worldbookWindowMessages: 18,
   worldbookJson: '',
 
+  // ===== 性爱指导模块 =====
+  sexGuideEnabled: false,
+  sexGuideProvider: 'st', // st | custom
+  sexGuideTemperature: 0.6,
+  sexGuideSystemPrompt: DEFAULT_SEX_GUIDE_SYSTEM_PROMPT,
+  sexGuideUserTemplate: DEFAULT_SEX_GUIDE_USER_TEMPLATE,
+  sexGuideIncludeUserInput: true,
+  sexGuideCustomEndpoint: '',
+  sexGuideCustomApiKey: '',
+  sexGuideCustomModel: 'gpt-4o-mini',
+  sexGuideCustomModelsCache: [],
+  sexGuideCustomMaxTokens: 2048,
+  sexGuideCustomTopP: 0.95,
+  sexGuideCustomStream: false,
+  sexGuideWorldbookEnabled: true,
+  sexGuideWorldbookMaxChars: 6000,
+  sexGuideWorldbooks: [],
+  sexGuideUserNeed: '',
+  sexGuidePresetList: '[]',
+  sexGuidePresetActive: '',
+
   // ===== 总结功能（独立于剧情提示的 API 设置） =====
   summaryEnabled: false,
   // 多少“楼层”总结一次（楼层统计方式见 summaryCountMode）
@@ -659,6 +690,8 @@ const DEFAULT_SETTINGS = Object.freeze({
   conquestEntryPrefix: '猎艳录',
   structuredEntriesSystemPrompt: '',
   structuredEntriesUserTemplate: '',
+  structuredPresetList: '[]',
+  structuredPresetActive: '',
   structuredCharacterPrompt: '',
   structuredEquipmentPrompt: '',
   structuredInventoryPrompt: '',
@@ -830,6 +863,7 @@ let lastReport = null;
 let lastJsonText = '';
 let lastSummary = null; // { title, summary, keywords, ... }
 let lastSummaryText = '';
+let lastSexGuideText = '';
 let refreshTimer = null;
 let appendTimer = null;
 let summaryTimer = null;
@@ -863,6 +897,7 @@ let structuredWorldbookLiveCache = { file: '', loadedAt: 0, mode: 'active', tota
 const inlineCache = new Map();
 const panelCache = new Map(); // <mesKey, { htmlInner, collapsed, createdAt }>
 let chatDomObserver = null;
+let generationIdleTimer = null;
 let bodyDomObserver = null;
 let reapplyTimer = null;
 
@@ -943,6 +978,10 @@ function ensureSettings() {
     const hasStructuredReadFloors = Object.hasOwn(extensionSettings[MODULE_NAME], 'structuredEntriesReadFloors');
     for (const k of Object.keys(DEFAULT_SETTINGS)) {
       if (!Object.hasOwn(extensionSettings[MODULE_NAME], k)) extensionSettings[MODULE_NAME][k] = DEFAULT_SETTINGS[k];
+    }
+    if (!Array.isArray(extensionSettings[MODULE_NAME].sexGuideWorldbooks)) {
+      extensionSettings[MODULE_NAME].sexGuideWorldbooks = [];
+      saveSettingsDebounced();
     }
     if (!hasStructuredReadFloors) {
       extensionSettings[MODULE_NAME].structuredEntriesReadFloors = extensionSettings[MODULE_NAME].structuredEntriesEvery ?? DEFAULT_SETTINGS.structuredEntriesReadFloors;
@@ -1042,11 +1081,13 @@ function exportPreset() {
   delete preset.settings.summaryCustomApiKey;
   delete preset.settings.wiIndexCustomApiKey;
   delete preset.settings.wiRollCustomApiKey;
+  delete preset.settings.sexGuideCustomApiKey;
   // 移除缓存数据
   delete preset.settings.customModelsCache;
   delete preset.settings.summaryCustomModelsCache;
   delete preset.settings.wiIndexCustomModelsCache;
   delete preset.settings.wiRollCustomModelsCache;
+  delete preset.settings.sexGuideCustomModelsCache;
 
   const json = JSON.stringify(preset, null, 2);
   const blob = new Blob([json], { type: 'application/json' });
@@ -1085,7 +1126,8 @@ async function importPreset(file) {
     const currentSettings = ensureSettings();
     const preservedKeys = [
       'customApiKey', 'summaryCustomApiKey', 'wiIndexCustomApiKey', 'wiRollCustomApiKey',
-      'customModelsCache', 'summaryCustomModelsCache', 'wiIndexCustomModelsCache', 'wiRollCustomModelsCache'
+      'customModelsCache', 'summaryCustomModelsCache', 'wiIndexCustomModelsCache', 'wiRollCustomModelsCache',
+      'sexGuideCustomApiKey', 'sexGuideCustomModelsCache'
     ];
 
     // 合并设置（保留敏感信息）
@@ -2347,6 +2389,20 @@ function setCharacterStatus(text, kind = '') {
   $s.text(text || '');
 }
 
+function setSexGuideStatus(text, kind = '') {
+  const $s = $('#sg_sex_status');
+  if (!$s.length) return;
+  $s.removeClass('ok err warn').addClass(kind || '');
+  $s.text(text || '');
+}
+
+function setSexGuidePanelStatus(text, kind = '') {
+  const $s = $('#sg_sex_panel_status');
+  if (!$s.length) return;
+  $s.removeClass('ok err warn').addClass(kind || '');
+  $s.text(text || '');
+}
+
 function updateCharacterCustomRows() {
   const parkVal = String($('#sg_char_park').val() || '');
   const raceVal = String($('#sg_char_race').val() || '');
@@ -2860,6 +2916,188 @@ function getImageGenPresetSnapshot() {
 
 
   };
+}
+
+function normalizeSexGuidePresetName(name) {
+  const trimmed = String(name || '').trim();
+  if (!trimmed) return '';
+  return trimmed.slice(0, 64);
+}
+
+function getSexGuidePresetList() {
+  const s = ensureSettings();
+  const raw = String(s.sexGuidePresetList || '').trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function setSexGuidePresetList(list) {
+  const s = ensureSettings();
+  s.sexGuidePresetList = JSON.stringify(list || [], null, 2);
+  saveSettings();
+}
+
+function getSexGuidePresetSnapshot() {
+  const s = ensureSettings();
+  return {
+    sexGuideSystemPrompt: s.sexGuideSystemPrompt,
+    sexGuideUserTemplate: s.sexGuideUserTemplate,
+    sexGuideUserNeed: s.sexGuideUserNeed,
+    sexGuideIncludeUserInput: s.sexGuideIncludeUserInput,
+    sexGuideTemperature: s.sexGuideTemperature,
+    sexGuideCustomMaxTokens: s.sexGuideCustomMaxTokens,
+    sexGuideCustomTopP: s.sexGuideCustomTopP,
+    sexGuideWorldbookEnabled: s.sexGuideWorldbookEnabled,
+    sexGuideWorldbookMaxChars: s.sexGuideWorldbookMaxChars
+  };
+}
+
+function applySexGuidePresetSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return;
+  const s = ensureSettings();
+  const keys = Object.keys(getSexGuidePresetSnapshot());
+  for (const k of keys) {
+    if (!Object.hasOwn(snapshot, k)) continue;
+    if (k === 'sexGuideCustomMaxTokens') {
+      s[k] = clampInt(snapshot[k], 128, 200000, s[k] || 2048);
+      continue;
+    }
+    if (k === 'sexGuideWorldbookMaxChars') {
+      s[k] = clampInt(snapshot[k], 500, 200000, s[k] || 6000);
+      continue;
+    }
+    s[k] = snapshot[k];
+  }
+  saveSettings();
+  pullSettingsToUi();
+}
+
+function resolveSexGuidePresetFromSillyPreset(rawText, nameFallback) {
+  const normalizedText = normalizeJsonPresetText(rawText);
+  if (!normalizedText) return null;
+  let data = null;
+  try { data = JSON.parse(normalizedText); } catch { return null; }
+  if (!data || typeof data !== 'object') return null;
+
+  const name = normalizeSexGuidePresetName(
+    data.name || data.preset_name || data.title || data.presetTitle || nameFallback || '对话预设'
+  );
+  const snapshot = {
+    sexGuideCustomMaxTokens: clampInt(
+      data.openai_max_tokens ?? data.max_tokens ?? data.maxTokens,
+      128,
+      200000,
+      2048
+    )
+  };
+
+  if (data.temperature !== undefined && data.temperature !== null) {
+    snapshot.sexGuideTemperature = clampFloat(data.temperature, 0, 2, 0.6);
+  }
+
+  const prompts = findPromptPresetValue(data);
+  if (Array.isArray(prompts)) {
+    const systemParts = prompts
+      .filter(p => p && typeof p === 'object' && String(p.role || '').toLowerCase() === 'system')
+      .map(p => String(p.content || '').trim())
+      .filter(Boolean);
+    if (systemParts.length) {
+      snapshot.sexGuideSystemPrompt = systemParts.join('\n\n');
+    }
+  }
+
+  return { name, snapshot };
+}
+
+function normalizeStructuredPresetName(name) {
+  const trimmed = String(name || '').trim();
+  if (!trimmed) return '';
+  return trimmed.slice(0, 64);
+}
+
+function getStructuredPresetList() {
+  const s = ensureSettings();
+  const raw = String(s.structuredPresetList || '').trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function setStructuredPresetList(list) {
+  const s = ensureSettings();
+  s.structuredPresetList = JSON.stringify(list || [], null, 2);
+  saveSettings();
+}
+
+function getStructuredPresetSnapshot() {
+  const s = ensureSettings();
+  return {
+    structuredEntriesSystemPrompt: s.structuredEntriesSystemPrompt,
+    structuredEntriesUserTemplate: s.structuredEntriesUserTemplate,
+    structuredCharacterPrompt: s.structuredCharacterPrompt,
+    structuredCharacterEntryTemplate: s.structuredCharacterEntryTemplate,
+    structuredEquipmentPrompt: s.structuredEquipmentPrompt,
+    structuredEquipmentEntryTemplate: s.structuredEquipmentEntryTemplate,
+    structuredInventoryPrompt: s.structuredInventoryPrompt,
+    structuredInventoryEntryTemplate: s.structuredInventoryEntryTemplate,
+    structuredFactionPrompt: s.structuredFactionPrompt,
+    structuredFactionEntryTemplate: s.structuredFactionEntryTemplate,
+    structuredAchievementPrompt: s.structuredAchievementPrompt,
+    structuredAchievementEntryTemplate: s.structuredAchievementEntryTemplate,
+    structuredSubProfessionPrompt: s.structuredSubProfessionPrompt,
+    structuredSubProfessionEntryTemplate: s.structuredSubProfessionEntryTemplate,
+    structuredQuestPrompt: s.structuredQuestPrompt,
+    structuredQuestEntryTemplate: s.structuredQuestEntryTemplate,
+    structuredConquestPrompt: s.structuredConquestPrompt,
+    structuredConquestEntryTemplate: s.structuredConquestEntryTemplate
+  };
+}
+
+function applyStructuredPresetSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return;
+  const s = ensureSettings();
+  const keys = Object.keys(getStructuredPresetSnapshot());
+  for (const k of keys) {
+    if (!Object.hasOwn(snapshot, k)) continue;
+    s[k] = snapshot[k];
+  }
+  saveSettings();
+  pullSettingsToUi();
+}
+
+function resolveStructuredPresetFromSillyPreset(rawText, nameFallback) {
+  const normalizedText = normalizeJsonPresetText(rawText);
+  if (!normalizedText) return null;
+  let data = null;
+  try { data = JSON.parse(normalizedText); } catch { return null; }
+  if (!data || typeof data !== 'object') return null;
+
+  const name = normalizeStructuredPresetName(
+    data.name || data.preset_name || data.title || data.presetTitle || nameFallback || '对话预设'
+  );
+  const snapshot = {};
+
+  const prompts = findPromptPresetValue(data);
+  if (Array.isArray(prompts)) {
+    const systemParts = prompts
+      .filter(p => p && typeof p === 'object' && String(p.role || '').toLowerCase() === 'system')
+      .map(p => String(p.content || '').trim())
+      .filter(Boolean);
+    if (systemParts.length) {
+      snapshot.structuredEntriesSystemPrompt = systemParts.join('\n\n');
+    }
+  }
+
+  return { name, snapshot };
 }
 
 function applyImageGenPresetSnapshot(snapshot) {
@@ -3512,6 +3750,137 @@ function buildWorldbookBlock() {
   if (!info.text) return '';
   return `\n【世界书/World Info（已导入：${info.importedEntries}条，本次注入：${info.injectedEntries}条，约${info.injectedTokens} tokens）】\n${info.text}\n`;
 }
+
+// -------------------- sex guide worldbooks --------------------
+
+let sexGuideWorldbookStats = {
+  enabled: false,
+  totalWorldbooks: 0,
+  enabledWorldbooks: 0,
+  importedEntries: 0,
+  injectedEntries: 0,
+  injectedChars: 0,
+  injectedTokens: 0,
+  usedWorldbooks: [],
+  perBookStats: [],
+  text: ''
+};
+
+function normalizeSexGuideWorldbooks(list) {
+  if (!Array.isArray(list)) return [];
+  const usedIds = new Set();
+  const now = Date.now();
+  return list.map((wb, idx) => {
+    if (!wb || typeof wb !== 'object') return null;
+    const name = String(wb.name || wb.file || wb.title || `世界书${idx + 1}`).trim() || `世界书${idx + 1}`;
+    const json = String(wb.json || wb.raw || wb.text || '').trim();
+    if (!json) return null;
+    let id = String(wb.id || '').trim();
+    if (!id || usedIds.has(id)) id = `sexwb_${now}_${idx}_${Math.random().toString(36).slice(2, 7)}`;
+    usedIds.add(id);
+    return {
+      id,
+      name,
+      json,
+      enabled: wb.enabled !== false
+    };
+  }).filter(Boolean);
+}
+
+function getSexGuideWorldbooks() {
+  const s = ensureSettings();
+  const list = normalizeSexGuideWorldbooks(s.sexGuideWorldbooks || []);
+  if (list.length !== (s.sexGuideWorldbooks || []).length) {
+    s.sexGuideWorldbooks = list;
+    saveSettings();
+  }
+  return list;
+}
+
+function setSexGuideWorldbooks(list) {
+  const s = ensureSettings();
+  s.sexGuideWorldbooks = normalizeSexGuideWorldbooks(list || []);
+  saveSettings();
+  renderSexGuideWorldbookList();
+  updateSexGuideWorldbookInfoLabel();
+}
+
+function computeSexGuideWorldbookInjection() {
+  const s = ensureSettings();
+  const enabled = !!s.sexGuideWorldbookEnabled;
+  const list = getSexGuideWorldbooks();
+
+  const result = {
+    enabled,
+    totalWorldbooks: list.length,
+    enabledWorldbooks: list.filter(w => w.enabled !== false).length,
+    importedEntries: 0,
+    injectedEntries: 0,
+    injectedChars: 0,
+    injectedTokens: 0,
+    usedWorldbooks: [],
+    perBookStats: [],
+    text: ''
+  };
+
+  if (!enabled || !list.length) return result;
+
+  const maxChars = clampInt(s.sexGuideWorldbookMaxChars, 500, 200000, 6000);
+  let acc = '';
+
+  for (const wb of list) {
+    const entriesAll = parseWorldbookJson(wb.json).filter(e => e && !e.disabled);
+    const full = buildStructuredWorldbookText(entriesAll, 0);
+    const fullTokens = estimateTokens(full.text || '');
+
+    if (!wb.enabled || !entriesAll.length || (maxChars > 0 && acc.length >= maxChars)) {
+      result.perBookStats.push({
+        id: wb.id,
+        name: wb.name,
+        enabled: !!wb.enabled,
+        entries: entriesAll.length,
+        injectedEntries: 0,
+        tokens: fullTokens
+      });
+      continue;
+    }
+
+    result.importedEntries += entriesAll.length;
+
+    const remain = maxChars > 0 ? Math.max(0, maxChars - acc.length) : 0;
+    const partial = buildStructuredWorldbookText(entriesAll, remain);
+    if (partial.text) {
+      if (acc) acc += '\n';
+      acc += partial.text.trim() + '\n';
+      result.injectedEntries += partial.used;
+      result.usedWorldbooks.push(wb.name);
+    }
+
+    result.perBookStats.push({
+      id: wb.id,
+      name: wb.name,
+      enabled: true,
+      entries: entriesAll.length,
+      injectedEntries: partial.used || 0,
+      tokens: fullTokens
+    });
+  }
+
+  result.injectedChars = acc.length;
+  result.injectedTokens = estimateTokens(acc);
+  result.text = acc.trim();
+
+  return result;
+}
+
+function buildSexGuideWorldbookBlock() {
+  const info = computeSexGuideWorldbookInjection();
+  sexGuideWorldbookStats = info;
+  if (!info.enabled || !info.text) return '';
+  const enabledNames = getSexGuideWorldbooks().filter(w => w.enabled).map(w => w.name);
+  const dirs = enabledNames.length ? enabledNames.join(' / ') : '无';
+  return `\n【性爱指导世界书（目录：${dirs}，本次注入：${info.injectedEntries}条，约${info.injectedTokens} tokens）】\n${info.text}\n`;
+}
 function getModules(mode /* panel|append */) {
   const s = ensureSettings();
   const rawText = String(s.modulesJson || '').trim();
@@ -3696,6 +4065,68 @@ function buildSnapshot() {
   ].join('\n');
 
   return { snapshotText, sourceSummary };
+}
+
+function getLastUserMessageText(chat) {
+  const arr = Array.isArray(chat) ? chat : [];
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const m = arr[i];
+    if (m && m.is_user === true) {
+      const text = stripHtml(m.mes ?? m.message ?? '');
+      if (text) return text;
+    }
+  }
+  return '';
+}
+
+function buildRecentChatTextSexGuide(chat, maxMessages = 6, maxCharsPerMessage = 800) {
+  const arr = Array.isArray(chat) ? chat : [];
+  const picked = [];
+  for (let i = arr.length - 1; i >= 0 && picked.length < maxMessages; i--) {
+    const m = arr[i];
+    if (!m) continue;
+    const name = stripHtml(m.name || (m.is_user ? 'User' : 'Assistant'));
+    let text = stripHtml(m.mes ?? m.message ?? '');
+    if (!text) continue;
+    if (text.length > maxCharsPerMessage) text = text.slice(0, maxCharsPerMessage) + '…(截断)';
+    picked.push(`【${name}】${text}`);
+  }
+  return picked.reverse().join('\n');
+}
+
+function buildSexGuidePromptMessages(snapshotText, worldbookText, settings, options = {}) {
+  const s = settings || ensureSettings();
+  const ctx = SillyTavern.getContext();
+  const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+
+  const system = String(s.sexGuideSystemPrompt || DEFAULT_SEX_GUIDE_SYSTEM_PROMPT).trim() || DEFAULT_SEX_GUIDE_SYSTEM_PROMPT;
+  const tpl = String(s.sexGuideUserTemplate || DEFAULT_SEX_GUIDE_USER_TEMPLATE).trim() || DEFAULT_SEX_GUIDE_USER_TEMPLATE;
+
+  const overrideNeed = String(options.userNeedOverride || '').trim();
+  let lastUser = getLastUserMessageText(chat);
+  // If user provided explicit need, don't use last user chat text to avoid echoing previous output.
+  if (overrideNeed) lastUser = '';
+  // If last user equals last generated sex guide text, ignore it.
+  if (lastUser && lastSexGuideText && lastUser.trim() === String(lastSexGuideText).trim()) lastUser = '';
+  const includeUserInput = s.sexGuideIncludeUserInput !== false;
+  const recentText = includeUserInput ? buildRecentChatTextSexGuide(chat, 6, 800) : '';
+  if (!includeUserInput) lastUser = '';
+  const userNeed = overrideNeed || String(s.sexGuideUserNeed || '').trim();
+  let user = renderTemplate(tpl, {
+    snapshot: snapshotText,
+    worldbook: String(worldbookText || '').trim(),
+    lastUser,
+    recentText,
+    userNeed
+  });
+  if (worldbookText && !/\{\{\s*worldbook\s*\}\}/i.test(tpl)) {
+    user = String(user || '').trim() + `\n\n【性爱指导世界书】\n${worldbookText}`;
+  }
+
+  return [
+    { role: 'system', content: system },
+    { role: 'user', content: user }
+  ];
 }
 
 // -------------------- provider=st --------------------
@@ -4038,6 +4469,62 @@ async function runAnalysis() {
     setStatus(`分析失败：${e?.message ?? e}`, 'err');
   } finally {
     $('#sg_analyze').prop('disabled', false);
+  }
+}
+
+// -------------------- sex guide --------------------
+
+async function runSexGuide(options = {}) {
+  const s = ensureSettings();
+  if (!s.sexGuideEnabled) {
+    setSexGuideStatus('性爱指导未启用', 'warn');
+    setSexGuidePanelStatus('性爱指导未启用', 'warn');
+    return;
+  }
+
+  const updateNeed = options?.userNeedOverride !== undefined;
+  const userNeed = updateNeed ? String(options.userNeedOverride || '').trim() : String(s.sexGuideUserNeed || '').trim();
+
+  setSexGuideStatus('正在生成…', 'warn');
+  setSexGuidePanelStatus('正在生成…', 'warn');
+  $('#sg_sex_generate, #sg_sex_panel_generate').prop('disabled', true);
+
+  try {
+    const { snapshotText } = buildSnapshot();
+    const wbInfo = computeSexGuideWorldbookInjection();
+    const messages = buildSexGuidePromptMessages(snapshotText, wbInfo.text, { ...s, sexGuideUserNeed: userNeed }, { userNeedOverride: userNeed });
+
+    let text = '';
+    if (String(s.sexGuideProvider || 'st') === 'custom') {
+      if (!s.sexGuideCustomEndpoint) throw new Error('请先填写性爱指导独立API基础URL');
+      text = await callViaCustom(
+        s.sexGuideCustomEndpoint,
+        s.sexGuideCustomApiKey,
+        s.sexGuideCustomModel,
+        messages,
+        s.sexGuideTemperature,
+        s.sexGuideCustomMaxTokens,
+        s.sexGuideCustomTopP,
+        s.sexGuideCustomStream
+      );
+    } else {
+      text = await callViaSillyTavern(messages, null, s.sexGuideTemperature);
+    }
+
+    if (typeof text !== 'string') text = JSON.stringify(text ?? '');
+    lastSexGuideText = String(text || '').trim();
+    $('#sg_sex_output').val(lastSexGuideText);
+    $('#sg_sex_copy, #sg_sex_insert').prop('disabled', !lastSexGuideText);
+    $('#sg_sex_panel_output').val(lastSexGuideText);
+    $('#sg_sex_panel_send').prop('disabled', !lastSexGuideText);
+    setSexGuideStatus('生成完成', 'ok');
+    setSexGuidePanelStatus('生成完成', 'ok');
+  } catch (e) {
+    console.error('[StoryGuide] sex guide failed:', e);
+    setSexGuideStatus(`生成失败：${e?.message ?? e}`, 'err');
+    setSexGuidePanelStatus(`生成失败：${e?.message ?? e}`, 'err');
+  } finally {
+    $('#sg_sex_generate, #sg_sex_panel_generate').prop('disabled', false);
   }
 }
 
@@ -5232,12 +5719,23 @@ async function generateStructuredEntries(chunkText, fromFloor, toFloor, meta, se
   let jsonText = '';
   if (String(settings.summaryProvider || 'st') === 'custom') {
     jsonText = await callViaCustom(settings.summaryCustomEndpoint, settings.summaryCustomApiKey, settings.summaryCustomModel, messages, settings.summaryTemperature, settings.summaryCustomMaxTokens, 0.95, settings.summaryCustomStream);
+    if (!String(jsonText || '').trim()) {
+      try {
+        jsonText = await fallbackAskJsonCustom(settings.summaryCustomEndpoint, settings.summaryCustomApiKey, settings.summaryCustomModel, messages, settings.summaryTemperature, settings.summaryCustomMaxTokens, 0.95, settings.summaryCustomStream);
+      } catch { /* ignore */ }
+    }
   } else {
     jsonText = await callViaSillyTavern(messages, null, settings.summaryTemperature);
     if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
+    if (!String(jsonText || '').trim()) {
+      try { jsonText = await fallbackAskJson(messages, settings.summaryTemperature); } catch { /* ignore */ }
+    }
   }
   const parsed = safeJsonParse(jsonText);
-  if (!parsed) return null;
+  if (!parsed) {
+    console.warn('[StoryGuide] structured entries parse failed (empty or invalid JSON).');
+    return null;
+  }
   return {
     characters: Array.isArray(parsed.characters) ? parsed.characters : [],
     equipments: Array.isArray(parsed.equipments) ? parsed.equipments : [],
@@ -7685,6 +8183,19 @@ function scheduleAutoSummary(reason = '') {
   }, delay);
 }
 
+function schedulePostGenerationAuto(reason = '') {
+  const s = ensureSettings();
+  if (!s.enabled) return;
+  if (!s.summaryEnabled && !s.structuredEntriesEnabled) return;
+  const delay = clampInt(s.debounceMs, 300, 10000, DEFAULT_SETTINGS.debounceMs);
+  if (generationIdleTimer) clearTimeout(generationIdleTimer);
+  generationIdleTimer = setTimeout(() => {
+    generationIdleTimer = null;
+    maybeAutoSummary(reason).catch(() => void 0);
+    maybeAutoStructuredEntries(reason).catch(() => void 0);
+  }, delay);
+}
+
 async function maybeAutoSummary(reason = '') {
   const s = ensureSettings();
   if (!s.enabled) return;
@@ -9975,6 +10486,20 @@ function fillRollModelSelect(modelIds, selected) {
   });
 }
 
+function fillSexGuideModelSelect(modelIds, selected) {
+  const $sel = $('#sg_sexModelSelect');
+  if (!$sel.length) return;
+  $sel.empty();
+  $sel.append(`<option value="">(选择模型)</option>`);
+  (modelIds || []).forEach(id => {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = id;
+    if (selected && id === selected) opt.selected = true;
+    $sel.append(opt);
+  });
+}
+
 
 async function refreshSummaryModels() {
   const s = ensureSettings();
@@ -10071,6 +10596,102 @@ async function refreshSummaryModels() {
     setStatus(`已刷新总结模型：${ids.length} 个（直连 fallback）`, 'ok');
   } catch (e) {
     setStatus(`刷新总结模型失败：${e?.message ?? e}`, 'err');
+  }
+}
+
+async function refreshSexGuideModels() {
+  const s = ensureSettings();
+  const raw = String($('#sg_sexCustomEndpoint').val() || s.sexGuideCustomEndpoint || '').trim();
+  const apiBase = normalizeBaseUrl(raw);
+  if (!apiBase) { setSexGuideStatus('请先填写“性爱指导独立API基础URL”再刷新模型', 'warn'); return; }
+
+  setSexGuideStatus('正在刷新“性爱指导独立API”模型列表…', 'warn');
+
+  const apiKey = String($('#sg_sexCustomApiKey').val() || s.sexGuideCustomApiKey || '');
+  const statusUrl = '/api/backends/chat-completions/status';
+
+  const body = {
+    reverse_proxy: apiBase,
+    chat_completion_source: 'custom',
+    custom_url: apiBase,
+    custom_include_headers: apiKey ? `Authorization: Bearer ${apiKey}` : ''
+  };
+
+  try {
+    const headers = { ...getStRequestHeadersCompat(), 'Content-Type': 'application/json' };
+    const res = await fetch(statusUrl, { method: 'POST', headers, body: JSON.stringify(body) });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      const err = new Error(`状态检查失败: HTTP ${res.status} ${res.statusText}\n${txt}`);
+      err.status = res.status;
+      throw err;
+    }
+
+    const data = await res.json().catch(() => ({}));
+
+    let modelsList = [];
+    if (Array.isArray(data?.models)) modelsList = data.models;
+    else if (Array.isArray(data?.data)) modelsList = data.data;
+    else if (Array.isArray(data)) modelsList = data;
+
+    let ids = [];
+    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
+
+    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
+
+    if (!ids.length) {
+      setSexGuideStatus('刷新成功，但未解析到模型列表（返回格式不兼容）', 'warn');
+      return;
+    }
+
+    s.sexGuideCustomModelsCache = ids;
+    saveSettings();
+    fillSexGuideModelSelect(ids, s.sexGuideCustomModel);
+    setSexGuideStatus(`已刷新性爱指导模型：${ids.length} 个（后端代理）`, 'ok');
+    return;
+  } catch (e) {
+    const status = e?.status;
+    if (!(status === 404 || status === 405)) console.warn('[StoryGuide] sex guide status check failed; fallback to direct /models', e);
+  }
+
+  try {
+    const modelsUrl = (function (base) {
+      const u = normalizeBaseUrl(base);
+      if (!u) return '';
+      if (/\/v1$/.test(u)) return u + '/models';
+      if (/\/v1\b/i.test(u)) return u.replace(/\/+$/, '') + '/models';
+      return u + '/v1/models';
+    })(apiBase);
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+    const res = await fetch(modelsUrl, { method: 'GET', headers });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      throw new Error(`直连 /models 失败: HTTP ${res.status} ${res.statusText}\n${txt}`);
+    }
+    const data = await res.json().catch(() => ({}));
+
+    let modelsList = [];
+    if (Array.isArray(data?.models)) modelsList = data.models;
+    else if (Array.isArray(data?.data)) modelsList = data.data;
+    else if (Array.isArray(data)) modelsList = data;
+
+    let ids = [];
+    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
+
+    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
+
+    if (!ids.length) { setSexGuideStatus('直连刷新失败：未解析到模型列表', 'warn'); return; }
+
+    s.sexGuideCustomModelsCache = ids;
+    saveSettings();
+    fillSexGuideModelSelect(ids, s.sexGuideCustomModel);
+    setSexGuideStatus(`已刷新性爱指导模型：${ids.length} 个（直连 fallback）`, 'ok');
+  } catch (e) {
+    setSexGuideStatus(`刷新性爱指导模型失败：${e?.message ?? e}`, 'err');
   }
 }
 
@@ -11694,6 +12315,7 @@ function buildModalHtml() {
             <button class="sg-pgtab" id="sg_pgtab_index">索引设置</button>
             <button class="sg-pgtab" id="sg_pgtab_roll">ROLL 设置</button>
             <button class="sg-pgtab" id="sg_pgtab_image">图像生成</button>
+            <button class="sg-pgtab" id="sg_pgtab_sex">性爱指导</button>
             <button class="sg-pgtab" id="sg_pgtab_character">自定义角色</button>
           </div>
 
@@ -12125,6 +12747,15 @@ function buildModalHtml() {
               <div class="sg-card sg-subcard">
                 <div class="sg-card-title">条目提示词与模板管理</div>
                 <div class="sg-hint" style="margin-bottom:8px">为每种类型的条目配置独立的提取逻辑（提示词）和输出格式（模板）。</div>
+
+                <div class="sg-row sg-inline" style="margin-bottom:8px">
+                  <select id="sg_structuredPresetSelect" style="min-width:160px;"></select>
+                  <button class="menu_button sg-btn" id="sg_structuredApplyPreset">应用</button>
+                  <button class="menu_button sg-btn" id="sg_structuredSavePreset">保存为预设</button>
+                  <button class="menu_button sg-btn" id="sg_structuredDeletePreset">删除</button>
+                  <button class="menu_button sg-btn" id="sg_structuredExportPreset">导出预设</button>
+                  <button class="menu_button sg-btn" id="sg_structuredImportPreset">导入预设</button>
+                </div>
                 
                 <div class="sg-row sg-inline" style="margin-bottom:10px">
                   <label>选择条目类型</label>
@@ -12956,6 +13587,140 @@ function buildModalHtml() {
           </div>
           </div> <!-- sg_page_image -->
 
+          <div class="sg-page" id="sg_page_sex">
+            <div class="sg-card">
+              <div class="sg-card-title">性爱指导</div>
+
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>启用</label>
+                  <label class="sg-switch">
+                    <input type="checkbox" id="sg_sexEnabled">
+                    <span class="sg-slider"></span>
+                  </label>
+                </div>
+
+                <div class="sg-field">
+                  <label>Provider</label>
+                  <select id="sg_sex_provider">
+                    <option value="st">使用当前 SillyTavern API</option>
+                    <option value="custom">独立API（OpenAI 兼容）</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>temperature</label>
+                  <input id="sg_sex_temperature" type="number" step="0.05" min="0" max="2">
+                </div>
+              </div>
+
+              <div id="sg_sex_custom_block" class="sg-card sg-subcard" style="display:none;">
+                <div class="sg-card-title">独立API 设置</div>
+
+                <div class="sg-field">
+                  <label>API基础URL（例如 https://api.openai.com/v1）</label>
+                  <input id="sg_sexCustomEndpoint" type="text" placeholder="https://xxx.com/v1">
+                </div>
+
+                <div class="sg-grid2">
+                  <div class="sg-field">
+                    <label>API Key（可选）</label>
+                    <input id="sg_sexCustomApiKey" type="password" placeholder="可留空">
+                  </div>
+                  <div class="sg-field">
+                    <label>模型（可手填）</label>
+                    <input id="sg_sexCustomModel" type="text" placeholder="gpt-4o-mini">
+                  </div>
+                </div>
+
+                <div class="sg-row sg-inline">
+                  <button class="menu_button sg-btn" id="sg_sexRefreshModels">检查/刷新模型</button>
+                  <select id="sg_sexModelSelect" class="sg-model-select">
+                    <option value="">(选择模型)</option>
+                  </select>
+                </div>
+
+                <div class="sg-row">
+                  <div class="sg-field sg-field-full">
+                    <label>最大回复token数</label>
+                    <input id="sg_sexCustomMaxTokens" type="number" min="256" max="200000" step="1" placeholder="例如 2048">
+                    <label class="sg-check" style="margin-top:8px;">
+                      <input type="checkbox" id="sg_sexCustomStream"> 使用流式返回（stream=true）
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="sg-card">
+              <div class="sg-card-title">性爱指导世界书</div>
+
+              <div class="sg-row sg-inline">
+                <label class="sg-check"><input type="checkbox" id="sg_sexWorldbookEnabled">启用注入</label>
+                <button class="menu_button sg-btn" id="sg_sexWorldbookImport">导入世界书（可多选）</button>
+                <button class="menu_button sg-btn" id="sg_sexWorldbookClear">清空</button>
+                <input type="file" id="sg_sexWorldbookImportFile" accept=".json" multiple style="display:none;">
+              </div>
+
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>最大注入字符</label>
+                <input id="sg_sexWorldbookMaxChars" type="number" min="500" max="200000">
+                </div>
+              </div>
+
+              <div id="sg_sexWorldbookList" class="sg-wb-list"></div>
+              <div class="sg-hint" id="sg_sexWorldbookInfo">(未导入世界书)</div>
+            </div>
+
+            <div class="sg-card">
+              <div class="sg-card-title">自定义提示词</div>
+              <div class="sg-field">
+                <label>System</label>
+                <textarea id="sg_sexSystemPrompt" rows="6" placeholder="用于控制风格与安全边界"></textarea>
+              </div>
+              <div class="sg-field">
+                <label>User 模板</label>
+                <textarea id="sg_sexUserTemplate" rows="4" placeholder="支持占位符：{{snapshot}} {{worldbook}} {{lastUser}} {{recentText}}"></textarea>
+                <div class="sg-hint">占位符：{{snapshot}} {{worldbook}} {{lastUser}} {{recentText}} {{userNeed}}</div>
+              </div>
+              <div class="sg-row sg-inline">
+                <label class="sg-check"><input type="checkbox" id="sg_sexIncludeUserInput">Include user input (last user + recent chat)</label>
+              </div>
+              <div class="sg-row sg-inline" style="margin-top:6px;">
+                <select id="sg_sexPresetSelect" style="min-width:160px;"></select>
+                <button class="menu_button sg-btn" id="sg_sexApplyPreset">应用</button>
+                <button class="menu_button sg-btn" id="sg_sexSavePreset">保存为预设</button>
+                <button class="menu_button sg-btn" id="sg_sexDeletePreset">删除</button>
+                <button class="menu_button sg-btn" id="sg_sexExportPreset">导出预设</button>
+                <button class="menu_button sg-btn" id="sg_sexImportPreset">导入预设</button>
+              </div>
+              <div class="sg-actions-row">
+                <button class="menu_button sg-btn" id="sg_sexResetPrompt">恢复默认提示词</button>
+              </div>
+            </div>
+
+            <div class="sg-card">
+              <div class="sg-card-title">生成</div>
+              <div class="sg-field" style="margin-top:6px;">
+                <label>用户需求（可选）</label>
+                <textarea id="sg_sexUserNeed" rows="3" placeholder="例如：更温柔/更主动/更慢节奏/强调沟通与安全…"></textarea>
+              </div>
+              <div class="sg-actions-row">
+                <button class="menu_button sg-btn-primary" id="sg_sex_generate">生成性爱指导</button>
+                <button class="menu_button sg-btn" id="sg_sex_copy" disabled>复制</button>
+                <button class="menu_button sg-btn" id="sg_sex_insert" disabled>插入输入框</button>
+              </div>
+              <div class="sg-field" style="margin-top:10px;">
+                <label>输出</label>
+                <textarea id="sg_sex_output" rows="10" spellcheck="false"></textarea>
+                <div class="sg-hint" id="sg_sex_status">· 生成后可复制或插入输入框 ·</div>
+              </div>
+            </div>
+          </div> <!-- sg_page_sex -->
+
           <div class="sg-page" id="sg_page_character">
             <div class="sg-card sg-character-card">
               <div class="sg-card-title sg-character-title">轮回乐园 · 自定义角色</div>
@@ -13180,6 +13945,7 @@ function buildModalHtml() {
               <button class="sg-tab" id="sg_tab_json">JSON</button>
               <button class="sg-tab" id="sg_tab_src">来源</button>
               <button class="sg-tab" id="sg_tab_sum">总结</button>
+              <button class="sg-tab" id="sg_tab_sex">性爱指导</button>
               <div class="sg-spacer"></div>
               <button class="menu_button sg-btn" id="sg_copyMd" disabled>复制MD</button>
               <button class="menu_button sg-btn" id="sg_copyJson" disabled>复制JSON</button>
@@ -13191,6 +13957,24 @@ function buildModalHtml() {
             <div class="sg-pane" id="sg_pane_json"><pre class="sg-pre" id="sg_json"></pre></div>
             <div class="sg-pane" id="sg_pane_src"><pre class="sg-pre" id="sg_src"></pre></div>
             <div class="sg-pane" id="sg_pane_sum"><div class="sg-md" id="sg_sum">(尚未生成)</div></div>
+            <div class="sg-pane" id="sg_pane_sex">
+              <div class="sg-card">
+                <div class="sg-card-title">性爱指导面板</div>
+                <div class="sg-field">
+                  <label>用户需求</label>
+                  <textarea id="sg_sex_panel_need" rows="3" placeholder="输入你的需求：例如更温柔/更主动/更慢节奏/强调沟通与安全…"></textarea>
+                </div>
+                <div class="sg-actions-row">
+                  <button class="menu_button sg-btn-primary" id="sg_sex_panel_generate">生成性爱指导</button>
+                  <button class="menu_button sg-btn" id="sg_sex_panel_send" disabled>发送到聊天</button>
+                </div>
+                <div class="sg-field" style="margin-top:10px;">
+                  <label>输出</label>
+                  <textarea id="sg_sex_panel_output" rows="10" spellcheck="false"></textarea>
+                  <div class="sg-hint" id="sg_sex_panel_status">· 生成后可发送到聊天 ·</div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -13227,6 +14011,7 @@ function ensureModal() {
   $('#sg_tab_json').on('click', () => showPane('json'));
   $('#sg_tab_src').on('click', () => showPane('src'));
   $('#sg_tab_sum').on('click', () => showPane('sum'));
+  $('#sg_tab_sex').on('click', () => showPane('sex'));
 
   $('#sg_saveSettings').on('click', () => {
     pullUiToSettings();
@@ -13325,6 +14110,103 @@ function ensureModal() {
 
   // Initial update
   setTimeout(updateStructuredEditor, 100);
+
+  // structured presets
+  $('#sg_structuredSavePreset').on('click', () => {
+    const name = normalizeStructuredPresetName(prompt('预设名称？') || '');
+    if (!name) return;
+    const list = getStructuredPresetList();
+    const snapshot = getStructuredPresetSnapshot();
+    const idx = list.findIndex(p => p?.name === name);
+    if (idx >= 0) list[idx] = { name, snapshot };
+    else list.push({ name, snapshot });
+    setStructuredPresetList(list);
+    const s = ensureSettings();
+    s.structuredPresetActive = name;
+    saveSettings();
+    pullSettingsToUi();
+    setStatus('预设已保存', 'ok');
+  });
+
+  $('#sg_structuredApplyPreset').on('click', () => {
+    const name = String($('#sg_structuredPresetSelect').val() || '').trim();
+    if (!name) return;
+    const list = getStructuredPresetList();
+    const preset = list.find(p => p?.name === name);
+    if (!preset) return;
+    applyStructuredPresetSnapshot(preset.snapshot);
+    const s = ensureSettings();
+    s.structuredPresetActive = name;
+    saveSettings();
+    setStatus('预设已应用', 'ok');
+  });
+
+  $('#sg_structuredDeletePreset').on('click', () => {
+    const name = String($('#sg_structuredPresetSelect').val() || '').trim();
+    if (!name) return;
+    const list = getStructuredPresetList().filter(p => p?.name !== name);
+    setStructuredPresetList(list);
+    const s = ensureSettings();
+    if (s.structuredPresetActive === name) s.structuredPresetActive = '';
+    saveSettings();
+    pullSettingsToUi();
+    setStatus('预设已删除', 'ok');
+  });
+
+  $('#sg_structuredExportPreset').on('click', () => {
+    const name = String($('#sg_structuredPresetSelect').val() || '').trim();
+    const list = getStructuredPresetList();
+    const preset = list.find(p => p?.name === name);
+    if (!preset) {
+      setStatus('请选择一个预设再导出', 'warn');
+      return;
+    }
+    const payload = {
+      _type: 'StoryGuide_StructuredPreset',
+      _version: '1.0',
+      _exportedAt: new Date().toISOString(),
+      name: preset.name,
+      snapshot: preset.snapshot
+    };
+    downloadTextFile(`storyguide-structured-preset-${preset.name}.json`, JSON.stringify(payload, null, 2));
+    setStatus('预设已导出', 'ok');
+  });
+
+  $('#sg_structuredImportPreset').on('click', async () => {
+    const file = await pickFile('.json,application/json');
+    if (!file) return;
+    try {
+      const txt = await readFileText(file);
+      const data = JSON.parse(txt);
+      let preset = null;
+
+      if (data && data._type === 'StoryGuide_StructuredPreset') {
+        const name = normalizeStructuredPresetName(data.name || '未命名');
+        if (!name) return;
+        preset = { name, snapshot: data.snapshot || {} };
+      } else {
+        preset = resolveStructuredPresetFromSillyPreset(txt, file?.name || '对话预设');
+      }
+
+      if (!preset || !preset.name) {
+        setStatus('预设文件格式不正确', 'err');
+        return;
+      }
+
+      const list = getStructuredPresetList();
+      const idx = list.findIndex(p => p?.name === preset.name);
+      if (idx >= 0) list[idx] = preset;
+      else list.push(preset);
+      setStructuredPresetList(list);
+      const s = ensureSettings();
+      s.structuredPresetActive = preset.name;
+      saveSettings();
+      pullSettingsToUi();
+      setStatus('预设已导入', 'ok');
+    } catch (e) {
+      setStatus(`导入失败：${e?.message ?? e}`, 'err');
+    }
+  });
 
 
   // summary provider toggle
@@ -13539,7 +14421,7 @@ function ensureModal() {
     updateBlueIndexInfoLabel();
     updateSummaryManualRangeHint(false);
   });
-  $('#sg_summaryEnabled, #sg_summaryEvery, #sg_summaryCountMode, #sg_summaryTemperature, #sg_summarySystemPrompt, #sg_summaryUserTemplate, #sg_summaryReadStatData, #sg_summaryStatVarName, #sg_structuredEntriesEnabled, #sg_structuredWorldbookEnabled, #sg_structuredWorldbookMode, #sg_characterEntriesEnabled, #sg_equipmentEntriesEnabled, #sg_characterEntryPrefix, #sg_equipmentEntryPrefix, #sg_structuredEntriesSystemPrompt, #sg_structuredEntriesUserTemplate, #sg_structuredCharacterPrompt, #sg_structuredCharacterEntryTemplate, #sg_structuredEquipmentPrompt, #sg_structuredEquipmentEntryTemplate, #sg_summaryCustomEndpoint, #sg_summaryCustomApiKey, #sg_summaryCustomModel, #sg_summaryCustomMaxTokens, #sg_summaryCustomStream, #sg_summaryToWorldInfo, #sg_summaryWorldInfoFile, #sg_summaryWorldInfoCommentPrefix, #sg_summaryWorldInfoKeyMode, #sg_summaryIndexPrefix, #sg_summaryIndexPad, #sg_summaryIndexStart, #sg_summaryIndexInComment, #sg_summaryToBlueWorldInfo, #sg_summaryBlueWorldInfoFile, #sg_wiTriggerEnabled, #sg_wiTriggerLookbackMessages, #sg_wiTriggerIncludeUserMessage, #sg_wiTriggerUserMessageWeight, #sg_wiTriggerStartAfterAssistantMessages, #sg_wiTriggerMaxEntries, #sg_wiTriggerMaxCharacters, #sg_wiTriggerMaxEquipments, #sg_wiTriggerMaxPlot, #sg_wiTriggerMinScore, #sg_wiTriggerMaxKeywords, #sg_wiTriggerInjectStyle, #sg_wiTriggerDebugLog, #sg_wiBlueIndexMode, #sg_wiBlueIndexFile, #sg_summaryMaxChars, #sg_summaryMaxTotalChars, #sg_wiTriggerMatchMode, #sg_wiIndexPrefilterTopK, #sg_wiIndexProvider, #sg_wiIndexTemperature, #sg_wiIndexSystemPrompt, #sg_wiIndexUserTemplate, #sg_wiIndexCustomEndpoint, #sg_wiIndexCustomApiKey, #sg_wiIndexCustomModel, #sg_wiIndexCustomMaxTokens, #sg_wiIndexTopP, #sg_wiIndexCustomStream, #sg_wiRollEnabled, #sg_wiRollStatSource, #sg_wiRollStatVarName, #sg_wiRollRandomWeight, #sg_wiRollDifficulty, #sg_wiRollInjectStyle, #sg_wiRollDebugLog, #sg_wiRollStatParseMode, #sg_wiRollProvider, #sg_wiRollCustomEndpoint, #sg_wiRollCustomApiKey, #sg_wiRollCustomModel, #sg_wiRollCustomMaxTokens, #sg_wiRollCustomTopP, #sg_wiRollCustomTemperature, #sg_wiRollCustomStream, #sg_wiRollSystemPrompt, #sg_imageGenEnabled, #sg_novelaiApiKey, #sg_novelaiModel, #sg_novelaiResolution, #sg_novelaiSteps, #sg_novelaiScale, #sg_novelaiNegativePrompt, #sg_imageGenAutoSave, #sg_imageGenSavePath, #sg_imageGenLookbackMessages, #sg_imageGenReadStatData, #sg_imageGenStatVarName, #sg_imageGenCustomEndpoint, #sg_imageGenCustomApiKey, #sg_imageGenCustomModel, #sg_imageGenSystemPrompt, #sg_imageGalleryEnabled, #sg_imageGalleryUrl, #sg_imageGenWorldBookEnabled, #sg_imageGenWorldBookFile').on('change input', () => {
+  $('#sg_summaryEnabled, #sg_summaryEvery, #sg_summaryCountMode, #sg_summaryTemperature, #sg_summarySystemPrompt, #sg_summaryUserTemplate, #sg_summaryReadStatData, #sg_summaryStatVarName, #sg_summaryAutoRollback, #sg_structuredAutoRollback, #sg_structuredEntriesEnabled, #sg_structuredWorldbookEnabled, #sg_structuredWorldbookMode, #sg_characterEntriesEnabled, #sg_equipmentEntriesEnabled, #sg_characterEntryPrefix, #sg_equipmentEntryPrefix, #sg_structuredEntriesSystemPrompt, #sg_structuredEntriesUserTemplate, #sg_structuredCharacterPrompt, #sg_structuredCharacterEntryTemplate, #sg_structuredEquipmentPrompt, #sg_structuredEquipmentEntryTemplate, #sg_summaryCustomEndpoint, #sg_summaryCustomApiKey, #sg_summaryCustomModel, #sg_summaryCustomMaxTokens, #sg_summaryCustomStream, #sg_summaryToWorldInfo, #sg_summaryWorldInfoFile, #sg_summaryWorldInfoCommentPrefix, #sg_summaryWorldInfoKeyMode, #sg_summaryIndexPrefix, #sg_summaryIndexPad, #sg_summaryIndexStart, #sg_summaryIndexInComment, #sg_summaryToBlueWorldInfo, #sg_summaryBlueWorldInfoFile, #sg_wiTriggerEnabled, #sg_wiTriggerLookbackMessages, #sg_wiTriggerIncludeUserMessage, #sg_wiTriggerUserMessageWeight, #sg_wiTriggerStartAfterAssistantMessages, #sg_wiTriggerMaxEntries, #sg_wiTriggerMaxCharacters, #sg_wiTriggerMaxEquipments, #sg_wiTriggerMaxPlot, #sg_wiTriggerMinScore, #sg_wiTriggerMaxKeywords, #sg_wiTriggerInjectStyle, #sg_wiTriggerDebugLog, #sg_wiBlueIndexMode, #sg_wiBlueIndexFile, #sg_summaryMaxChars, #sg_summaryMaxTotalChars, #sg_wiTriggerMatchMode, #sg_wiIndexPrefilterTopK, #sg_wiIndexProvider, #sg_wiIndexTemperature, #sg_wiIndexSystemPrompt, #sg_wiIndexUserTemplate, #sg_wiIndexCustomEndpoint, #sg_wiIndexCustomApiKey, #sg_wiIndexCustomModel, #sg_wiIndexCustomMaxTokens, #sg_wiIndexTopP, #sg_wiIndexCustomStream, #sg_wiRollEnabled, #sg_wiRollStatSource, #sg_wiRollStatVarName, #sg_wiRollRandomWeight, #sg_wiRollDifficulty, #sg_wiRollInjectStyle, #sg_wiRollDebugLog, #sg_wiRollStatParseMode, #sg_wiRollProvider, #sg_wiRollCustomEndpoint, #sg_wiRollCustomApiKey, #sg_wiRollCustomModel, #sg_wiRollCustomMaxTokens, #sg_wiRollCustomTopP, #sg_wiRollCustomTemperature, #sg_wiRollCustomStream, #sg_wiRollSystemPrompt, #sg_imageGenEnabled, #sg_novelaiApiKey, #sg_novelaiModel, #sg_novelaiResolution, #sg_novelaiSteps, #sg_novelaiScale, #sg_novelaiNegativePrompt, #sg_imageGenAutoSave, #sg_imageGenSavePath, #sg_imageGenLookbackMessages, #sg_imageGenReadStatData, #sg_imageGenStatVarName, #sg_imageGenCustomEndpoint, #sg_imageGenCustomApiKey, #sg_imageGenCustomModel, #sg_imageGenSystemPrompt, #sg_imageGalleryEnabled, #sg_imageGalleryUrl, #sg_imageGenWorldBookEnabled, #sg_imageGenWorldBookFile').on('change input', () => {
     pullUiToSettings();
     saveSettings();
     updateSummaryInfoLabel();
@@ -14097,8 +14979,8 @@ function ensureModal() {
 
 function showSettingsPage(page) {
   const p = String(page || 'guide');
-  $('#sg_pgtab_guide, #sg_pgtab_summary, #sg_pgtab_index, #sg_pgtab_roll, #sg_pgtab_image, #sg_pgtab_character').removeClass('active');
-  $('#sg_page_guide, #sg_page_summary, #sg_page_index, #sg_page_roll, #sg_page_image, #sg_page_character').removeClass('active');
+  $('#sg_pgtab_guide, #sg_pgtab_summary, #sg_pgtab_index, #sg_pgtab_roll, #sg_pgtab_image, #sg_pgtab_sex, #sg_pgtab_character').removeClass('active');
+  $('#sg_page_guide, #sg_page_summary, #sg_page_index, #sg_page_roll, #sg_page_image, #sg_page_sex, #sg_page_character').removeClass('active');
 
   if (p === 'summary') {
     $('#sg_pgtab_summary').addClass('active');
@@ -14112,6 +14994,9 @@ function showSettingsPage(page) {
   } else if (p === 'image') {
     $('#sg_pgtab_image').addClass('active');
     $('#sg_page_image').addClass('active');
+  } else if (p === 'sex') {
+    $('#sg_pgtab_sex').addClass('active');
+    $('#sg_page_sex').addClass('active');
   } else if (p === 'character') {
     $('#sg_pgtab_character').addClass('active');
     $('#sg_page_character').addClass('active');
@@ -14143,8 +15028,10 @@ function setupSettingsPages() {
   $('#sg_pgtab_index').on('click', () => showSettingsPage('index'));
   $('#sg_pgtab_roll').on('click', () => showSettingsPage('roll'));
   $('#sg_pgtab_image').on('click', () => showSettingsPage('image'));
+  $('#sg_pgtab_sex').on('click', () => showSettingsPage('sex'));
   $('#sg_pgtab_character').on('click', () => showSettingsPage('character'));
 
+  try { setupSexGuidePage(); } catch (e) { console.error('[StoryGuide] setupSexGuidePage failed:', e); }
   setupCharacterPage();
 
   // quick jump
@@ -14308,6 +15195,236 @@ function setupCharacterPage() {
   });
 }
 
+function setupSexGuidePage() {
+  const autoSave = () => {
+    pullUiToSettings();
+    saveSettings();
+    renderSexGuideWorldbookList();
+    updateSexGuideWorldbookInfoLabel();
+  };
+
+  $('#sg_sex_provider').on('change', () => {
+    const provider = String($('#sg_sex_provider').val() || 'st');
+    $('#sg_sex_custom_block').toggle(provider === 'custom');
+    autoSave();
+  });
+
+  $('#sg_sexEnabled, #sg_sex_temperature, #sg_sexSystemPrompt, #sg_sexUserTemplate, #sg_sexUserNeed, #sg_sexIncludeUserInput, #sg_sexCustomEndpoint, #sg_sexCustomApiKey, #sg_sexCustomModel, #sg_sexCustomMaxTokens, #sg_sexCustomStream, #sg_sexWorldbookEnabled, #sg_sexWorldbookMaxChars')
+    .on('input change', autoSave);
+
+  $('#sg_sexModelSelect').on('change', () => {
+    const val = String($('#sg_sexModelSelect').val() || '').trim();
+    if (val) $('#sg_sexCustomModel').val(val);
+    autoSave();
+  });
+
+  $('#sg_sexRefreshModels').on('click', async () => {
+    autoSave();
+    await refreshSexGuideModels();
+  });
+
+  $('#sg_sexResetPrompt').on('click', () => {
+    $('#sg_sexSystemPrompt').val(DEFAULT_SEX_GUIDE_SYSTEM_PROMPT);
+    $('#sg_sexUserTemplate').val(DEFAULT_SEX_GUIDE_USER_TEMPLATE);
+    autoSave();
+    setSexGuideStatus('已恢复默认提示词', 'ok');
+  });
+
+  $('#sg_sexSavePreset').on('click', () => {
+    const name = normalizeSexGuidePresetName(prompt('预设名称？') || '');
+    if (!name) return;
+    const list = getSexGuidePresetList();
+    const snapshot = getSexGuidePresetSnapshot();
+    const idx = list.findIndex(p => p?.name === name);
+    if (idx >= 0) list[idx] = { name, snapshot };
+    else list.push({ name, snapshot });
+    setSexGuidePresetList(list);
+    const s = ensureSettings();
+    s.sexGuidePresetActive = name;
+    saveSettings();
+    pullSettingsToUi();
+    setSexGuideStatus('预设已保存', 'ok');
+  });
+
+  $('#sg_sexApplyPreset').on('click', () => {
+    const name = String($('#sg_sexPresetSelect').val() || '').trim();
+    if (!name) return;
+    const list = getSexGuidePresetList();
+    const preset = list.find(p => p?.name === name);
+    if (!preset) return;
+    applySexGuidePresetSnapshot(preset.snapshot);
+    const s = ensureSettings();
+    s.sexGuidePresetActive = name;
+    saveSettings();
+    setSexGuideStatus('预设已应用', 'ok');
+  });
+
+  $('#sg_sexDeletePreset').on('click', () => {
+    const name = String($('#sg_sexPresetSelect').val() || '').trim();
+    if (!name) return;
+    const list = getSexGuidePresetList().filter(p => p?.name !== name);
+    setSexGuidePresetList(list);
+    const s = ensureSettings();
+    if (s.sexGuidePresetActive === name) s.sexGuidePresetActive = '';
+    saveSettings();
+    pullSettingsToUi();
+    setSexGuideStatus('预设已删除', 'ok');
+  });
+
+  $('#sg_sexExportPreset').on('click', () => {
+    const name = String($('#sg_sexPresetSelect').val() || '').trim();
+    const list = getSexGuidePresetList();
+    const preset = list.find(p => p?.name === name);
+    if (!preset) {
+      setSexGuideStatus('请选择一个预设再导出', 'warn');
+      return;
+    }
+    const payload = {
+      _type: 'StoryGuide_SexGuidePreset',
+      _version: '1.0',
+      _exportedAt: new Date().toISOString(),
+      name: preset.name,
+      snapshot: preset.snapshot
+    };
+    downloadTextFile(`storyguide-sexguide-preset-${preset.name}.json`, JSON.stringify(payload, null, 2));
+    setSexGuideStatus('预设已导出', 'ok');
+  });
+
+  $('#sg_sexImportPreset').on('click', async () => {
+    const file = await pickFile('.json,application/json');
+    if (!file) return;
+    try {
+      const txt = await readFileText(file);
+      const data = JSON.parse(txt);
+      let preset = null;
+
+      if (data && data._type === 'StoryGuide_SexGuidePreset') {
+        const name = normalizeSexGuidePresetName(data.name || '未命名');
+        if (!name) return;
+        preset = { name, snapshot: data.snapshot || {} };
+      } else {
+        preset = resolveSexGuidePresetFromSillyPreset(txt, file?.name || '对话预设');
+      }
+
+      if (!preset || !preset.name) {
+        setSexGuideStatus('预设文件格式不正确', 'err');
+        return;
+      }
+
+      const list = getSexGuidePresetList();
+      const idx = list.findIndex(p => p?.name === preset.name);
+      if (idx >= 0) list[idx] = preset;
+      else list.push(preset);
+      setSexGuidePresetList(list);
+      const s = ensureSettings();
+      s.sexGuidePresetActive = preset.name;
+      saveSettings();
+      pullSettingsToUi();
+      setSexGuideStatus('预设已导入', 'ok');
+    } catch (e) {
+      setSexGuideStatus(`导入失败：${e?.message ?? e}`, 'err');
+    }
+  });
+
+  $('#sg_sex_generate').on('click', async () => {
+    autoSave();
+    await runSexGuide();
+  });
+
+  $('#sg_sex_panel_generate').on('click', async () => {
+    const need = String($('#sg_sex_panel_need').val() || '').trim();
+    await runSexGuide({ userNeedOverride: need });
+  });
+
+  $('#sg_sex_panel_send').on('click', () => {
+    const text = String($('#sg_sex_panel_output').val() || '').trim();
+    if (!text) { setSexGuidePanelStatus('暂无可发送内容', 'warn'); return; }
+    const ok = injectToUserInput(text);
+    setSexGuidePanelStatus(ok ? '已填入输入框（未发送）' : '未找到聊天输入框', ok ? 'ok' : 'err');
+  });
+
+  $('#sg_sex_copy').on('click', async () => {
+    const text = String($('#sg_sex_output').val() || '').trim();
+    if (!text) { setSexGuideStatus('暂无可复制内容', 'warn'); return; }
+    try {
+      await navigator.clipboard.writeText(text);
+      setSexGuideStatus('已复制到剪贴板', 'ok');
+    } catch (e) {
+      setSexGuideStatus(`复制失败：${e?.message ?? e}`, 'err');
+    }
+  });
+
+  $('#sg_sex_insert').on('click', () => {
+    const text = String($('#sg_sex_output').val() || '').trim();
+    if (!text) { setSexGuideStatus('暂无可插入内容', 'warn'); return; }
+    const ok = injectToUserInput(text);
+    setSexGuideStatus(ok ? '已插入输入框（未发送）' : '未找到聊天输入框', ok ? 'ok' : 'err');
+  });
+
+  $('#sg_sexWorldbookImport').on('click', () => $('#sg_sexWorldbookImportFile').trigger('click'));
+
+  $('#sg_sexWorldbookImportFile').on('change', async (e) => {
+    const files = Array.from(e.target?.files || []);
+    if (!files.length) return;
+    const list = getSexGuideWorldbooks();
+    const existingNames = new Set(list.map(w => w.name));
+    let added = 0;
+
+    for (const file of files) {
+      try {
+        const text = await file.text();
+        const entries = parseWorldbookJson(text);
+        if (!entries.length) {
+          setSexGuideStatus(`导入失败：${file.name}（未解析到条目）`, 'warn');
+          continue;
+        }
+        let name = file.name || `世界书${list.length + 1}`;
+        if (existingNames.has(name)) {
+          let i = 2;
+          while (existingNames.has(`${name} (${i})`)) i += 1;
+          name = `${name} (${i})`;
+        }
+        existingNames.add(name);
+        list.push({ id: `sexwb_${Date.now()}_${added}`, name, json: text, enabled: true });
+        added += 1;
+      } catch (err) {
+        console.warn('[StoryGuide] sex worldbook import failed:', err);
+      }
+    }
+
+    setSexGuideWorldbooks(list);
+    renderSexGuideWorldbookList();
+    updateSexGuideWorldbookInfoLabel();
+    if (added) setSexGuideStatus(`已导入世界书：${added} 本`, 'ok');
+
+    // reset file input
+    e.target.value = '';
+  });
+
+  $('#sg_sexWorldbookClear').on('click', () => {
+    setSexGuideWorldbooks([]);
+    setSexGuideStatus('已清空世界书', 'ok');
+  });
+
+  $(document).on('change', '#sg_sexWorldbookList .sg-sex-wb-enabled', (ev) => {
+    const $item = $(ev.target).closest('.sg-wb-item');
+    const id = String($item.data('id') || '');
+    const list = getSexGuideWorldbooks();
+    const wb = list.find(w => w.id === id);
+    if (wb) {
+      wb.enabled = $(ev.target).is(':checked');
+      setSexGuideWorldbooks(list);
+    }
+  });
+
+  $(document).on('click', '#sg_sexWorldbookList .sg-sex-wb-remove', (ev) => {
+    const $item = $(ev.target).closest('.sg-wb-item');
+    const id = String($item.data('id') || '');
+    const list = getSexGuideWorldbooks().filter(w => w.id !== id);
+    setSexGuideWorldbooks(list);
+  });
+}
+
 function pullSettingsToUi() {
   const s = ensureSettings();
 
@@ -14373,6 +15490,64 @@ function pullSettingsToUi() {
   }
 
   $('#sg_custom_block').toggle(s.provider === 'custom');
+
+  // sex guide
+  try {
+    $('#sg_sexEnabled').prop('checked', !!s.sexGuideEnabled);
+    $('#sg_sex_provider').val(String(s.sexGuideProvider || 'st'));
+    $('#sg_sex_temperature').val(s.sexGuideTemperature ?? 0.6);
+    $('#sg_sexSystemPrompt').val(String(s.sexGuideSystemPrompt || DEFAULT_SEX_GUIDE_SYSTEM_PROMPT));
+    $('#sg_sexUserTemplate').val(String(s.sexGuideUserTemplate || DEFAULT_SEX_GUIDE_USER_TEMPLATE));
+    $('#sg_sexUserNeed').val(String(s.sexGuideUserNeed || ''));
+    $('#sg_sexIncludeUserInput').prop('checked', s.sexGuideIncludeUserInput !== false);
+    $('#sg_sexCustomEndpoint').val(String(s.sexGuideCustomEndpoint || ''));
+    $('#sg_sexCustomApiKey').val(String(s.sexGuideCustomApiKey || ''));
+    $('#sg_sexCustomModel').val(String(s.sexGuideCustomModel || 'gpt-4o-mini'));
+    $('#sg_sexCustomMaxTokens').val(s.sexGuideCustomMaxTokens || 2048);
+    $('#sg_sexCustomStream').prop('checked', !!s.sexGuideCustomStream);
+    $('#sg_sexWorldbookEnabled').prop('checked', !!s.sexGuideWorldbookEnabled);
+    $('#sg_sexWorldbookMaxChars').val(s.sexGuideWorldbookMaxChars || 6000);
+    $('#sg_sex_custom_block').toggle(String(s.sexGuideProvider || 'st') === 'custom');
+    fillSexGuideModelSelect(Array.isArray(s.sexGuideCustomModelsCache) ? s.sexGuideCustomModelsCache : [], s.sexGuideCustomModel);
+    // sex guide presets
+    const $sexPresetSelect = $('#sg_sexPresetSelect');
+    const sexPresets = getSexGuidePresetList();
+    if ($sexPresetSelect.length) {
+      $sexPresetSelect.empty();
+      $sexPresetSelect.append('<option value="">(选择预设)</option>');
+      sexPresets.forEach(p => {
+        if (!p || !p.name) return;
+        const opt = document.createElement('option');
+        opt.value = p.name;
+        opt.textContent = p.name;
+        $sexPresetSelect.append(opt);
+      });
+      if (s.sexGuidePresetActive) $sexPresetSelect.val(s.sexGuidePresetActive);
+    }
+    // structured presets
+    const $structuredPresetSelect = $('#sg_structuredPresetSelect');
+    const structuredPresets = getStructuredPresetList();
+    if ($structuredPresetSelect.length) {
+      $structuredPresetSelect.empty();
+      $structuredPresetSelect.append('<option value="">(选择预设)</option>');
+      structuredPresets.forEach(p => {
+        if (!p || !p.name) return;
+        const opt = document.createElement('option');
+        opt.value = p.name;
+        opt.textContent = p.name;
+        $structuredPresetSelect.append(opt);
+      });
+      if (s.structuredPresetActive) $structuredPresetSelect.val(s.structuredPresetActive);
+    }
+    renderSexGuideWorldbookList();
+    updateSexGuideWorldbookInfoLabel();
+    $('#sg_sex_output').val(lastSexGuideText || '');
+    $('#sg_sex_copy, #sg_sex_insert').prop('disabled', !lastSexGuideText);
+    $('#sg_sex_panel_output').val(lastSexGuideText || '');
+    $('#sg_sex_panel_send').prop('disabled', !lastSexGuideText);
+  } catch (e) {
+    console.error('[StoryGuide] sex guide UI sync failed:', e);
+  }
 
   // summary
   $('#sg_summaryEnabled').prop('checked', !!s.summaryEnabled);
@@ -14838,6 +16013,58 @@ function updateWorldbookInfoLabel() {
   }
 }
 
+function renderSexGuideWorldbookList() {
+  const $list = $('#sg_sexWorldbookList');
+  if (!$list.length) return;
+  const list = getSexGuideWorldbooks();
+  const stats = computeSexGuideWorldbookInjection();
+
+  if (!list.length) {
+    $list.html('<div class="sg-hint">(未导入世界书)</div>');
+    return;
+  }
+
+  const rows = list.map((wb) => {
+    const stat = stats.perBookStats?.find(s => s.id === wb.id);
+    const entries = stat?.entries ?? 0;
+    const tokens = stat?.tokens ?? 0;
+    const injected = stat?.injectedEntries ?? 0;
+    return `
+      <div class="sg-wb-item" data-id="${wb.id}">
+        <label class="sg-check"><input type="checkbox" class="sg-sex-wb-enabled" ${wb.enabled ? 'checked' : ''}>启用</label>
+        <div class="sg-wb-meta">
+          <div class="sg-wb-name">${escapeHtml(wb.name)}</div>
+          <div class="sg-wb-sub">条目：${entries} ｜ tokens：${tokens} ｜ 本次注入：${injected}</div>
+        </div>
+        <button class="menu_button sg-btn sg-sex-wb-remove">移除</button>
+      </div>
+    `;
+  }).join('');
+
+  $list.html(rows);
+}
+
+function updateSexGuideWorldbookInfoLabel() {
+  const $info = $('#sg_sexWorldbookInfo');
+  if (!$info.length) return;
+  const s = ensureSettings();
+  const stats = computeSexGuideWorldbookInjection();
+  const enabledNames = getSexGuideWorldbooks().filter(w => w.enabled).map(w => w.name);
+
+  if (!stats.totalWorldbooks) {
+    $info.text('(未导入世界书)');
+    return;
+  }
+
+  if (!s.sexGuideWorldbookEnabled) {
+    $info.text(`已导入世界书：${stats.totalWorldbooks} 本（未启用注入）`);
+    return;
+  }
+
+  const dirs = enabledNames.length ? enabledNames.join(' / ') : '无';
+  $info.text(`读取目录：${dirs} ｜ 条目：${stats.injectedEntries}/${stats.importedEntries} ｜ tokens：${stats.injectedTokens}`);
+}
+
 function formatSummaryMetaHint(meta) {
   const last = Number(meta?.lastFloor || 0);
   const count = Array.isArray(meta?.history) ? meta.history.length : 0;
@@ -14984,6 +16211,22 @@ function pullUiToSettings() {
   s.worldbookMode = String($('#sg_worldbookMode').val() || 'active');
   s.worldbookMaxChars = clampInt($('#sg_worldbookMaxChars').val(), 500, 50000, s.worldbookMaxChars || 6000);
   s.worldbookWindowMessages = clampInt($('#sg_worldbookWindowMessages').val(), 5, 80, s.worldbookWindowMessages || 18);
+
+  // sex guide
+  s.sexGuideEnabled = $('#sg_sexEnabled').is(':checked');
+  s.sexGuideProvider = String($('#sg_sex_provider').val() || 'st');
+  s.sexGuideTemperature = clampFloat($('#sg_sex_temperature').val(), 0, 2, s.sexGuideTemperature ?? 0.6);
+  s.sexGuideSystemPrompt = String($('#sg_sexSystemPrompt').val() || '').trim() || DEFAULT_SEX_GUIDE_SYSTEM_PROMPT;
+  s.sexGuideUserTemplate = String($('#sg_sexUserTemplate').val() || '').trim() || DEFAULT_SEX_GUIDE_USER_TEMPLATE;
+  s.sexGuideUserNeed = String($('#sg_sexUserNeed').val() || '').trim();
+  s.sexGuideIncludeUserInput = $('#sg_sexIncludeUserInput').is(':checked');
+  s.sexGuideCustomEndpoint = String($('#sg_sexCustomEndpoint').val() || '').trim();
+  s.sexGuideCustomApiKey = String($('#sg_sexCustomApiKey').val() || '');
+  s.sexGuideCustomModel = String($('#sg_sexCustomModel').val() || '').trim() || 'gpt-4o-mini';
+  s.sexGuideCustomMaxTokens = clampInt($('#sg_sexCustomMaxTokens').val(), 256, 200000, s.sexGuideCustomMaxTokens || 2048);
+  s.sexGuideCustomStream = $('#sg_sexCustomStream').is(':checked');
+  s.sexGuideWorldbookEnabled = $('#sg_sexWorldbookEnabled').is(':checked');
+  s.sexGuideWorldbookMaxChars = clampInt($('#sg_sexWorldbookMaxChars').val(), 500, 200000, s.sexGuideWorldbookMaxChars || 6000);
 
   // summary
   s.summaryEnabled = $('#sg_summaryEnabled').is(':checked');
@@ -15345,9 +16588,8 @@ function setupEventListeners() {
     eventSource.on(event_types.MESSAGE_RECEIVED, () => {
       // 禁止自动生成：不在收到消息时自动分析/追加
       scheduleReapplyAll('msg_received');
-      // 自动总结（独立功能）
-      scheduleAutoSummary('msg_received');
-      scheduleAutoStructuredEntries('msg_received');
+      // 回复生成结束后再触发总结/结构化
+      schedulePostGenerationAuto('msg_received');
     });
 
     eventSource.on(event_types.MESSAGE_SENT, () => {
@@ -15356,8 +16598,8 @@ function setupEventListeners() {
       maybeInjectRollResult('msg_sent').catch(() => void 0);
       // 蓝灯索引 → 绿灯触发（尽量在生成前完成）
       maybeInjectWorldInfoTriggers('msg_sent').catch(() => void 0);
-      scheduleAutoSummary('msg_sent');
-      scheduleAutoStructuredEntries('msg_sent');
+      // 记录生成活动，最终在回复完成后触发
+      schedulePostGenerationAuto('msg_sent');
     });
 
     eventSource.on(event_types.MESSAGE_DELETED, async (data) => {
@@ -15550,6 +16792,8 @@ function createFloatingPanel() {
           <button class="sg-floating-action-btn" id="sg_floating_show_report" title="查看分析">📖</button>
           <button class="sg-floating-action-btn" id="sg_floating_show_map" title="查看地图">🗺️</button>
           <button class="sg-floating-action-btn" id="sg_floating_show_image" title="图像生成">🖼️</button>
+          <button class="sg-floating-action-btn" id="sg_floating_show_sex" title="性爱指导">❤️</button>
+          <button class="sg-floating-action-btn" id="sg_floating_structured" title="手动结构化条目总结">🧩</button>
           <button class="sg-floating-action-btn" id="sg_floating_roll_logs" title="ROLL日志">🎲</button>
           <button class="sg-floating-action-btn" id="sg_floating_settings" title="打开设置">⚙️</button>
           <button class="sg-floating-action-btn" id="sg_floating_close" title="关闭">✕</button>
@@ -15598,12 +16842,59 @@ function createFloatingPanel() {
     showFloatingImageGen();
   });
 
+  $('#sg_floating_show_sex').on('click', () => {
+    showFloatingSexGuide();
+  });
+
+  $('#sg_floating_structured').on('click', async () => {
+    const s = ensureSettings();
+    if (!s.structuredEntriesEnabled) {
+      setStatus('结构化条目未启用', 'warn');
+      showToast('结构化条目未启用', { kind: 'warn', spinner: false, sticky: false, duration: 2000 });
+      return;
+    }
+    if (!s.summaryToWorldInfo && !s.summaryToBlueWorldInfo) {
+      setStatus('未启用写入世界书', 'warn');
+      showToast('请先启用“写入世界书”（绿灯或蓝灯）', { kind: 'warn', spinner: false, sticky: false, duration: 2200 });
+      return;
+    }
+    const $btn = $('#sg_floating_structured');
+    $btn.prop('disabled', true);
+    try {
+      await runStructuredEntries({ reason: 'manual' });
+    } finally {
+      $btn.prop('disabled', false);
+    }
+  });
+
 
   // Delegate inner refresh click
   $(document).on('click', '.sg-inner-refresh-btn', async (e) => {
     // Only handle if inside our panel
     if (!$(e.target).closest('#sg_floating_panel').length) return;
     await refreshFloatingPanelContent();
+  });
+
+  $(document).on('click', '.sg-inner-structured-btn', async (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    const s = ensureSettings();
+    if (!s.structuredEntriesEnabled) {
+      setStatus('结构化条目未启用', 'warn');
+      showToast('结构化条目未启用', { kind: 'warn', spinner: false, sticky: false, duration: 2000 });
+      return;
+    }
+    if (!s.summaryToWorldInfo && !s.summaryToBlueWorldInfo) {
+      setStatus('未启用写入世界书', 'warn');
+      showToast('请先启用“写入世界书”（绿灯或蓝灯）', { kind: 'warn', spinner: false, sticky: false, duration: 2200 });
+      return;
+    }
+    const $btn = $(e.currentTarget);
+    $btn.prop('disabled', true);
+    try {
+      await runStructuredEntries({ reason: 'manual' });
+    } finally {
+      $btn.prop('disabled', false);
+    }
   });
 
   $(document).on('click', '.sg-inner-map-reset-btn', async (e) => {
@@ -15654,6 +16945,63 @@ function createFloatingPanel() {
       imageGenBatchBusy = false;
       renderImageGenBatchPreview();
     }
+  });
+
+  // Floating sex guide actions
+  $(document).on('click', '#sg_floating_sex_generate', async (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    let need = String($('#sg_floating_sex_need').val() || '').trim();
+    const bdsmMode = String($('#sg_floating_sex_bdsm_mode').val() || 'default');
+    const poseMode = String($('#sg_floating_sex_pose_mode').val() || 'default');
+    const ejaculateMode = String($('#sg_floating_sex_ejaculate').val() || 'default');
+    const outfitMode = String($('#sg_floating_sex_outfit_random').val() || 'default');
+    let bdsmCustom = '';
+    let poseCustom = '';
+    let outfitCustom = '';
+    if (bdsmMode === 'custom') bdsmCustom = String(prompt('BDSM (\u81ea\u5b9a\u4e49):') || '').trim();
+    if (poseMode === 'custom') poseCustom = String(prompt('\u4f53\u4f4d (\u81ea\u5b9a\u4e49):') || '').trim();
+    if (outfitMode === 'custom') outfitCustom = String(prompt('\u670d\u88c5 (\u81ea\u5b9a\u4e49):') || '').trim();
+    const extras = [];
+    if (bdsmMode === 'none') extras.push('BDSM: \u4e0d\u4f7f\u7528');
+    if (bdsmMode === 'random') extras.push('BDSM: \u968f\u673a');
+    if (bdsmMode === 'custom' && bdsmCustom) extras.push(`BDSM: ${bdsmCustom}`);
+    if (poseMode === 'random') extras.push('\u4f53\u4f4d: \u968f\u673a');
+    if (poseMode === 'custom' && poseCustom) extras.push(`\u4f53\u4f4d: ${poseCustom}`);
+    if (ejaculateMode === 'yes') extras.push('\u5c04\u7cbe: \u662f');
+    if (ejaculateMode === 'no') extras.push('\u5c04\u7cbe: \u5426');
+    if (ejaculateMode === 'random') extras.push('\u5c04\u7cbe: \u968f\u673a');
+    if (outfitMode === 'yes') extras.push('\u670d\u88c5: \u662f');
+    if (outfitMode === 'no') extras.push('\u670d\u88c5: \u5426');
+    if (outfitMode === 'random') extras.push('\u670d\u88c5: \u968f\u673a');
+    if (outfitMode === 'custom' && outfitCustom) extras.push(`\u670d\u88c5: ${outfitCustom}`);
+    if (extras.length) {
+      const extraText = extras.join('; ');
+      need = need ? `${need}
+${extraText}` : extraText;
+    }
+    $('#sg_floating_sex_generate').prop('disabled', true);
+    $('#sg_floating_sex_status').text('\u6b63\u5728\u751f\u6210...');
+    try {
+      await runSexGuide({ userNeedOverride: need });
+      $('#sg_floating_sex_output').val(lastSexGuideText || '');
+      $('#sg_floating_sex_send').prop('disabled', !lastSexGuideText);
+      $('#sg_floating_sex_status').text('\u751f\u6210\u5b8c\u6210');
+    } catch (err) {
+      $('#sg_floating_sex_status').text(`\u751f\u6210\u5931\u8d25: ${err?.message ?? err}`);
+    } finally {
+      $('#sg_floating_sex_generate').prop('disabled', false);
+    }
+  });
+
+$(document).on('click', '#sg_floating_sex_send', (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    const text = String($('#sg_floating_sex_output').val() || '').trim();
+    if (!text) {
+      $('#sg_floating_sex_status').text('暂无可发送内容');
+      return;
+    }
+    const ok = injectToUserInput(text);
+    $('#sg_floating_sex_status').text(ok ? '已填入输入框（未发送）' : '未找到聊天输入框');
   });
 
   $(document).on('click', '#sg_imagegen_clear', (e) => {
@@ -16058,7 +17406,7 @@ async function refreshFloatingPanelContent() {
     const optionsHtml = renderDynamicQuickActionsHtml(quickActions, 'panel');
 
     const refreshBtnHtml = `
-      <div style="padding:2px 8px; border-bottom:1px solid rgba(128,128,128,0.2); margin-bottom:4px; text-align:right;">
+      <div style="padding:2px 8px; border-bottom:1px solid rgba(128,128,128,0.2); margin-bottom:4px; text-align:right; display:flex; gap:6px; justify-content:flex-end;">
         <button class="sg-inner-refresh-btn" title="重新生成分析" style="background:none; border:none; cursor:pointer; font-size:1.1em; opacity:0.8;">🔄</button>
       </div>
     `;
@@ -16187,6 +17535,66 @@ function showFloatingReport() {
   }
 }
 
+function showFloatingSexGuide() {
+  const $body = $('#sg_floating_body');
+  if (!$body.length) return;
+  const s = ensureSettings();
+  if (!s.sexGuideEnabled) {
+    $body.html('<div class="sg-floating-loading">性爱指导未启用</div>');
+    return;
+  }
+
+  const html = `
+    <div style="padding:10px; overflow:auto; max-height:100%; box-sizing:border-box;">
+      <div style="font-weight:700; margin-bottom:8px;">\u6027\u7231\u6307\u5bfc</div>
+      <div class="sg-field" style="margin-top:6px;">
+        <label>\u7528\u6237\u9700\u6c42</label>
+        <textarea id="sg_floating_sex_need" rows="3" placeholder="\u4f8b\u5982\uff1a\u66f4\u6e29\u67d4 / \u66f4\u4e3b\u52a8 / \u66f4\u6162\u8282\u594f / \u5f3a\u8c03\u6c9f\u901a\u4e0e\u5b89\u5168"></textarea>
+      </div>
+      <div class="sg-row sg-inline" style="margin-top:6px; gap:8px; flex-wrap:wrap;">
+        <label style="margin-right:4px;">BDSM</label>
+        <select id="sg_floating_sex_bdsm_mode" style="min-width:90px;">
+          <option value="default">\u9ed8\u8ba4</option>
+          <option value="none">\u4e0d\u4f7f\u7528</option>
+          <option value="random">\u968f\u673a</option>
+          <option value="custom">\u81ea\u5b9a\u4e49</option>
+        </select>
+        <label style="margin-right:4px;">\u4f53\u4f4d</label>
+        <select id="sg_floating_sex_pose_mode" style="min-width:90px;">
+          <option value="default">\u9ed8\u8ba4</option>
+          <option value="random">\u968f\u673a</option>
+          <option value="custom">\u81ea\u5b9a\u4e49</option>
+        </select>
+        <label style="margin-right:4px;">\u5c04\u7cbe</label>
+        <select id="sg_floating_sex_ejaculate" style="min-width:80px;">
+          <option value="default">\u9ed8\u8ba4</option>
+          <option value="yes">\u662f</option>
+          <option value="no">\u5426</option>
+          <option value="random">\u968f\u673a</option>
+        </select>
+        <label style="margin-right:4px;">\u670d\u88c5</label>
+        <select id="sg_floating_sex_outfit_random" style="min-width:90px;">
+          <option value="default">\u9ed8\u8ba4</option>
+          <option value="yes">\u662f</option>
+          <option value="no">\u5426</option>
+          <option value="random">\u968f\u673a</option>
+          <option value="custom">\u81ea\u5b9a\u4e49</option>
+        </select>
+      </div>
+      <div class="sg-actions-row" style="justify-content:flex-end;">
+        <button class="menu_button sg-btn" id="sg_floating_sex_generate">\u751f\u6210</button>
+        <button class="menu_button sg-btn" id="sg_floating_sex_send" ${lastSexGuideText ? '' : 'disabled'}>\u53d1\u9001\u5230\u804a\u5929</button>
+      </div>
+      <div class="sg-field" style="margin-top:8px;">
+        <label>\u8f93\u51fa</label>
+        <textarea id="sg_floating_sex_output" rows="10" spellcheck="false">${escapeHtml(lastSexGuideText || '')}</textarea>
+        <div class="sg-hint" id="sg_floating_sex_status">\u00b7 \u751f\u6210\u540e\u53ef\u53d1\u9001\u5230\u804a\u5929 \u00b7</div>
+      </div>
+    </div>
+  `
+  $body.html(html);
+}
+
 // -------------------- init --------------------
 
 // -------------------- fixed input button --------------------
@@ -16311,6 +17719,7 @@ function init() {
     open: openModal,
     close: closeModal,
     runAnalysis,
+    runSexGuide,
     runSummary,
     runInlineAppendForLastMessage,
     reapplyAllInlineBoxes,
