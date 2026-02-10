@@ -871,6 +871,9 @@ let structuredTimer = null;
 let isSummarizing = false;
 let isStructuring = false;
 let summaryCancelled = false;
+let summaryAbortController = null;
+let structuredCancelled = false;
+let structuredAbortController = null;
 let sgToastTimer = null;
 
 // 图像生成批次状态（悬浮面板）
@@ -4131,10 +4134,18 @@ function buildSexGuidePromptMessages(snapshotText, worldbookText, settings, opti
 
 // -------------------- provider=st --------------------
 
-async function callViaSillyTavern(messages, schema, temperature) {
+async function callViaSillyTavern(messages, schema, temperature, signal) {
   const ctx = SillyTavern.getContext();
-  if (typeof ctx.generateRaw === 'function') return await ctx.generateRaw({ prompt: messages, jsonSchema: schema, temperature });
-  if (typeof ctx.generateQuietPrompt === 'function') return await ctx.generateQuietPrompt({ messages, jsonSchema: schema, temperature });
+  const optsRaw = { prompt: messages, jsonSchema: schema, temperature };
+  const optsQuiet = { messages, jsonSchema: schema, temperature };
+  if (signal) {
+    optsRaw.signal = signal;
+    optsRaw.abortSignal = signal;
+    optsQuiet.signal = signal;
+    optsQuiet.abortSignal = signal;
+  }
+  if (typeof ctx.generateRaw === 'function') return await ctx.generateRaw(optsRaw);
+  if (typeof ctx.generateQuietPrompt === 'function') return await ctx.generateQuietPrompt(optsQuiet);
   if (globalThis.TavernHelper && typeof globalThis.TavernHelper.generateRaw === 'function') {
     const txt = await globalThis.TavernHelper.generateRaw({ ordered_prompts: messages, should_stream: false });
     return String(txt || '');
@@ -4151,10 +4162,10 @@ async function fallbackAskJson(messages, temperature) {
   throw new Error('fallback 失败：缺少 generateRaw/generateQuietPrompt');
 }
 
-async function fallbackAskJsonCustom(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP, stream) {
+async function fallbackAskJsonCustom(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP, stream, signal) {
   const retry = clone(messages);
   retry.unshift({ role: 'system', content: `再次强调：只输出 JSON 对象本体，不要任何额外文字，不要代码块。` });
-  return await callViaCustom(apiBaseUrl, apiKey, model, retry, temperature, maxTokens, topP, stream);
+  return await callViaCustom(apiBaseUrl, apiKey, model, retry, temperature, maxTokens, topP, stream, signal);
 }
 
 function hasAnyModuleKey(obj, modules) {
@@ -4282,7 +4293,7 @@ async function readStreamedChatCompletionToText(res) {
   return out;
 }
 
-async function callViaCustomBackendProxy(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP, stream) {
+async function callViaCustomBackendProxy(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP, stream, signal) {
   const url = '/api/backends/chat-completions/generate';
 
   const requestBody = {
@@ -4299,7 +4310,7 @@ async function callViaCustomBackendProxy(apiBaseUrl, apiKey, model, messages, te
   };
 
   const headers = { ...getStRequestHeadersCompat(), 'Content-Type': 'application/json' };
-  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(requestBody) });
+  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(requestBody), signal });
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -4330,7 +4341,7 @@ async function callViaCustomBackendProxy(apiBaseUrl, apiKey, model, messages, te
   return JSON.stringify(data ?? '');
 }
 
-async function callViaCustomBrowserDirect(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP, stream) {
+async function callViaCustomBrowserDirect(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP, stream, signal) {
   const endpoint = deriveChatCompletionsUrl(apiBaseUrl);
   if (!endpoint) throw new Error('custom 模式：API基础URL 为空');
 
@@ -4345,7 +4356,7 @@ async function callViaCustomBrowserDirect(apiBaseUrl, apiKey, model, messages, t
   const headers = { 'Content-Type': 'application/json' };
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
-  const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) });
+  const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body), signal });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`直连请求失败: HTTP ${res.status} ${res.statusText}\n${text}`);
@@ -4361,17 +4372,17 @@ async function callViaCustomBrowserDirect(apiBaseUrl, apiKey, model, messages, t
   return String(json?.choices?.[0]?.message?.content ?? '');
 }
 
-async function callViaCustom(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP, stream) {
+async function callViaCustom(apiBaseUrl, apiKey, model, messages, temperature, maxTokens, topP, stream, signal) {
   const base = normalizeBaseUrl(apiBaseUrl);
   if (!base) throw new Error('custom 模式需要填写 API基础URL');
 
   try {
-    return await callViaCustomBackendProxy(base, apiKey, model, messages, temperature, maxTokens, topP, stream);
+    return await callViaCustomBackendProxy(base, apiKey, model, messages, temperature, maxTokens, topP, stream, signal);
   } catch (e) {
     const status = e?.status;
     if (status === 404 || status === 405) {
       console.warn('[StoryGuide] backend proxy unavailable; fallback to browser direct');
-      return await callViaCustomBrowserDirect(base, apiKey, model, messages, temperature, maxTokens, topP, stream);
+        return await callViaCustomBrowserDirect(base, apiKey, model, messages, temperature, maxTokens, topP, stream, signal);
     }
     throw e;
   }
@@ -5717,20 +5728,31 @@ async function buildStructuredEntriesPromptMessages(chunkText, fromFloor, toFloo
 async function generateStructuredEntries(chunkText, fromFloor, toFloor, meta, settings, statData = null) {
   const messages = await buildStructuredEntriesPromptMessages(chunkText, fromFloor, toFloor, meta, statData);
   let jsonText = '';
-  if (String(settings.summaryProvider || 'st') === 'custom') {
-    jsonText = await callViaCustom(settings.summaryCustomEndpoint, settings.summaryCustomApiKey, settings.summaryCustomModel, messages, settings.summaryTemperature, settings.summaryCustomMaxTokens, 0.95, settings.summaryCustomStream);
-    if (!String(jsonText || '').trim()) {
-      try {
-        jsonText = await fallbackAskJsonCustom(settings.summaryCustomEndpoint, settings.summaryCustomApiKey, settings.summaryCustomModel, messages, settings.summaryTemperature, settings.summaryCustomMaxTokens, 0.95, settings.summaryCustomStream);
-      } catch { /* ignore */ }
+  structuredAbortController = new AbortController();
+  const structuredSignal = structuredAbortController.signal;
+  try {
+    if (String(settings.summaryProvider || 'st') === 'custom') {
+      jsonText = await callViaCustom(settings.summaryCustomEndpoint, settings.summaryCustomApiKey, settings.summaryCustomModel, messages, settings.summaryTemperature, settings.summaryCustomMaxTokens, 0.95, settings.summaryCustomStream, structuredSignal);
+      if (!String(jsonText || '').trim()) {
+        try {
+          jsonText = await fallbackAskJsonCustom(settings.summaryCustomEndpoint, settings.summaryCustomApiKey, settings.summaryCustomModel, messages, settings.summaryTemperature, settings.summaryCustomMaxTokens, 0.95, settings.summaryCustomStream, structuredSignal);
+        } catch { /* ignore */ }
+      }
+    } else {
+      jsonText = await callViaSillyTavern(messages, null, settings.summaryTemperature, structuredSignal);
+      if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
+      if (!String(jsonText || '').trim()) {
+        try { jsonText = await fallbackAskJson(messages, settings.summaryTemperature); } catch { /* ignore */ }
+      }
     }
-  } else {
-    jsonText = await callViaSillyTavern(messages, null, settings.summaryTemperature);
-    if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
-    if (!String(jsonText || '').trim()) {
-      try { jsonText = await fallbackAskJson(messages, settings.summaryTemperature); } catch { /* ignore */ }
-    }
+  } catch (e) {
+    if (structuredCancelled || isAbortError(e)) return null;
+    throw e;
+  } finally {
+    structuredAbortController = null;
   }
+
+  if (structuredCancelled) return null;
   const parsed = safeJsonParse(jsonText);
   if (!parsed) {
     console.warn('[StoryGuide] structured entries parse failed (empty or invalid JSON).');
@@ -7799,8 +7821,31 @@ async function handleAutoRollbackOnDeletion(data) {
 function stopSummary() {
   if (isSummarizing) {
     summaryCancelled = true;
+    if (summaryAbortController) {
+      try { summaryAbortController.abort(); } catch { /* ignore */ }
+    }
+    try {
+      const ctx = SillyTavern.getContext?.();
+      if (typeof ctx?.abortGeneration === 'function') ctx.abortGeneration();
+      else if (typeof ctx?.stopGeneration === 'function') ctx.stopGeneration();
+      else if (typeof globalThis.abortGeneration === 'function') globalThis.abortGeneration();
+      else if (typeof globalThis.stopGeneration === 'function') globalThis.stopGeneration();
+    } catch { /* ignore */ }
     console.log('[StoryGuide] Summary stop requested');
   }
+  if (isStructuring) {
+    structuredCancelled = true;
+    if (structuredAbortController) {
+      try { structuredAbortController.abort(); } catch { /* ignore */ }
+    }
+    console.log('[StoryGuide] Structured stop requested');
+  }
+}
+
+function isAbortError(err) {
+  const name = err?.name || err?.code || '';
+  const msg = String(err?.message || '');
+  return name === 'AbortError' || name === 'ERR_ABORTED' || /aborted|abort/i.test(msg);
 }
 
 async function runSummary({ reason = 'manual', manualFromFloor = null, manualToFloor = null, manualSplit = null } = {}) {
@@ -7874,11 +7919,12 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
     const affectsProgress = (reason !== 'manual_range');
     const keyMode = String(s.summaryWorldInfoKeyMode || 'keywords');
 
-    let created = 0;
-    let wroteGreenOk = 0;
-    let wroteBlueOk = 0;
-    const writeErrs = [];
-    const runErrs = [];
+      let created = 0;
+      let wroteGreenOk = 0;
+      let wroteBlueOk = 0;
+      const writeErrs = [];
+      const runErrs = [];
+      let cancelledEarly = false;
 
     // 读取 stat_data（如果启用）
     let summaryStatData = null;
@@ -7904,13 +7950,14 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
       }
     }
 
-    for (let i = 0; i < segments.length; i++) {
-      // 检查是否被取消
-      if (summaryCancelled) {
-        setStatus('总结已取消', 'warn');
-        showToast('总结已取消', { kind: 'warn', spinner: false, sticky: false, duration: 2000 });
-        break;
-      }
+      for (let i = 0; i < segments.length; i++) {
+        // 检查是否被取消
+        if (summaryCancelled) {
+          setStatus('总结已取消', 'warn');
+          showToast('总结已取消', { kind: 'warn', spinner: false, sticky: false, duration: 2000 });
+          cancelledEarly = true;
+          break;
+        }
 
       const seg = segments[i];
       const startIdx = seg.startIdx;
@@ -7927,23 +7974,44 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
         continue;
       }
 
-      const messages = buildSummaryPromptMessages(chunkText, fromFloor, toFloor, summaryStatData);
-      const schema = getSummarySchema();
+        const messages = buildSummaryPromptMessages(chunkText, fromFloor, toFloor, summaryStatData);
+        const schema = getSummarySchema();
 
-      let jsonText = '';
-      if (String(s.summaryProvider || 'st') === 'custom') {
-        jsonText = await callViaCustom(s.summaryCustomEndpoint, s.summaryCustomApiKey, s.summaryCustomModel, messages, s.summaryTemperature, s.summaryCustomMaxTokens, 0.95, s.summaryCustomStream);
-        const parsedTry = safeJsonParse(jsonText);
-        if (!parsedTry || !parsedTry.summary) {
-          try { jsonText = await fallbackAskJsonCustom(s.summaryCustomEndpoint, s.summaryCustomApiKey, s.summaryCustomModel, messages, s.summaryTemperature, s.summaryCustomMaxTokens, 0.95, s.summaryCustomStream); }
-          catch { /* ignore */ }
+        let jsonText = '';
+        summaryAbortController = new AbortController();
+        const summarySignal = summaryAbortController.signal;
+        try {
+          if (String(s.summaryProvider || 'st') === 'custom') {
+            jsonText = await callViaCustom(s.summaryCustomEndpoint, s.summaryCustomApiKey, s.summaryCustomModel, messages, s.summaryTemperature, s.summaryCustomMaxTokens, 0.95, s.summaryCustomStream, summarySignal);
+            const parsedTry = safeJsonParse(jsonText);
+            if (!parsedTry || !parsedTry.summary) {
+              try { jsonText = await fallbackAskJsonCustom(s.summaryCustomEndpoint, s.summaryCustomApiKey, s.summaryCustomModel, messages, s.summaryTemperature, s.summaryCustomMaxTokens, 0.95, s.summaryCustomStream, summarySignal); }
+              catch { /* ignore */ }
+            }
+          } else {
+            jsonText = await callViaSillyTavern(messages, schema, s.summaryTemperature, summarySignal);
+            if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
+            const parsedTry = safeJsonParse(jsonText);
+            if (!parsedTry || !parsedTry.summary) jsonText = await fallbackAskJson(messages, s.summaryTemperature);
+          }
+        } catch (e) {
+          if (summaryCancelled || isAbortError(e)) {
+            setStatus('总结已取消', 'warn');
+            showToast('总结已取消', { kind: 'warn', spinner: false, sticky: false, duration: 2000 });
+            cancelledEarly = true;
+            break;
+          }
+          throw e;
+        } finally {
+          summaryAbortController = null;
         }
-      } else {
-        jsonText = await callViaSillyTavern(messages, schema, s.summaryTemperature);
-        if (typeof jsonText !== 'string') jsonText = JSON.stringify(jsonText ?? '');
-        const parsedTry = safeJsonParse(jsonText);
-        if (!parsedTry || !parsedTry.summary) jsonText = await fallbackAskJson(messages, s.summaryTemperature);
-      }
+
+        if (summaryCancelled) {
+          setStatus('总结已取消', 'warn');
+          showToast('总结已取消', { kind: 'warn', spinner: false, sticky: false, duration: 2000 });
+          cancelledEarly = true;
+          break;
+        }
 
       const parsed = safeJsonParse(jsonText);
       if (!parsed || !parsed.summary) {
@@ -8110,7 +8178,8 @@ async function runSummary({ reason = 'manual', manualFromFloor = null, manualToF
     }
 
     // final status
-    if (totalSeg > 1) {
+      if (cancelledEarly) return;
+      if (totalSeg > 1) {
       const parts = [`生成 ${created} 条`];
       if (s.summaryToWorldInfo || s.summaryToBlueWorldInfo) {
         const wrote = [];
@@ -8260,6 +8329,7 @@ async function runStructuredEntries({ reason = 'auto' } = {}) {
   if (isStructuring) return 0;
 
   isStructuring = true;
+  structuredCancelled = false;
   setStatus('正在生成结构化条目…', 'warn');
   showToast('正在生成结构化条目…', { kind: 'warn', spinner: true, sticky: true });
   try {
@@ -8296,13 +8366,20 @@ async function runStructuredEntries({ reason = 'auto' } = {}) {
       }
     }
 
-    let processed = 0;
-    for (const seg of segments) {
-      const chunkText = buildSummaryChunkTextRange(chat, seg.startIdx, seg.endIdx, s.summaryMaxCharsPerMessage, s.summaryMaxTotalChars, true, true);
-      if (!chunkText) continue;
-      const structuredChanges = [];
-      const ok = await processStructuredEntriesChunk(chunkText, seg.fromFloor, seg.toFloor, meta, s, summaryStatData, structuredChanges);
-      if (ok && structuredChanges.length) {
+      let processed = 0;
+      let cancelledEarly = false;
+      for (const seg of segments) {
+        if (structuredCancelled) {
+          setStatus('结构化总结已取消', 'warn');
+          showToast('结构化总结已取消', { kind: 'warn', spinner: false, sticky: false, duration: 2000 });
+          cancelledEarly = true;
+          break;
+        }
+        const chunkText = buildSummaryChunkTextRange(chat, seg.startIdx, seg.endIdx, s.summaryMaxCharsPerMessage, s.summaryMaxTotalChars, true, true);
+        if (!chunkText) continue;
+        const structuredChanges = [];
+        const ok = await processStructuredEntriesChunk(chunkText, seg.fromFloor, seg.toFloor, meta, s, summaryStatData, structuredChanges);
+        if (ok && structuredChanges.length) {
         appendStructuredHistory(meta, {
           createdAt: Date.now(),
           range: { fromFloor: seg.fromFloor, toFloor: seg.toFloor, fromIdx: seg.startIdx, toIdx: seg.endIdx },
@@ -8310,13 +8387,14 @@ async function runStructuredEntries({ reason = 'auto' } = {}) {
           affectsProgress: true,
         });
       }
-      if (ok) processed += 1;
-    }
+        if (ok) processed += 1;
+      }
 
-    if (processed > 0) {
-      const lastSeg = segments[segments.length - 1];
-      meta.lastStructuredFloor = lastSeg.toFloor;
-      meta.lastStructuredChatLen = chat.length;
+      if (cancelledEarly) return 0;
+      if (processed > 0) {
+        const lastSeg = segments[segments.length - 1];
+        meta.lastStructuredFloor = lastSeg.toFloor;
+        meta.lastStructuredChatLen = chat.length;
       await setSummaryMeta(meta);
     }
 
