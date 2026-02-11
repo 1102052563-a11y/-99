@@ -302,6 +302,75 @@ const DEFAULT_STRUCTURED_CONQUEST_ENTRY_TEMPLATE = `【猎艳录】{{name}}
 数值信息：{{statInfo}}
 {{extraFields}}`;
 const DEFAULT_STRUCTURED_CONQUEST_PROMPT = `记录主角征服/攻略的女性角色。说明身份背景、初遇情境、征服过程、征服时间、当前关系状态、特殊技巧/喜好、身体特征。若关系破裂/角色离开，将其名字加入 deletedConquests。若有 statData，精简总结其数值。`;
+
+// ===== 平行世界（NPC离屏模拟）默认提示词 =====
+const DEFAULT_PARALLEL_WORLD_SYSTEM_PROMPT = `你是一个"平行世界模拟器"，负责推演主角视角之外的NPC离屏活动以及势力/组织的动态变化。
+
+【核心任务】
+1. 为每个被追踪的NPC生成 1~3 件离屏事件（在主角不在场时发生的事）
+2. 为每个被追踪的势力/组织生成 1~2 件势力事件（势力扩张、冲突、联盟、资源变动等）
+3. 事件必须符合角色/势力的特点和当前处境
+4. NPC之间、势力之间可以产生互动（合作、冲突、交易、对话等）
+5. 推进世界时钟，反映时间流逝
+
+【推演原则】
+- NPC有自己的生活和目标，不应始终围绕主角
+- 势力有自己的议程和内部动态
+- 事件应有合理的因果关系，不能凭空出现
+- 重大变化应循序渐进
+- 保持世界的内在一致性
+
+【事件类型参考】
+NPC: 日常活动、目标推进、意外遭遇、关系变化、情绪/状态变化
+势力: 领地扩张/收缩、资源采集/消耗、内部政治变动、外交结盟/对立、战争/冲突、经济活动
+
+【输出要求】
+- 只输出严格 JSON，不要 Markdown 代码块
+- 每个NPC/势力的事件应简洁但有意义（每件事 1~2 句话）
+- impact 说明此事件的具体影响`;
+
+const DEFAULT_PARALLEL_WORLD_USER_TEMPLATE = `【世界时钟】{{worldTime}}
+
+【最近剧情上下文】
+{{recentContext}}
+
+【被追踪的NPC档案】
+{{npcProfiles}}
+
+【被追踪的势力/组织】
+{{factionProfiles}}
+
+请为以上每个NPC和势力推演离屏事件，推进世界时钟。`;
+
+const PARALLEL_WORLD_JSON_REQUIREMENT = `输出要求：
+- 只输出严格 JSON，不要 Markdown、不要代码块、不要任何多余文字。
+- JSON 结构必须为：
+{
+  "worldTime": "更新后的世界时间（如：第3天 傍晚）",
+  "npcUpdates": [
+    {
+      "name": "NPC名称",
+      "location": "当前位置",
+      "mood": "当前情绪/状态",
+      "currentGoal": "当前目标",
+      "events": [
+        { "time": "事件时间", "event": "事件描述", "impact": "对NPC的影响" }
+      ]
+    }
+  ],
+  "factionUpdates": [
+    {
+      "name": "势力/组织名称",
+      "events": [
+        { "time": "事件时间", "event": "事件描述", "impact": "对势力的影响" }
+      ]
+    }
+  ]
+}
+- npcUpdates 数组中每个 NPC 对应一个对象，events 为 1~3 件离屏事件。
+- factionUpdates 数组中每个势力对应一个对象，events 为 1~2 件势力事件。
+- 如果没有被追踪的势力，factionUpdates 可为空数组。`;
+
 const STRUCTURED_ENTRIES_JSON_REQUIREMENT = `输出要求：只输出严格 JSON。
 对于【已知条目】（已出现在已知列表中）：你只需要输出有变化或新增的字段，未变内容无需输出。对于【新条目】：必须输出完整字段。
 statInfo 只填关键数值的精简总结（1-2行）。人物条目请使用 sixStats/skillsTalents 等字段，不输出 statInfo。
@@ -848,6 +917,31 @@ const DEFAULT_SETTINGS = Object.freeze({
   characterContractId: '',
   characterAttributes: { con: 0, int: 0, cha: 0, str: 0, agi: 0, luk: 0 },
 
+  // ===== 平行世界（NPC离屏模拟） =====
+  parallelWorldEnabled: false,
+  parallelWorldAutoTrigger: false,
+  parallelWorldAutoEvery: 5,
+  parallelWorldProvider: 'st',
+  parallelWorldTemperature: 0.7,
+  parallelWorldCustomEndpoint: '',
+  parallelWorldCustomApiKey: '',
+  parallelWorldCustomModel: 'gpt-4o-mini',
+  parallelWorldCustomModelsCache: [],
+  parallelWorldCustomMaxTokens: 4096,
+  parallelWorldCustomTopP: 0.95,
+  parallelWorldCustomStream: false,
+  parallelWorldSystemPrompt: DEFAULT_PARALLEL_WORLD_SYSTEM_PROMPT,
+  parallelWorldUserTemplate: DEFAULT_PARALLEL_WORLD_USER_TEMPLATE,
+  parallelWorldTrackedNpcs: [],
+  parallelWorldTrackedFactions: [],
+  parallelWorldClock: '第1天',
+  parallelWorldWriteToWorldbook: true,
+  parallelWorldInjectContext: true,
+  parallelWorldMaxEventsPerNpc: 10,
+  parallelWorldReadFloors: 5,
+  parallelWorldPresetList: '[]',
+  parallelWorldPresetActive: '',
+
 });
 
 const META_KEYS = Object.freeze({
@@ -856,6 +950,7 @@ const META_KEYS = Object.freeze({
   summaryMeta: 'storyguide_summary_meta',
   staticModulesCache: 'storyguide_static_modules_cache',
   mapData: 'storyguide_map_data',
+  parallelWorldData: 'storyguide_parallel_world_data',
 });
 
 const SG_SUMMARY_WI_FILE_KEY = 'storyguide_summary_worldinfo_file_v1';
@@ -1810,6 +1905,1020 @@ function getMapData() {
 
 async function setMapData(mapData) {
   await setChatMetaValue(META_KEYS.mapData, JSON.stringify(mapData ?? getDefaultMapData()));
+}
+
+// ===== 平行世界（NPC离屏模拟）核心函数 =====
+
+function getDefaultParallelWorldData() {
+  return {
+    worldClock: '第1天',
+    trackedNpcs: [],   // [{ name, enabled }]
+    eventLog: [],      // [{ npcName, time, event, impact, simRunId }]
+    lastRunFloor: 0,
+    runCount: 0,
+  };
+}
+
+function getParallelWorldData() {
+  const raw = String(getChatMetaValue(META_KEYS.parallelWorldData) || '').trim();
+  if (!raw) return getDefaultParallelWorldData();
+  try {
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== 'object') return getDefaultParallelWorldData();
+    return {
+      ...getDefaultParallelWorldData(),
+      ...data,
+      trackedNpcs: Array.isArray(data.trackedNpcs) ? data.trackedNpcs : [],
+      eventLog: Array.isArray(data.eventLog) ? data.eventLog : [],
+    };
+  } catch {
+    return getDefaultParallelWorldData();
+  }
+}
+
+async function setParallelWorldData(data) {
+  await setChatMetaValue(META_KEYS.parallelWorldData, JSON.stringify(data ?? getDefaultParallelWorldData()));
+}
+
+function setParallelWorldStatus(text, kind = '') {
+  const $el = $('#sg_parallelWorldStatus');
+  if (!$el.length) return;
+  $el.text(text || '');
+  $el.attr('class', 'sg-status' + (kind ? ` sg-status-${kind}` : ''));
+}
+
+/**
+ * 收集被追踪NPC的档案信息（从结构化条目缓存中获取）
+ */
+/**
+ * 通用：从蓝灯世界书中按 prefix 提取条目（去重）。
+ * 如果蓝灯读取失败或为空，回退到 meta[metaFallbackKey]。
+ * @param {string} prefix  条目前缀，如 "人物" "势力"
+ * @param {string} metaFallbackKey  meta 中的回退 key，如 "characterEntries" "factionEntries"
+ * @param {string} label  日志标签，如 "角色" "势力"
+ */
+async function collectBlueWorldbookEntriesByPrefix(prefix, metaFallbackKey, label) {
+  const file = pickBlueIndexFileName();
+  const cleanPrefix = prefix.replace(/\[[^\]]*\]\s*/g, '').trim();
+  console.log(`[StoryGuide][平行世界] 蓝灯世界书查找${label}: 文件="${file}", 前缀="${cleanPrefix}"`);
+
+  if (file) {
+    try {
+      const json = await fetchWorldInfoFileJsonCompat(file);
+      const entries = parseWorldbookJson(JSON.stringify(json || {}));
+      const resultMap = {};
+
+      for (const e of entries) {
+        let comment = String(e.comment || e.title || '').trim();
+        const cleanComment = comment.replace(/\[[^\]]*\]\s*/g, '').trim();
+        if (!cleanComment.startsWith(cleanPrefix)) continue;
+
+        const parts = comment.split(/[｜|]/);
+        const namePart = (parts.length >= 2 ? parts[1] : comment.replace(prefix, '')).replace(/^[-_：:\s]+/, '').trim();
+
+        const content = String(e.content || '');
+        let parsed = null;
+        const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)```/);
+        if (jsonBlockMatch) { try { parsed = JSON.parse(jsonBlockMatch[1]); } catch { } }
+        if (!parsed) { try { parsed = JSON.parse(content); } catch { } }
+        if (!parsed) {
+          const braceMatch = content.match(/\{[\s\S]*\}/);
+          if (braceMatch) { try { parsed = JSON.parse(braceMatch[0]); } catch { } }
+        }
+
+        const finalName = (parsed?.name ? String(parsed.name).trim() : namePart) || namePart;
+        if (finalName && !resultMap[finalName]) {
+          const entry = parsed || { name: finalName };
+          entry._rawContent = content;
+          resultMap[finalName] = entry;
+        }
+      }
+
+      if (Object.keys(resultMap).length > 0) {
+        console.log(`[StoryGuide][平行世界] 从蓝灯世界书提取 ${Object.keys(resultMap).length} 个${label}`);
+        return resultMap;
+      }
+      console.warn(`[StoryGuide][平行世界] 蓝灯世界书未找到${label}条目，回退 meta`);
+    } catch (e) {
+      console.warn(`[StoryGuide][平行世界] 读取蓝灯${label}失败:`, e);
+    }
+  }
+
+  // 回退: 从 meta 读取
+  const meta = getSummaryMeta();
+  const fallback = meta[metaFallbackKey] || {};
+  const resultMap = {};
+  for (const [k, ce] of Object.entries(fallback)) {
+    const name = String(ce.name || '').trim();
+    if (name && !resultMap[name]) {
+      resultMap[name] = ce;
+    }
+  }
+  console.log(`[StoryGuide][平行世界] 回退 meta: ${Object.keys(resultMap).length} 个${label}`);
+  return resultMap;
+}
+
+/** 角色条目快捷方法 */
+async function collectBlueWorldbookCharacterEntries() {
+  const s = ensureSettings();
+  return collectBlueWorldbookEntriesByPrefix(
+    String(s.characterEntryPrefix || '人物').trim(),
+    'characterEntries', '角色'
+  );
+}
+
+/** 势力条目快捷方法 */
+async function collectBlueWorldbookFactionEntries() {
+  const s = ensureSettings();
+  return collectBlueWorldbookEntriesByPrefix(
+    String(s.factionEntryPrefix || '势力').trim(),
+    'factionEntries', '势力'
+  );
+}
+
+function collectTrackedNpcProfiles(trackedNpcs, pwData) {
+  // 使用上层传入的蓝灯角色缓存（如果有），否则回退到 meta
+  const charEntries = pwData._blueCharEntries || getSummaryMeta().characterEntries || {};
+  const profiles = [];
+
+  for (const tn of trackedNpcs) {
+    if (!tn.enabled) continue;
+    const name = String(tn.name || '').trim();
+    if (!name) continue;
+
+    // 在角色缓存中查找
+    let found = charEntries[name] || null;
+    if (!found) {
+      for (const [k, ce] of Object.entries(charEntries)) {
+        const ceName = String(ce.name || '').trim();
+        const ceAliases = Array.isArray(ce.aliases) ? ce.aliases : [];
+        if (ceName === name || ceAliases.some(a => String(a).trim() === name)) {
+          found = ce;
+          break;
+        }
+      }
+    }
+
+    // 构建档案文本：优先使用世界书条目的原始内容
+    let profile = `【${name}】\n`;
+    if (found && found._rawContent) {
+      // 直接使用蓝灯世界书中的条目内容
+      profile += found._rawContent + '\n';
+    } else if (found) {
+      if (found.personality) profile += `性格: ${found.personality}\n`;
+      if (found.corePersonality) profile += `核心性格: ${found.corePersonality}\n`;
+      if (found.motivation) profile += `动机: ${found.motivation}\n`;
+      if (found.faction) profile += `阵营: ${found.faction}\n`;
+      if (found.status) profile += `状态: ${found.status}\n`;
+      if (found.relationToProtagonist) profile += `与主角关系: ${found.relationToProtagonist}\n`;
+      if (found.relationshipStage) profile += `关系阶段: ${found.relationshipStage}\n`;
+      if (found.background) profile += `背景: ${found.background}\n`;
+    } else {
+      profile += `(无详细档案)\n`;
+    }
+
+    // 附加最近的离屏事件
+    const recentEvents = (pwData.eventLog || []).filter(e => e.npcName === name).slice(-3);
+    if (recentEvents.length > 0) {
+      profile += `最近离屏事件:\n`;
+      for (const ev of recentEvents) {
+        profile += `  - [${ev.time}] ${ev.event}${ev.impact ? ` (影响: ${ev.impact})` : ''}\n`;
+      }
+    }
+
+    profiles.push(profile);
+  }
+  return profiles.join('\n');
+}
+
+/**
+ * 收集势力/组织的档案信息，用于平行世界推演
+ */
+function collectFactionProfiles(factionEntries, pwData) {
+  if (!factionEntries || Object.keys(factionEntries).length === 0) return '(无势力/组织数据)';
+
+  const profiles = [];
+  for (const [name, entry] of Object.entries(factionEntries)) {
+    let profile = `【势力: ${name}】\n`;
+    if (entry._rawContent) {
+      profile += entry._rawContent + '\n';
+    } else {
+      if (entry.description) profile += `描述: ${entry.description}\n`;
+      if (entry.leader) profile += `领袖: ${entry.leader}\n`;
+      if (entry.territory) profile += `领地: ${entry.territory}\n`;
+      if (entry.status) profile += `状态: ${entry.status}\n`;
+      if (entry.goal) profile += `目标: ${entry.goal}\n`;
+    }
+
+    // 附加最近的离屏事件
+    const recentEvents = (pwData.factionEventLog || []).filter(e => e.factionName === name).slice(-3);
+    if (recentEvents.length > 0) {
+      profile += `最近势力事件:\n`;
+      for (const ev of recentEvents) {
+        profile += `  - [${ev.time}] ${ev.event}${ev.impact ? ` (影响: ${ev.impact})` : ''}\n`;
+      }
+    }
+    profiles.push(profile);
+  }
+  return profiles.join('\n');
+}
+/**
+ * 从聊天记录中读取最近 N 楼的正文内容，用于平行世界推演
+ */
+function readRecentChatForParallelWorld(n = 5) {
+  const ctx = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : null;
+  const chat = Array.isArray(ctx?.chat) ? ctx.chat : [];
+  if (chat.length === 0) return '(无可用正文)';
+
+  const floors = Math.max(1, Math.min(50, n));
+  const picked = [];
+  for (let i = chat.length - 1; i >= 0 && picked.length < floors; i--) {
+    const m = chat[i];
+    if (!m) continue;
+    const isUser = m.is_user === true;
+    const name = stripHtml(m.name || (isUser ? 'User' : 'Assistant'));
+    let text = stripHtml(m.mes ?? m.message ?? '');
+    if (!text) continue;
+    // 限制每条消息最大字符数
+    if (text.length > 4000) text = text.slice(0, 4000) + '…(截断)';
+    picked.push(`【${name}】${text}`);
+  }
+  picked.reverse();
+  if (picked.length === 0) return '(无可用正文)';
+  return picked.join('\n\n');
+}
+
+/**
+ * 从聊天文本中提取时间信息，用于更新世界时钟。
+ * 优先提取最接近末尾（最新）的时间描述。
+ */
+function extractTimeFromChat(chatText) {
+  if (!chatText || chatText === '(无可用正文)') return null;
+
+  // 常见时间模式（中文叙事常见格式）
+  const patterns = [
+    // "第X天" "第X日" "第X夜"
+    /第\s*[零一二三四五六七八九十百千万\d]+\s*[天日夜]/g,
+    // "X月X日" "X年X月"
+    /[\d一二三四五六七八九十]+\s*[月年]\s*[\d一二三四五六七八九十]*\s*[日号]?/g,
+    // 具体时间：上午/下午/清晨/黄昏/午夜/傍晚/正午/深夜/拂晓/黎明
+    /(?:清晨|拂晓|黎明|早晨|早上|上午|中午|正午|下午|傍晚|黄昏|日落|夜晚|深夜|午夜|凌晨|子时|丑时|寅时|卯时|辰时|巳时|午时|未时|申时|酉时|戌时|亥时)/g,
+    // "XX:XX" 时钟格式
+    /\d{1,2}:\d{2}/g,
+    // "X时" "X点"
+    /[\d一二三四五六七八九十]+\s*[时点](?:\s*[\d一二三四五六七八九十]+\s*分)?/g,
+  ];
+
+  let lastMatch = null;
+  let lastPos = -1;
+
+  for (const pat of patterns) {
+    let m;
+    while ((m = pat.exec(chatText)) !== null) {
+      if (m.index > lastPos) {
+        lastPos = m.index;
+        lastMatch = m[0].trim();
+      }
+    }
+  }
+
+  // 尝试组合：如果 "第X天" + 时间段 相邻，合并
+  if (lastMatch) {
+    // 在 lastMatch 附近也查找日期组合
+    const nearbyText = chatText.slice(Math.max(0, lastPos - 30), lastPos + lastMatch.length + 30);
+    const dayMatch = nearbyText.match(/第\s*[零一二三四五六七八九十百千万\d]+\s*[天日夜]/);
+    const timeMatch = nearbyText.match(/(?:清晨|拂晓|黎明|早晨|早上|上午|中午|正午|下午|傍晚|黄昏|日落|夜晚|深夜|午夜|凌晨)/);
+    if (dayMatch && timeMatch) {
+      return `${dayMatch[0]} ${timeMatch[0]}`;
+    }
+    return lastMatch;
+  }
+
+  return null;
+}
+
+/**
+ * 构建推演 prompt messages
+ */
+function buildParallelWorldPromptMessages(snapshotText, npcProfilesText, worldClock, factionProfilesText) {
+  const s = ensureSettings();
+  const sysTpl = String(s.parallelWorldSystemPrompt || DEFAULT_PARALLEL_WORLD_SYSTEM_PROMPT);
+  const usrTpl = String(s.parallelWorldUserTemplate || DEFAULT_PARALLEL_WORLD_USER_TEMPLATE);
+
+  const userContent = renderTemplate(usrTpl, {
+    worldTime: worldClock || '第1天',
+    recentContext: snapshotText || '(无可用上下文)',
+    npcProfiles: npcProfilesText || '(无NPC)',
+    factionProfiles: factionProfilesText || '(无势力/组织)',
+  });
+
+  return [
+    { role: 'system', content: sysTpl + '\n\n' + PARALLEL_WORLD_JSON_REQUIREMENT },
+    { role: 'user', content: userContent },
+  ];
+}
+
+/**
+ * 核心推演函数：调用 LLM 推演所有被追踪 NPC 的离屏事件
+ */
+async function runParallelWorldSimulation() {
+  const s = ensureSettings();
+  if (!s.parallelWorldEnabled) {
+    setParallelWorldStatus('平行世界未启用', 'warn');
+    return false;
+  }
+
+  const pwData = getParallelWorldData();
+
+  const trackedNpcs = (s.parallelWorldTrackedNpcs || []).filter(t => t.enabled);
+  const trackedFactions = (s.parallelWorldTrackedFactions || []).filter(t => t.enabled);
+
+  if (trackedNpcs.length === 0 && trackedFactions.length === 0) {
+    setParallelWorldStatus('没有被追踪的NPC或势力，请刷新列表并勾选', 'warn');
+    return false;
+  }
+
+  setParallelWorldStatus('正在推演离屏事件…', 'warn');
+  showToast('🌍 平行世界推演中…', { kind: 'info', spinner: true, sticky: true });
+
+  try {
+    // 1. 收集上下文（从蓝灯世界书读取角色+势力 + 最新正文）
+    const blueCharEntries = await collectBlueWorldbookCharacterEntries();
+    const blueFactionEntries = await collectBlueWorldbookFactionEntries();
+    pwData._blueCharEntries = blueCharEntries;
+    const readFloors = clampInt(s.parallelWorldReadFloors, 1, 50, 5);
+    const chatContext = readRecentChatForParallelWorld(readFloors);
+    const npcProfilesText = collectTrackedNpcProfiles(trackedNpcs, pwData);
+
+    // 过滤只处理被追踪的势力
+    const trackedFactionNames = new Set(trackedFactions.map(t => t.name));
+    const filteredFactionEntries = {};
+    for (const [k, v] of Object.entries(blueFactionEntries)) {
+      if (trackedFactionNames.has(k)) filteredFactionEntries[k] = v;
+    }
+    const factionProfilesText = collectFactionProfiles(filteredFactionEntries, pwData);
+    delete pwData._blueCharEntries;
+
+    // 世界时钟：从正文中提取时间
+    const extractedTime = extractTimeFromChat(chatContext);
+    if (extractedTime) {
+      pwData.worldClock = extractedTime;
+    }
+    const worldClock = pwData.worldClock || s.parallelWorldClock || '第1天';
+
+    // 2. 构建 prompt
+    const messages = buildParallelWorldPromptMessages(chatContext, npcProfilesText, worldClock, factionProfilesText);
+
+    // 3. 调用 LLM
+    let responseText;
+    if (s.parallelWorldProvider === 'custom') {
+      responseText = await callViaCustom(
+        s.parallelWorldCustomEndpoint,
+        s.parallelWorldCustomApiKey,
+        s.parallelWorldCustomModel,
+        messages,
+        s.parallelWorldTemperature,
+        s.parallelWorldCustomMaxTokens,
+        s.parallelWorldCustomTopP,
+        s.parallelWorldCustomStream
+      );
+    } else {
+      responseText = await callViaSillyTavern(messages, null, s.parallelWorldTemperature);
+    }
+
+    // 4. 解析结果
+    const parsed = safeJsonParse(responseText);
+    if (!parsed || !Array.isArray(parsed.npcUpdates)) {
+      setParallelWorldStatus('推演结果解析失败', 'err');
+      hideToast();
+      return false;
+    }
+
+    // 5. 处理结果：更新事件日志
+    const maxEvents = s.parallelWorldMaxEventsPerNpc || 10;
+    const simRunId = Date.now();
+
+    if (parsed.worldTime) {
+      pwData.worldClock = parsed.worldTime;
+    }
+
+    for (const npcUpdate of parsed.npcUpdates) {
+      const npcName = String(npcUpdate.name || '').trim();
+      if (!npcName) continue;
+
+      // 添加事件到日志
+      if (Array.isArray(npcUpdate.events)) {
+        for (const evt of npcUpdate.events) {
+          pwData.eventLog.push({
+            npcName,
+            time: String(evt.time || parsed.worldTime || ''),
+            event: String(evt.event || ''),
+            impact: String(evt.impact || ''),
+            simRunId,
+          });
+        }
+      }
+
+      // 按NPC修剪事件数
+      const npcEvents = pwData.eventLog.filter(e => e.npcName === npcName);
+      if (npcEvents.length > maxEvents) {
+        const excess = npcEvents.length - maxEvents;
+        let removed = 0;
+        pwData.eventLog = pwData.eventLog.filter(e => {
+          if (e.npcName === npcName && removed < excess) {
+            removed++;
+            return false;
+          }
+          return true;
+        });
+      }
+
+    }
+
+    // 5b. 处理势力事件
+    if (!pwData.factionEventLog) pwData.factionEventLog = [];
+    if (Array.isArray(parsed.factionUpdates)) {
+      for (const factionUpdate of parsed.factionUpdates) {
+        const factionName = String(factionUpdate.name || '').trim();
+        if (!factionName) continue;
+
+        if (Array.isArray(factionUpdate.events)) {
+          for (const evt of factionUpdate.events) {
+            pwData.factionEventLog.push({
+              factionName,
+              time: String(evt.time || parsed.worldTime || ''),
+              event: String(evt.event || ''),
+              impact: String(evt.impact || ''),
+              simRunId,
+            });
+          }
+        }
+
+        // 修剪势力事件数
+        const fEvents = pwData.factionEventLog.filter(e => e.factionName === factionName);
+        if (fEvents.length > maxEvents) {
+          const excess = fEvents.length - maxEvents;
+          let removed = 0;
+          pwData.factionEventLog = pwData.factionEventLog.filter(e => {
+            if (e.factionName === factionName && removed < excess) {
+              removed++;
+              return false;
+            }
+            return true;
+          });
+        }
+      }
+    }
+
+    // 6. 可选：写回世界书（创建/更新专用「平行事件」条目）
+    if (s.parallelWorldWriteToWorldbook) {
+      try {
+        await writeParallelEventsEntry(pwData, s);
+      } catch (e) {
+        console.warn('[StoryGuide] 平行世界: 写回平行事件条目失败:', e);
+      }
+    }
+
+    pwData.lastRunFloor = computeFloorCount(
+      (typeof SillyTavern !== 'undefined' && SillyTavern?.getContext?.()?.chat) || [],
+      'assistant'
+    );
+    pwData.runCount = (pwData.runCount || 0) + 1;
+
+    await setParallelWorldData(pwData);
+
+    // 更新 UI
+    renderParallelWorldEventLog(pwData);
+    updateParallelWorldClockDisplay(pwData.worldClock);
+
+    const totalNewEvents = parsed.npcUpdates.reduce((sum, u) => sum + (u.events?.length || 0), 0);
+    const totalFactionEvents = Array.isArray(parsed.factionUpdates) ? parsed.factionUpdates.reduce((sum, u) => sum + (u.events?.length || 0), 0) : 0;
+    const factionPart = totalFactionEvents > 0 ? `, ${parsed.factionUpdates.length} 个势力, ${totalFactionEvents} 件势力事件` : '';
+    setParallelWorldStatus(`✅ 推演完成：${parsed.npcUpdates.length} 个NPC, ${totalNewEvents} 件事件${factionPart}`, 'ok');
+    hideToast();
+    return true;
+
+  } catch (e) {
+    console.error('[StoryGuide] 平行世界推演失败:', e);
+    setParallelWorldStatus(`❌ 推演失败: ${e?.message || e}`, 'err');
+    hideToast();
+    return false;
+  }
+}
+
+/**
+ * 将推演结果写入专用「平行事件」世界书条目（同时写入蓝灯和绿灯）。
+ * 条目以所有被追踪NPC的名字为关键词,由索引模块负责触发与上下文注入。
+ */
+async function writeParallelEventsEntry(pwData, settings) {
+  const s = settings || ensureSettings();
+  const prefix = String(s.characterEntryPrefix || '人物').replace(/\[[^\]]*\]\s*/g, '').trim();
+  const trackedNpcs = (s.parallelWorldTrackedNpcs || []).filter(t => t.enabled);
+  const trackedFactions = (s.parallelWorldTrackedFactions || []).filter(t => t.enabled);
+
+  if (trackedNpcs.length === 0 && trackedFactions.length === 0) return;
+
+  const maxEvents = s.parallelWorldMaxEventsPerNpc || 10;
+  const eventLog = pwData.eventLog || [];
+  const factionEventLog = pwData.factionEventLog || [];
+
+  // Find latest run ID to overwrite content with only new events
+  const allEvents = [...eventLog, ...factionEventLog];
+  const lastRunId = allEvents.reduce((max, ev) => Math.max(max, ev.simRunId || 0), 0);
+
+  const worldClock = pwData.worldClock || s.parallelWorldClock || '第1天';
+
+  // 按 NPC 分组构建内容
+  const lines = [`[平行世界事件记录]`, `世界时间: ${worldClock}`, ''];
+  for (const tn of trackedNpcs) {
+    const name = String(tn.name || '').trim();
+    if (!name) continue;
+    // Only show events from the LATEST run
+    const npcEvents = eventLog.filter(e => e.npcName === name && e.simRunId === lastRunId);
+    if (npcEvents.length === 0) continue;
+    lines.push(`【${name}】`);
+    for (const ev of npcEvents) {
+      let line = `- [${ev.time}] ${ev.event}`;
+      if (ev.impact) line += ` (影响: ${ev.impact})`;
+      lines.push(line);
+    }
+    lines.push('');
+  }
+
+  // 按势力分组构建内容 (只包含最新一次推演的事件)
+  // const factionEventLog = ... (already declared at top)
+  const currentFactionEvents = factionEventLog.filter(e => e.simRunId === lastRunId);
+  const factionNames = new Set();
+
+  if (currentFactionEvents.length > 0) {
+    const factionGroups = {};
+    for (const fe of currentFactionEvents) {
+      const fn = fe.factionName;
+      if (!fn) continue;
+      if (!factionGroups[fn]) factionGroups[fn] = [];
+      factionGroups[fn].push(fe);
+      factionNames.add(fn);
+    }
+    for (const [fn, recent] of Object.entries(factionGroups)) {
+      lines.push(`【势力: ${fn}】`);
+      for (const ev of recent) {
+        let line = `- [${ev.time}] ${ev.event}`;
+        if (ev.impact) line += ` (影响: ${ev.impact})`;
+        lines.push(line);
+      }
+      lines.push('');
+    }
+  }
+
+  if (lines.length <= 3) return; // 无事件，不写入
+
+  const content = lines.join('\n');
+  // 关键词 = 所有被追踪NPC的名字 + 被追踪势力名字,以便索引模块能匹配触发
+  // 关键词只保留 "平行事件" + 唯一标识符 (用户要求)
+  const keywords = ['平行事件', '__SG_PARALLEL_WORLD_EVENT__'];
+
+  const entryComment = `[mvu_plot]平行事件`;
+  const meta = getSummaryMeta();
+
+  // 使用 writeOrUpdateStructuredEntry 写入蓝灯和绿灯
+  const entryData = {
+    name: '[mvu_plot]平行事件',
+    isUpdated: true,
+    isNew: false,
+  };
+
+  // 构建写入数据（直接使用底层 STscript 写入,不走角色条目流程）
+  const dualWriteSettings = { ...s, summaryToWorldInfo: true, summaryToBlueWorldInfo: true };
+
+  // 写绿灯
+  try {
+    const greenTarget = resolveGreenWorldInfoTarget(dualWriteSettings);
+    if (greenTarget.file) {
+      await writeWorldInfoEntryDirect({
+        file: greenTarget.file,
+        comment: entryComment,
+        content,
+        keys: keywords,
+        constant: 1,  // 绿灯改为常驻 (用户要求)
+        searchKey: '__SG_PARALLEL_WORLD_EVENT__',
+      });
+      console.log('[StoryGuide][平行世界] 平行事件条目已写入绿灯世界书');
+    }
+  } catch (e) {
+    console.warn('[StoryGuide][平行世界] 写入绿灯失败:', e);
+  }
+
+  // 写蓝灯
+  try {
+    const blueFile = normalizeWorldInfoFileName(dualWriteSettings.summaryBlueWorldInfoFile);
+    if (blueFile) {
+      await writeWorldInfoEntryDirect({
+        file: blueFile,
+        comment: entryComment,
+        content,
+        keys: keywords,
+        constant: 1,  // 蓝灯=常开
+        searchKey: '__SG_PARALLEL_WORLD_EVENT__',
+      });
+      console.log('[StoryGuide][平行世界] 平行事件条目已写入蓝灯世界书');
+    }
+  } catch (e) {
+    console.warn('[StoryGuide][平行世界] 写入蓝灯失败:', e);
+  }
+}
+
+/**
+ * 直接使用 STscript 写入/更新世界书条目（通用底层方法）
+ */
+async function writeWorldInfoEntryDirect({ file, comment, content, keys, constant = 0, searchKey }) {
+  if (!file || (!comment && !searchKey)) return;
+
+  const qFile = quoteSlashValue(file);
+  // SillyTavern might parse [bracket] as macro, so escape them in comment/title
+  const qComment = quoteSlashValue(comment ? comment.replace(/\[/g, '\\[').replace(/\]/g, '\\]') : '');
+  const qContent = quoteSlashValue(content.replace(/\|/g, '｜'));
+  const keyStr = Array.isArray(keys) ? keys.join(',') : String(keys || '');
+  const qKey = quoteSlashValue(keyStr);
+  const uidVar = '__sg_pw_uid';
+
+  let uid = null;
+
+  // 1. 优先尝试按 searchKey 查找 (更精准,避免同名覆盖)
+  if (searchKey) {
+    try {
+      const qSearchKey = quoteSlashValue(searchKey);
+      const findScriptKey = `/findentry file=${qFile} field=key ${qSearchKey} | /setvar key=${uidVar}`;
+      const findResultKey = await execSlash(findScriptKey);
+      uid = parseFindEntryUid(findResultKey);
+      if (uid) console.log(`[StoryGuide] Found entry by unique key: ${searchKey}, uid=${uid}`);
+    } catch { }
+  }
+
+  // 2. 如果没找到，再尝试按 comment 查找 (兼容旧数据)
+  if (!uid && comment) {
+    try {
+      const findScript = `/findentry file=${qFile} field=comment ${qComment} | /setvar key=${uidVar}`;
+      const findResult = await execSlash(findScript);
+      uid = parseFindEntryUid(findResult);
+    } catch { }
+  }
+
+  if (uid) {
+    // 已有条目 -> 更新内容和关键词
+    const updateParts = [
+      `/setentryfield file=${qFile} uid=${uid} field=content ${qContent}`,
+      `/setentryfield file=${qFile} uid=${uid} field=key ${qKey}`,
+      `/setentryfield file=${qFile} uid=${uid} field=comment ${qComment}`, // 确保标题也更新
+      `/setentryfield file=${qFile} uid=${uid} field=disable 0`,
+    ];
+    await execSlash(updateParts.join(' | '));
+    console.log(`[StoryGuide][平行世界] 已更新条目 uid=${uid} (file=${file})`);
+    return;
+  }
+
+  // 新建条目
+  const createParts = [
+    `/createentry file=${qFile} key=${qKey} ${qContent}`,
+    `/setvar key=${uidVar}`,
+  ];
+  await execSlash(createParts.join(' | '));
+
+  // 使用 {{getvar::}} 引用刚创建的 uid 来设置字段
+  const setupParts = [
+    `/setentryfield file=${qFile} uid={{getvar::${uidVar}}} field=comment ${qComment}`,
+    `/setentryfield file=${qFile} uid={{getvar::${uidVar}}} field=content ${qContent}`,
+    `/setentryfield file=${qFile} uid={{getvar::${uidVar}}} field=constant ${constant}`,
+    `/setentryfield file=${qFile} uid={{getvar::${uidVar}}} field=disable 0`,
+    `/flushvar ${uidVar}`,
+  ];
+  await execSlash(setupParts.join(' | '));
+  console.log(`[StoryGuide][平行世界] 新建条目 (file=${file})`);
+}
+
+/**
+ * 自动触发检查：判断是否应该自动推演
+ */
+async function maybeAutoRunParallelWorld() {
+  const s = ensureSettings();
+  if (!s.parallelWorldEnabled || !s.parallelWorldAutoTrigger) return;
+
+  const chat = (typeof SillyTavern !== 'undefined' && SillyTavern?.getContext?.()?.chat) || [];
+  const currentFloor = computeFloorCount(chat, 'assistant');
+  const pwData = getParallelWorldData();
+  const lastFloor = pwData.lastRunFloor || 0;
+  const every = Math.max(1, s.parallelWorldAutoEvery || 5);
+
+  if (currentFloor - lastFloor >= every) {
+    console.log(`[StoryGuide] 平行世界: 自动推演触发 (楼层 ${lastFloor} → ${currentFloor}, 间隔 ${every})`);
+    await runParallelWorldSimulation();
+  }
+}
+
+/**
+ * 构建平行世界上下文注入（注入到 AI 回复前的消息中）
+ */
+function buildParallelWorldContextInjection() {
+  const s = ensureSettings();
+  if (!s.parallelWorldEnabled || !s.parallelWorldInjectContext) return '';
+
+  const pwData = getParallelWorldData();
+  const tracked = (s.parallelWorldTrackedNpcs || []).filter(t => t.enabled);
+  if (tracked.length === 0) return '';
+
+  const parts = [];
+  for (const tn of tracked) {
+    const name = String(tn.name || '').trim();
+    if (!name) continue;
+
+    const recentEvents = (pwData.eventLog || [])
+      .filter(e => e.npcName === name)
+      .slice(-3);
+
+    if (recentEvents.length === 0) continue;
+
+    let npcInfo = `[${name}的近况]`;
+    for (const ev of recentEvents) {
+      npcInfo += ` ${ev.time}: ${ev.event}。`;
+    }
+    parts.push(npcInfo);
+  }
+
+  if (parts.length === 0) return '';
+  return `<!-- SG_PARALLEL_WORLD -->${parts.join(' ')}<!-- /SG_PARALLEL_WORLD -->`;
+}
+
+/**
+ * 渲染事件日志到UI
+ */
+function renderParallelWorldEventLog(pwDataOverride) {
+  const $container = $('#sg_pwEventLog');
+  if (!$container.length) return;
+
+  const pwData = pwDataOverride || getParallelWorldData();
+  const events = pwData.eventLog || [];
+  const factionEvents = pwData.factionEventLog || [];
+
+  if (events.length === 0 && factionEvents.length === 0) {
+    $container.html('<div class="sg-hint">暂无事件记录。点击「立即推演」开始模拟。</div>');
+    return;
+  }
+
+  // 按NPC分组
+  const grouped = {};
+  for (const ev of events) {
+    const name = ev.npcName || '未知';
+    if (!grouped[name]) grouped[name] = [];
+    grouped[name].push(ev);
+  }
+
+  let html = '';
+  for (const [npcName, npcEvents] of Object.entries(grouped)) {
+    html += `<div class="sg-pw-npc-group">`;
+    html += `<div class="sg-pw-npc-group-title">${escapeHtml(npcName)} <span class="sg-pw-count">(${npcEvents.length}件)</span></div>`;
+    html += `<div class="sg-pw-npc-events">`;
+    const recent = npcEvents.slice(-5).reverse();
+    for (const ev of recent) {
+      html += `<div class="sg-pw-event-item">`;
+      html += `<span class="sg-pw-event-time">${escapeHtml(ev.time || '')}</span> `;
+      html += `<span class="sg-pw-event-text">${escapeHtml(ev.event || '')}</span>`;
+      if (ev.impact) {
+        html += `<span class="sg-pw-event-impact"> → ${escapeHtml(ev.impact)}</span>`;
+      }
+      html += `</div>`;
+    }
+    if (npcEvents.length > 5) {
+      html += `<div class="sg-hint">…还有 ${npcEvents.length - 5} 条更早的记录</div>`;
+    }
+    html += `</div></div>`;
+  }
+
+  // 按势力分组
+  if (factionEvents.length > 0) {
+    const factionGrouped = {};
+    for (const ev of factionEvents) {
+      const name = ev.factionName || '未知势力';
+      if (!factionGrouped[name]) factionGrouped[name] = [];
+      factionGrouped[name].push(ev);
+    }
+    for (const [fName, fEvents] of Object.entries(factionGrouped)) {
+      html += `<div class="sg-pw-npc-group">`;
+      html += `<div class="sg-pw-npc-group-title">[势力] ${escapeHtml(fName)} <span class="sg-pw-count">(${fEvents.length}件)</span></div>`;
+      html += `<div class="sg-pw-npc-events">`;
+      const recent = fEvents.slice(-5).reverse();
+      for (const ev of recent) {
+        html += `<div class="sg-pw-event-item">`;
+        html += `<span class="sg-pw-event-time">${escapeHtml(ev.time || '')}</span> `;
+        html += `<span class="sg-pw-event-text">${escapeHtml(ev.event || '')}</span>`;
+        if (ev.impact) {
+          html += `<span class="sg-pw-event-impact"> → ${escapeHtml(ev.impact)}</span>`;
+        }
+        html += `</div>`;
+      }
+      if (fEvents.length > 5) {
+        html += `<div class="sg-hint">…还有 ${fEvents.length - 5} 条更早的记录</div>`;
+      }
+      html += `</div></div>`;
+    }
+  }
+
+  $container.html(html);
+}
+
+function updateParallelWorldClockDisplay(clockText) {
+  const $el = $('#sg_pwClockDisplay');
+  if ($el.length) $el.text(clockText || '第1天');
+}
+
+/**
+ * 刷新 NPC 和 势力 追踪列表（从蓝灯世界书中获取）
+ */
+async function refreshParallelWorldTrackedLists() {
+  try {
+    const $npcList = $('#sg_pwNpcList');
+    const $factionList = $('#sg_pwFactionList');
+
+    if (!$npcList.length && !$factionList.length) return;
+
+    const s = ensureSettings();
+    $npcList.html('<div class="sg-hint">正在读取蓝灯世界书…</div>');
+    $factionList.html('<div class="sg-hint">正在读取蓝灯世界书…</div>');
+
+    // 并行读取
+    const [blueCharEntries, blueFactionEntries] = await Promise.all([
+      collectBlueWorldbookCharacterEntries().catch(e => { console.error(e); return {}; }),
+      collectBlueWorldbookFactionEntries().catch(e => { console.error(e); return {}; })
+    ]);
+
+    // --- 渲染 NPC 列表 ---
+    if ($npcList.length) {
+      const allNames = [];
+      const seen = new Set();
+      for (const [k, ce] of Object.entries(blueCharEntries || {})) {
+        const name = String(ce.name || k).trim();
+        if (name && !seen.has(name)) {
+          seen.add(name);
+          allNames.push(name);
+        }
+      }
+
+      if (allNames.length === 0) {
+        $npcList.html('<div class="sg-hint">暂无角色条目。</div>');
+      } else {
+        const trackedMap = {};
+        for (const t of (s.parallelWorldTrackedNpcs || [])) {
+          trackedMap[String(t.name || '').trim()] = t.enabled !== false;
+        }
+
+        let html = '';
+        for (const name of allNames) {
+          const checked = trackedMap[name] ? 'checked' : '';
+          html += `<label class="sg-pw-list-item">
+            <input type="checkbox" class="sg-pw-check-npc" data-name="${escapeHtml(name)}" ${checked}>
+            <span>${escapeHtml(name)}</span>
+          </label>`;
+        }
+        $npcList.html(html);
+      }
+    }
+
+    // --- 渲染 势力 列表 ---
+    if ($factionList.length) {
+      const allNames = [];
+      const seen = new Set();
+      for (const [k, fe] of Object.entries(blueFactionEntries || {})) {
+        const name = String(fe.name || k).trim();
+        if (name && !seen.has(name)) {
+          seen.add(name);
+          allNames.push(name);
+        }
+      }
+
+      if (allNames.length === 0) {
+        $factionList.html('<div class="sg-hint">暂无势力条目。</div>');
+      } else {
+        const trackedMap = {};
+        for (const t of (s.parallelWorldTrackedFactions || [])) {
+          trackedMap[String(t.name || '').trim()] = t.enabled !== false;
+        }
+
+        let html = '';
+        for (const name of allNames) {
+          const checked = trackedMap[name] ? 'checked' : '';
+          html += `<label class="sg-pw-list-item">
+            <input type="checkbox" class="sg-pw-check-faction" data-name="${escapeHtml(name)}" ${checked}>
+            <span>${escapeHtml(name)}</span>
+          </label>`;
+        }
+        $factionList.html(html);
+      }
+    }
+
+    // 绑定事件：NPC Checkbox
+    $npcList.off('change', '.sg-pw-check-npc').on('change', '.sg-pw-check-npc', function () {
+      const name = $(this).data('name');
+      const enabled = $(this).prop('checked');
+      const s2 = ensureSettings();
+      if (!s2.parallelWorldTrackedNpcs) s2.parallelWorldTrackedNpcs = [];
+
+      const existing = s2.parallelWorldTrackedNpcs.find(t => t.name === name);
+      if (existing) {
+        existing.enabled = enabled;
+      } else {
+        s2.parallelWorldTrackedNpcs.push({ name, enabled });
+      }
+      saveSettings();
+    });
+
+    // 绑定事件：Faction Checkbox
+    $factionList.off('change', '.sg-pw-check-faction').on('change', '.sg-pw-check-faction', function () {
+      const name = $(this).data('name');
+      const enabled = $(this).prop('checked');
+      const s2 = ensureSettings();
+      if (!s2.parallelWorldTrackedFactions) s2.parallelWorldTrackedFactions = [];
+
+      const existing = s2.parallelWorldTrackedFactions.find(t => t.name === name);
+      if (existing) {
+        existing.enabled = enabled;
+      } else {
+        s2.parallelWorldTrackedFactions.push({ name, enabled });
+      }
+      saveSettings();
+    });
+  } catch (e) {
+    console.error('[StoryGuide] refreshParallelWorldTrackedLists error:', e);
+    $('#sg_pwNpcList, #sg_pwFactionList').html('<div class="sg-hint" style="color:red">加载列表失败</div>');
+  }
+}
+
+/**
+ * 刷新平行世界模型列表
+ */
+async function refreshParallelWorldModels() {
+  const s = ensureSettings();
+  const $sel = $('#sg_parallelWorldCustomModel');
+  const $btn = $('#sg_refreshParallelWorldModels');
+  const base = normalizeBaseUrl(s.parallelWorldCustomEndpoint);
+  if (!base) {
+    setParallelWorldStatus('请先填写 API 基础URL', 'warn');
+    return;
+  }
+  $btn.prop('disabled', true);
+  setParallelWorldStatus('正在刷新模型列表…', 'warn');
+  try {
+    const modelsUrl = base.replace(/\/$/, '') + '/models';
+    const headers = {};
+    if (s.parallelWorldCustomApiKey) headers['Authorization'] = `Bearer ${s.parallelWorldCustomApiKey}`;
+
+    let modelIds = [];
+    try {
+      const res = await fetchJsonCompat(modelsUrl, { method: 'GET', headers });
+      if (res && Array.isArray(res.data)) {
+        modelIds = res.data.map(m => m.id || m.name).filter(Boolean);
+      }
+    } catch {
+      const proxyRes = await fetchJsonCompat('/api/oai/models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getStRequestHeadersCompat() },
+        body: JSON.stringify({ api_url: base, api_key_openai: s.parallelWorldCustomApiKey }),
+      });
+      if (proxyRes && Array.isArray(proxyRes.data)) {
+        modelIds = proxyRes.data.map(m => m.id || m.name).filter(Boolean);
+      }
+    }
+
+    if (modelIds.length === 0) {
+      setParallelWorldStatus('未获取到模型', 'warn');
+    } else {
+      s.parallelWorldCustomModelsCache = modelIds;
+      saveSettings();
+      fillParallelWorldModelSelect(modelIds, s.parallelWorldCustomModel);
+      setParallelWorldStatus(`✅ 获取到 ${modelIds.length} 个模型`, 'ok');
+    }
+  } catch (e) {
+    setParallelWorldStatus(`❌ 刷新失败: ${e?.message || e}`, 'err');
+  } finally {
+    $btn.prop('disabled', false);
+  }
+}
+
+function fillParallelWorldModelSelect(modelIds, selected) {
+  const $sel = $('#sg_parallelWorldCustomModel');
+  if (!$sel.length) return;
+  $sel.empty();
+  for (const id of modelIds) {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = id;
+    if (id === selected) opt.selected = true;
+    $sel.append(opt);
+  }
+  if (modelIds.length && !modelIds.includes(selected)) {
+    const opt = document.createElement('option');
+    opt.value = selected;
+    opt.textContent = selected + ' (当前)';
+    opt.selected = true;
+    $sel.prepend(opt);
+  }
 }
 
 // 更新地图预览
@@ -12663,6 +13772,7 @@ function buildModalHtml() {
             <button class="sg-pgtab" id="sg_pgtab_image">图像生成</button>
             <button class="sg-pgtab" id="sg_pgtab_sex">性爱指导</button>
             <button class="sg-pgtab" id="sg_pgtab_character">自定义角色</button>
+            <button class="sg-pgtab" id="sg_pgtab_parallel">平行世界</button>
           </div>
 
           <div class="sg-page active" id="sg_page_guide">
@@ -14286,6 +15396,186 @@ function buildModalHtml() {
             </div>
           </div> <!-- sg_page_character -->
 
+          <div class="sg-page" id="sg_page_parallel">
+            <div class="sg-card">
+              <div class="sg-card-title">🌍 平行世界（NPC离屏模拟）</div>
+
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>启用</label>
+                  <label class="sg-switch">
+                    <input type="checkbox" id="sg_parallelWorldEnabled">
+                    <span class="sg-slider"></span>
+                  </label>
+                </div>
+                <div class="sg-field">
+                  <label>写回世界书</label>
+                  <label class="sg-switch">
+                    <input type="checkbox" id="sg_parallelWorldWriteToWorldbook">
+                    <span class="sg-slider"></span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>注入AI上下文</label>
+                  <label class="sg-switch">
+                    <input type="checkbox" id="sg_parallelWorldInjectContext">
+                    <span class="sg-slider"></span>
+                  </label>
+                </div>
+                <div class="sg-field">
+                  <label>每NPC最大事件数</label>
+                  <input id="sg_parallelWorldMaxEventsPerNpc" type="number" min="3" max="50">
+                </div>
+              </div>
+            </div>
+
+            <div class="sg-card">
+              <div class="sg-card-title">世界时钟</div>
+              <div class="sg-pw-clock-row">
+                <span class="sg-pw-clock-icon">🕐</span>
+                <span class="sg-pw-clock" id="sg_pwClockDisplay">第1天</span>
+                <span class="sg-hint" style="margin-left:10px;">(自动从正文提取)</span>
+              </div>
+              <div class="sg-grid2" style="margin-top:8px;">
+                <div class="sg-field">
+                  <label>读取正文楼层数</label>
+                  <input id="sg_parallelWorldReadFloors" type="number" min="1" max="50" placeholder="5">
+                </div>
+                <div class="sg-field">
+                  <label>手动设置时间(可选)</label>
+                  <div style="display:flex;gap:6px;">
+                    <input id="sg_parallelWorldClock" type="text" placeholder="留空=自动提取" style="flex:1;">
+                    <button class="menu_button sg-btn" id="sg_pwClockSet" style="flex-shrink:0;">设置</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="sg-card">
+              <div class="sg-card-title">追踪列表</div>
+                <div class="sg-pw-list-container">
+                  <div class="sg-pw-list-header">
+                    <span>NPC追踪列表</span>
+                    <small>勾选需要模拟离屏事件的NPC。列表来自结构化条目中的角色。</small>
+                  </div>
+                  <div id="sg_pwNpcList" class="sg-pw-list-content">
+                    <div class="sg-hint">点击下方刷新按钮加载列表…</div>
+                  </div>
+                </div>
+
+                <div class="sg-pw-list-container" style="margin-top:10px;">
+                  <div class="sg-pw-list-header">
+                    <span>势力追踪列表</span>
+                    <small>勾选需要模拟离屏事件的势力。列表来自结构化条目中的势力。</small>
+                  </div>
+                  <div id="sg_pwFactionList" class="sg-pw-list-content">
+                    <div class="sg-hint">点击下方刷新按钮加载列表…</div>
+                  </div>
+                </div>
+
+                <div style="margin-top:10px;">
+                  <button id="sg_pwRefreshNpcList" class="menu_button sg-btn">刷新追踪列表</button>
+                </div>
+                <div class="sg-field" style="margin-top:8px;">
+                <label>手动添加NPC名称</label>
+                <div style="display:flex;gap:6px;">
+                  <input id="sg_pwManualNpcName" type="text" placeholder="输入NPC名称" style="flex:1;">
+                  <button class="menu_button sg-btn" id="sg_pwAddManualNpc">添加</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="sg-card">
+              <div class="sg-card-title">推演设置</div>
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>自动推演</label>
+                  <label class="sg-switch">
+                    <input type="checkbox" id="sg_parallelWorldAutoTrigger">
+                    <span class="sg-slider"></span>
+                  </label>
+                </div>
+                <div class="sg-field">
+                  <label>每隔N条AI回复</label>
+                  <input id="sg_parallelWorldAutoEvery" type="number" min="1" max="50">
+                </div>
+              </div>
+              <div class="sg-actions-row" style="margin-top:10px;">
+                <button class="menu_button sg-btn-primary" id="sg_pwRunSimulation">🌍 立即推演</button>
+                <button class="menu_button sg-btn" id="sg_pwClearLog">🗑️ 清空日志</button>
+              </div>
+              <div class="sg-status" id="sg_parallelWorldStatus"></div>
+            </div>
+
+            <div class="sg-card sg-subcard">
+              <div class="sg-card-title">API 设置</div>
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>Provider</label>
+                  <select id="sg_parallelWorldProvider">
+                    <option value="st">使用当前 SillyTavern API</option>
+                    <option value="custom">独立API</option>
+                  </select>
+                </div>
+                <div class="sg-field">
+                  <label>temperature</label>
+                  <input id="sg_parallelWorldTemperature" type="number" step="0.05" min="0" max="2">
+                </div>
+              </div>
+              <div class="sg-card sg-subcard sg-parallel-provider" id="sg_parallelCustomBlock" style="display:none;">
+                <div class="sg-field">
+                  <label>API 基础URL</label>
+                  <input id="sg_parallelWorldCustomEndpoint" type="text" placeholder="https://api.example.com/v1">
+                </div>
+                <div class="sg-field">
+                  <label>API Key</label>
+                  <input id="sg_parallelWorldCustomApiKey" type="password" placeholder="sk-...">
+                </div>
+                <div class="sg-field">
+                  <label>模型</label>
+                  <div style="display:flex;gap:4px;">
+                    <select id="sg_parallelWorldCustomModel" style="flex:1;"></select>
+                    <button class="menu_button sg-btn" id="sg_refreshParallelWorldModels">🔄</button>
+                  </div>
+                </div>
+                <div class="sg-grid2">
+                  <div class="sg-field">
+                    <label>Max Tokens</label>
+                    <input id="sg_parallelWorldCustomMaxTokens" type="number" min="256" max="200000">
+                  </div>
+                  <div class="sg-field">
+                    <label>top_p</label>
+                    <input id="sg_parallelWorldCustomTopP" type="number" step="0.01" min="0" max="1">
+                  </div>
+                </div>
+                <label class="sg-check"><input type="checkbox" id="sg_parallelWorldCustomStream"> 流式返回</label>
+              </div>
+            </div>
+
+            <div class="sg-card">
+              <div class="sg-card-title">事件日志</div>
+              <div id="sg_pwEventLog" class="sg-pw-event-log">
+                <div class="sg-hint">暂无事件记录。点击「立即推演」开始模拟。</div>
+              </div>
+            </div>
+
+            <div class="sg-card sg-subcard">
+              <div class="sg-card-title">自定义提示词</div>
+              <div class="sg-field">
+                <label>System Prompt</label>
+                <textarea id="sg_parallelWorldSystemPrompt" rows="6" spellcheck="false"></textarea>
+              </div>
+              <div class="sg-field">
+                <label>User Template（支持 {{worldTime}} {{recentContext}} {{npcProfiles}}）</label>
+                <textarea id="sg_parallelWorldUserTemplate" rows="4" spellcheck="false"></textarea>
+              </div>
+              <button class="menu_button sg-btn" id="sg_pwResetPrompts" style="margin-top:6px;">恢复默认提示词</button>
+            </div>
+          </div> <!-- sg_page_parallel -->
+
           <div class="sg-status" id="sg_status"></div>
         </div>
 
@@ -15357,8 +16647,8 @@ function ensureModal() {
 
 function showSettingsPage(page) {
   const p = String(page || 'guide');
-  $('#sg_pgtab_guide, #sg_pgtab_summary, #sg_pgtab_index, #sg_pgtab_roll, #sg_pgtab_image, #sg_pgtab_sex, #sg_pgtab_character').removeClass('active');
-  $('#sg_page_guide, #sg_page_summary, #sg_page_index, #sg_page_roll, #sg_page_image, #sg_page_sex, #sg_page_character').removeClass('active');
+  $('#sg_pgtab_guide, #sg_pgtab_summary, #sg_pgtab_index, #sg_pgtab_roll, #sg_pgtab_image, #sg_pgtab_sex, #sg_pgtab_character, #sg_pgtab_parallel').removeClass('active');
+  $('#sg_page_guide, #sg_page_summary, #sg_page_index, #sg_page_roll, #sg_page_image, #sg_page_sex, #sg_page_character, #sg_page_parallel').removeClass('active');
 
   if (p === 'summary') {
     $('#sg_pgtab_summary').addClass('active');
@@ -15378,6 +16668,11 @@ function showSettingsPage(page) {
   } else if (p === 'character') {
     $('#sg_pgtab_character').addClass('active');
     $('#sg_page_character').addClass('active');
+  } else if (p === 'parallel') {
+    $('#sg_pgtab_parallel').addClass('active');
+    $('#sg_page_parallel').addClass('active');
+    // 切到平行世界页时刷新数据
+    try { refreshParallelWorldTrackedLists(); renderParallelWorldEventLog(); } catch { }
   } else {
     $('#sg_pgtab_guide').addClass('active');
     $('#sg_page_guide').addClass('active');
@@ -15408,9 +16703,11 @@ function setupSettingsPages() {
   $('#sg_pgtab_image').on('click', () => showSettingsPage('image'));
   $('#sg_pgtab_sex').on('click', () => showSettingsPage('sex'));
   $('#sg_pgtab_character').on('click', () => showSettingsPage('character'));
+  $('#sg_pgtab_parallel').on('click', () => showSettingsPage('parallel'));
 
   try { setupSexGuidePage(); } catch (e) { console.error('[StoryGuide] setupSexGuidePage failed:', e); }
   setupCharacterPage();
+  try { setupParallelWorldPage(); } catch (e) { console.error('[StoryGuide] setupParallelWorldPage failed:', e); }
 
   // quick jump
   $('#sg_gotoIndexPage').on('click', () => showSettingsPage('index'));
@@ -15803,6 +17100,94 @@ function setupSexGuidePage() {
   });
 }
 
+function setupParallelWorldPage() {
+  const autoSave = () => {
+    pullUiToSettings();
+    saveSettings();
+  };
+
+  // 推演按钮
+  $('#sg_pwRunSimulation').on('click', async () => {
+    pullUiToSettings(); saveSettings();
+    await runParallelWorldSimulation();
+  });
+
+  // 清空日志
+  $('#sg_pwClearLog').on('click', async () => {
+    const pwData = getParallelWorldData();
+    pwData.eventLog = [];
+    pwData.factionEventLog = [];
+    await setParallelWorldData(pwData);
+    renderParallelWorldEventLog(pwData);
+    setParallelWorldStatus('日志已清空', 'ok');
+  });
+
+  // 刷新追踪列表
+  $('#sg_pwRefreshNpcList').on('click', () => {
+    refreshParallelWorldTrackedLists();
+  });
+
+  // 手动添加NPC
+  $('#sg_pwAddManualNpc').on('click', () => {
+    const name = String($('#sg_pwManualNpcName').val() || '').trim();
+    if (!name) return;
+    const s = ensureSettings();
+    let list = s.parallelWorldTrackedNpcs || [];
+    if (list.some(t => t.name === name)) {
+      setParallelWorldStatus(`${name} 已在列表中`, 'warn');
+      return;
+    }
+    list.push({ name, enabled: true });
+    s.parallelWorldTrackedNpcs = list;
+    saveSettings();
+    $('#sg_pwManualNpcName').val('');
+    refreshParallelWorldTrackedLists();
+    setParallelWorldStatus(`已添加 ${name}`, 'ok');
+  });
+
+  // 世界时钟设置
+  $('#sg_pwClockSet').on('click', async () => {
+    const val = String($('#sg_parallelWorldClock').val() || '').trim();
+    if (!val) return;
+    const pwData = getParallelWorldData();
+    pwData.worldClock = val;
+    await setParallelWorldData(pwData);
+    updateParallelWorldClockDisplay(val);
+    const s = ensureSettings();
+    s.parallelWorldClock = val;
+    saveSettings();
+    setParallelWorldStatus(`世界时钟已设置为: ${val}`, 'ok');
+  });
+
+  // 恢复默认提示词
+  $('#sg_pwResetPrompts').on('click', () => {
+    $('#sg_parallelWorldSystemPrompt').val(DEFAULT_PARALLEL_WORLD_SYSTEM_PROMPT);
+    $('#sg_parallelWorldUserTemplate').val(DEFAULT_PARALLEL_WORLD_USER_TEMPLATE);
+    autoSave();
+    setParallelWorldStatus('已恢复默认提示词', 'ok');
+  });
+
+  // Provider 切换显示自定义 API 区域
+  $('#sg_parallelWorldProvider').on('change', function () {
+    const isCustom = $(this).val() === 'custom';
+    $('#sg_parallelCustomBlock').toggle(isCustom);
+    autoSave();
+  });
+
+  // 刷新模型列表
+  $('#sg_refreshParallelWorldModels').on('click', async () => {
+    pullUiToSettings(); saveSettings();
+    await refreshParallelWorldModels();
+  });
+
+  // auto-save for inputs
+  $('#sg_parallelWorldEnabled, #sg_parallelWorldAutoTrigger, #sg_parallelWorldWriteToWorldbook, #sg_parallelWorldInjectContext, #sg_parallelWorldCustomStream').on('change', autoSave);
+  $('#sg_parallelWorldAutoEvery, #sg_parallelWorldTemperature, #sg_parallelWorldMaxEventsPerNpc, #sg_parallelWorldCustomMaxTokens, #sg_parallelWorldCustomTopP').on('change', autoSave);
+  $('#sg_parallelWorldCustomEndpoint, #sg_parallelWorldCustomApiKey').on('change', autoSave);
+  $('#sg_parallelWorldCustomModel').on('change', autoSave);
+  $('#sg_parallelWorldSystemPrompt, #sg_parallelWorldUserTemplate').on('change', autoSave);
+}
+
 function pullSettingsToUi() {
   const s = ensureSettings();
 
@@ -16193,6 +17578,34 @@ function pullSettingsToUi() {
   renderRollLogs();
 
   updateButtonsEnabled();
+
+  // ===== 平行世界 =====
+  $('#sg_parallelWorldEnabled').prop('checked', !!s.parallelWorldEnabled);
+  $('#sg_parallelWorldAutoTrigger').prop('checked', !!s.parallelWorldAutoTrigger);
+  $('#sg_parallelWorldAutoEvery').val(s.parallelWorldAutoEvery || 5);
+  $('#sg_parallelWorldProvider').val(s.parallelWorldProvider || 'st');
+  $('#sg_parallelWorldTemperature').val(s.parallelWorldTemperature ?? 0.7);
+  $('#sg_parallelWorldWriteToWorldbook').prop('checked', s.parallelWorldWriteToWorldbook !== false);
+  $('#sg_parallelWorldInjectContext').prop('checked', s.parallelWorldInjectContext !== false);
+  $('#sg_parallelWorldMaxEventsPerNpc').val(s.parallelWorldMaxEventsPerNpc || 10);
+  $('#sg_parallelWorldCustomEndpoint').val(s.parallelWorldCustomEndpoint || '');
+  $('#sg_parallelWorldCustomApiKey').val(s.parallelWorldCustomApiKey || '');
+  $('#sg_parallelWorldCustomMaxTokens').val(s.parallelWorldCustomMaxTokens || 4096);
+  $('#sg_parallelWorldCustomTopP').val(s.parallelWorldCustomTopP ?? 0.95);
+  $('#sg_parallelWorldCustomStream').prop('checked', !!s.parallelWorldCustomStream);
+  $('#sg_parallelWorldSystemPrompt').val(s.parallelWorldSystemPrompt || DEFAULT_PARALLEL_WORLD_SYSTEM_PROMPT);
+  $('#sg_parallelWorldUserTemplate').val(s.parallelWorldUserTemplate || DEFAULT_PARALLEL_WORLD_USER_TEMPLATE);
+  $('#sg_parallelWorldClock').val(s.parallelWorldClock || '');
+  $('#sg_parallelWorldReadFloors').val(s.parallelWorldReadFloors || 5);
+  $('#sg_parallelCustomBlock').toggle(s.parallelWorldProvider === 'custom');
+  if (Array.isArray(s.parallelWorldCustomModelsCache) && s.parallelWorldCustomModelsCache.length) {
+    fillParallelWorldModelSelect(s.parallelWorldCustomModelsCache, s.parallelWorldCustomModel);
+  }
+  // 世界时钟显示
+  try {
+    const pwData = getParallelWorldData();
+    updateParallelWorldClockDisplay(pwData.worldClock || s.parallelWorldClock || '第1天');
+  } catch { }
 }
 
 function updateBlueIndexInfoLabel() {
@@ -16827,6 +18240,26 @@ function pullUiToSettings() {
   s.wiBlueIndexFile = String($('#sg_wiBlueIndexFile').val() || '').trim();
   s.summaryMaxCharsPerMessage = clampInt($('#sg_summaryMaxChars').val(), 200, 8000, s.summaryMaxCharsPerMessage || 4000);
   s.summaryMaxTotalChars = clampInt($('#sg_summaryMaxTotalChars').val(), 2000, 80000, s.summaryMaxTotalChars || 24000);
+
+  // ===== 平行世界 =====
+  s.parallelWorldEnabled = $('#sg_parallelWorldEnabled').is(':checked');
+  s.parallelWorldAutoTrigger = $('#sg_parallelWorldAutoTrigger').is(':checked');
+  s.parallelWorldAutoEvery = clampInt($('#sg_parallelWorldAutoEvery').val(), 1, 50, s.parallelWorldAutoEvery || 5);
+  s.parallelWorldProvider = String($('#sg_parallelWorldProvider').val() || s.parallelWorldProvider || 'st');
+  s.parallelWorldTemperature = clampFloat($('#sg_parallelWorldTemperature').val(), 0, 2, s.parallelWorldTemperature ?? 0.7);
+  s.parallelWorldWriteToWorldbook = $('#sg_parallelWorldWriteToWorldbook').is(':checked');
+  s.parallelWorldInjectContext = $('#sg_parallelWorldInjectContext').is(':checked');
+  s.parallelWorldMaxEventsPerNpc = clampInt($('#sg_parallelWorldMaxEventsPerNpc').val(), 3, 50, s.parallelWorldMaxEventsPerNpc || 10);
+  s.parallelWorldCustomEndpoint = String($('#sg_parallelWorldCustomEndpoint').val() || '').trim();
+  s.parallelWorldCustomApiKey = String($('#sg_parallelWorldCustomApiKey').val() || '').trim();
+  s.parallelWorldCustomModel = String($('#sg_parallelWorldCustomModel').val() || s.parallelWorldCustomModel || 'gpt-4o-mini');
+  s.parallelWorldCustomMaxTokens = clampInt($('#sg_parallelWorldCustomMaxTokens').val(), 256, 200000, s.parallelWorldCustomMaxTokens || 4096);
+  s.parallelWorldCustomTopP = clampFloat($('#sg_parallelWorldCustomTopP').val(), 0, 1, s.parallelWorldCustomTopP ?? 0.95);
+  s.parallelWorldCustomStream = $('#sg_parallelWorldCustomStream').is(':checked');
+  s.parallelWorldSystemPrompt = String($('#sg_parallelWorldSystemPrompt').val() || DEFAULT_PARALLEL_WORLD_SYSTEM_PROMPT);
+  s.parallelWorldUserTemplate = String($('#sg_parallelWorldUserTemplate').val() || DEFAULT_PARALLEL_WORLD_USER_TEMPLATE);
+  s.parallelWorldClock = String($('#sg_parallelWorldClock').val() || '').trim();
+  s.parallelWorldReadFloors = clampInt($('#sg_parallelWorldReadFloors').val(), 1, 50, s.parallelWorldReadFloors || 5);
 }
 
 function openModal() {
@@ -16978,6 +18411,8 @@ function setupEventListeners() {
       scheduleReapplyAll('msg_received');
       // 回复生成结束后再触发总结/结构化
       schedulePostGenerationAuto('msg_received');
+      // 平行世界自动推演
+      maybeAutoRunParallelWorld().catch(e => console.warn('[StoryGuide] 平行世界自动推演异常:', e));
     });
 
     eventSource.on(event_types.MESSAGE_SENT, () => {
