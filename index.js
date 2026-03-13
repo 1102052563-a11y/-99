@@ -998,6 +998,7 @@ const inlineCache = new Map();
 const panelCache = new Map(); // <mesKey, { htmlInner, collapsed, createdAt }>
 let chatDomObserver = null;
 let generationIdleTimer = null;
+let postGenerationPending = false;
 let bodyDomObserver = null;
 let reapplyTimer = null;
 
@@ -2230,8 +2231,11 @@ async function runParallelWorldSimulation() {
 
   const pwData = getParallelWorldData();
 
-  const trackedNpcs = (s.parallelWorldTrackedNpcs || []).filter(t => t.enabled);
-  const trackedFactions = (s.parallelWorldTrackedFactions || []).filter(t => t.enabled);
+  s.parallelWorldTrackedNpcs = normalizeParallelWorldTrackedList(s.parallelWorldTrackedNpcs);
+  s.parallelWorldTrackedFactions = normalizeParallelWorldTrackedList(s.parallelWorldTrackedFactions);
+  saveSettings();
+  const trackedNpcs = s.parallelWorldTrackedNpcs.filter(t => t.enabled);
+  const trackedFactions = s.parallelWorldTrackedFactions.filter(t => t.enabled);
 
   if (trackedNpcs.length === 0 && trackedFactions.length === 0) {
     setParallelWorldStatus('没有被追踪的NPC或势力，请刷新列表并勾选', 'warn');
@@ -2413,8 +2417,8 @@ async function runParallelWorldSimulation() {
 async function writeParallelEventsEntry(pwData, settings) {
   const s = settings || ensureSettings();
   const prefix = String(s.characterEntryPrefix || '人物').replace(/\[[^\]]*\]\s*/g, '').trim();
-  const trackedNpcs = (s.parallelWorldTrackedNpcs || []).filter(t => t.enabled);
-  const trackedFactions = (s.parallelWorldTrackedFactions || []).filter(t => t.enabled);
+  const trackedNpcs = normalizeParallelWorldTrackedList(s.parallelWorldTrackedNpcs).filter(t => t.enabled);
+  const trackedFactions = normalizeParallelWorldTrackedList(s.parallelWorldTrackedFactions).filter(t => t.enabled);
 
   if (trackedNpcs.length === 0 && trackedFactions.length === 0) return;
 
@@ -2622,7 +2626,7 @@ function buildParallelWorldContextInjection() {
   if (!s.parallelWorldEnabled || !s.parallelWorldInjectContext) return '';
 
   const pwData = getParallelWorldData();
-  const tracked = (s.parallelWorldTrackedNpcs || []).filter(t => t.enabled);
+  const tracked = normalizeParallelWorldTrackedList(s.parallelWorldTrackedNpcs).filter(t => t.enabled);
   if (tracked.length === 0) return '';
 
   const parts = [];
@@ -2729,6 +2733,18 @@ function updateParallelWorldClockDisplay(clockText) {
   if ($el.length) $el.text(clockText || '第1天');
 }
 
+function normalizeParallelWorldTrackedList(list) {
+  const arr = Array.isArray(list) ? list : [];
+  const map = new Map();
+  for (const item of arr) {
+    const name = String(item?.name || '').trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    map.set(key, { name, enabled: item?.enabled !== false });
+  }
+  return Array.from(map.values());
+}
+
 /**
  * 刷新 NPC 和 势力 追踪列表（从蓝灯世界书中获取）
  */
@@ -2740,6 +2756,9 @@ async function refreshParallelWorldTrackedLists() {
     if (!$npcList.length && !$factionList.length) return;
 
     const s = ensureSettings();
+    s.parallelWorldTrackedNpcs = normalizeParallelWorldTrackedList(s.parallelWorldTrackedNpcs);
+    s.parallelWorldTrackedFactions = normalizeParallelWorldTrackedList(s.parallelWorldTrackedFactions);
+    saveSettings();
     $npcList.html('<div class="sg-hint">正在读取蓝灯世界书…</div>');
     $factionList.html('<div class="sg-hint">正在读取蓝灯世界书…</div>');
 
@@ -2765,7 +2784,7 @@ async function refreshParallelWorldTrackedLists() {
         $npcList.html('<div class="sg-hint">暂无角色条目。</div>');
       } else {
         const trackedMap = {};
-        for (const t of (s.parallelWorldTrackedNpcs || [])) {
+        for (const t of s.parallelWorldTrackedNpcs) {
           trackedMap[String(t.name || '').trim()] = t.enabled !== false;
         }
 
@@ -2797,7 +2816,7 @@ async function refreshParallelWorldTrackedLists() {
         $factionList.html('<div class="sg-hint">暂无势力条目。</div>');
       } else {
         const trackedMap = {};
-        for (const t of (s.parallelWorldTrackedFactions || [])) {
+        for (const t of s.parallelWorldTrackedFactions) {
           trackedMap[String(t.name || '').trim()] = t.enabled !== false;
         }
 
@@ -2815,33 +2834,31 @@ async function refreshParallelWorldTrackedLists() {
 
     // 绑定事件：NPC Checkbox
     $npcList.off('change', '.sg-pw-check-npc').on('change', '.sg-pw-check-npc', function () {
-      const name = $(this).data('name');
+      const name = String($(this).data('name') || '').trim();
       const enabled = $(this).prop('checked');
+      if (!name) return;
       const s2 = ensureSettings();
-      if (!s2.parallelWorldTrackedNpcs) s2.parallelWorldTrackedNpcs = [];
-
-      const existing = s2.parallelWorldTrackedNpcs.find(t => t.name === name);
-      if (existing) {
-        existing.enabled = enabled;
-      } else {
-        s2.parallelWorldTrackedNpcs.push({ name, enabled });
-      }
+      s2.parallelWorldTrackedNpcs = normalizeParallelWorldTrackedList(s2.parallelWorldTrackedNpcs);
+      const key = name.toLowerCase();
+      const existing = s2.parallelWorldTrackedNpcs.find(t => String(t.name || '').trim().toLowerCase() === key);
+      if (existing) existing.enabled = enabled;
+      else s2.parallelWorldTrackedNpcs.push({ name, enabled });
+      s2.parallelWorldTrackedNpcs = normalizeParallelWorldTrackedList(s2.parallelWorldTrackedNpcs);
       saveSettings();
     });
 
     // 绑定事件：Faction Checkbox
     $factionList.off('change', '.sg-pw-check-faction').on('change', '.sg-pw-check-faction', function () {
-      const name = $(this).data('name');
+      const name = String($(this).data('name') || '').trim();
       const enabled = $(this).prop('checked');
+      if (!name) return;
       const s2 = ensureSettings();
-      if (!s2.parallelWorldTrackedFactions) s2.parallelWorldTrackedFactions = [];
-
-      const existing = s2.parallelWorldTrackedFactions.find(t => t.name === name);
-      if (existing) {
-        existing.enabled = enabled;
-      } else {
-        s2.parallelWorldTrackedFactions.push({ name, enabled });
-      }
+      s2.parallelWorldTrackedFactions = normalizeParallelWorldTrackedList(s2.parallelWorldTrackedFactions);
+      const key = name.toLowerCase();
+      const existing = s2.parallelWorldTrackedFactions.find(t => String(t.name || '').trim().toLowerCase() === key);
+      if (existing) existing.enabled = enabled;
+      else s2.parallelWorldTrackedFactions.push({ name, enabled });
+      s2.parallelWorldTrackedFactions = normalizeParallelWorldTrackedList(s2.parallelWorldTrackedFactions);
       saveSettings();
     });
   } catch (e) {
@@ -7803,7 +7820,7 @@ async function writeOrUpdateStructuredEntry(entryType, entryData, meta, settings
         const shouldReenable = !!settings.structuredReenableEntriesEnabled;
         const commentName = String(cached?.name || entryName).trim() || entryName;
         const indexSuffix = cached?.indexId ? `｜${cached.indexId}` : '';
-        const newComment = `${prefix}｜${commentName}${indexSuffix}`;
+        const stableComment = `${prefix}｜${commentName}${indexSuffix}`;
         const newKey = cached?.indexId ? buildStructuredEntryKey(prefix, commentName, cached.indexId) : '';
 
         if (target === 'chatbook') {
@@ -7813,7 +7830,6 @@ async function writeOrUpdateStructuredEntry(entryType, entryData, meta, settings
           updateParts.push(`/setentryfield file={{getvar::${updateFileVar}}} uid=${foundUid} field=content ${quoteSlashValue(content)}`);
           if (shouldReenable) {
             updateParts.push(`/setentryfield file={{getvar::${updateFileVar}}} uid=${foundUid} field=disable 0`);
-            updateParts.push(`/setentryfield file={{getvar::${updateFileVar}}} uid=${foundUid} field=comment ${quoteSlashValue(newComment)}`);
             if (newKey) updateParts.push(`/setentryfield file={{getvar::${updateFileVar}}} uid=${foundUid} field=key ${quoteSlashValue(newKey)}`);
           }
           updateParts.push(`/flushvar ${updateFileVar}`);
@@ -7821,7 +7837,6 @@ async function writeOrUpdateStructuredEntry(entryType, entryData, meta, settings
           updateParts.push(`/setentryfield file=${quoteSlashValue(file)} uid=${foundUid} field=content ${quoteSlashValue(content)}`);
           if (shouldReenable) {
             updateParts.push(`/setentryfield file=${quoteSlashValue(file)} uid=${foundUid} field=disable 0`);
-            updateParts.push(`/setentryfield file=${quoteSlashValue(file)} uid=${foundUid} field=comment ${quoteSlashValue(newComment)}`);
             if (newKey) updateParts.push(`/setentryfield file=${quoteSlashValue(file)} uid=${foundUid} field=key ${quoteSlashValue(newKey)}`);
           }
         }
@@ -7831,7 +7846,7 @@ async function writeOrUpdateStructuredEntry(entryType, entryData, meta, settings
         cached.raw = finalEntryData;
         cached.lastUpdated = Date.now();
         console.log(`[StoryGuide] Updated ${entryType} (${targetType}): ${entryName} -> UID ${foundUid}`);
-        const comment = newComment;
+        const comment = stableComment;
         const key = newKey;
         return {
           updated: true,
@@ -8273,14 +8288,7 @@ async function deleteStructuredEntry(entryType, entryName, meta, settings, {
     const disableExpr = `/setentryfield file=${fileExpr} uid=${uid} field=disable 1`;
     await execSlash(disableExpr);
 
-    // 修改 comment 为已删除标记
-    const deletedComment = `[已删除] ${comment}`;
-    const commentExpr = `/setentryfield file=${fileExpr} uid=${uid} field=comment ${quoteSlashValue(deletedComment)}`;
-    await execSlash(commentExpr);
-
-    // 清空触发词（避免被触发）
-    const keyExpr = `/setentryfield file=${fileExpr} uid=${uid} field=key ""`;
-    await execSlash(keyExpr);
+    // Keep title(comment) and key immutable; disable only.
 
     // 清理临时变量
     if (target === 'chatbook') {
@@ -9598,14 +9606,14 @@ function scheduleAutoSummary(reason = '') {
 
 function schedulePostGenerationAuto(reason = '') {
   const s = ensureSettings();
-  if (!s.enabled) return;
-  if (!s.summaryEnabled && !s.structuredEntriesEnabled) return;
+  if (!s.summaryEnabled && !s.structuredEntriesEnabled && !(s.parallelWorldEnabled && s.parallelWorldAutoTrigger)) return;
   const delay = clampInt(s.debounceMs, 300, 10000, DEFAULT_SETTINGS.debounceMs);
   if (generationIdleTimer) clearTimeout(generationIdleTimer);
   generationIdleTimer = setTimeout(() => {
     generationIdleTimer = null;
     maybeAutoSummary(reason).catch(() => void 0);
     maybeAutoStructuredEntries(reason).catch(() => void 0);
+    maybeAutoRunParallelWorld().catch(e => console.warn('[StoryGuide] 平行世界自动推演异常:', e));
   }, delay);
 }
 
@@ -11936,6 +11944,46 @@ function fillSexGuideModelSelect(modelIds, selected) {
   });
 }
 
+function extractModelIdsFromResponse(data) {
+  const ids = new Set();
+  const maxDepth = 6;
+  const idKeys = new Set(['id', 'name', 'model', 'model_id', 'modelid', 'slug']);
+
+  const add = (v) => {
+    const s = String(v || '').trim();
+    if (!s) return;
+    if (s.length > 200) return;
+    if (/^https?:\/\//i.test(s)) return;
+    ids.add(s);
+  };
+
+  const walk = (node, depth = 0) => {
+    if (depth > maxDepth || node === null || node === undefined) return;
+    if (typeof node === 'string') return;
+    if (typeof node === 'number' || typeof node === 'boolean') return;
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        if (typeof item === 'string') add(item);
+        else walk(item, depth + 1);
+      }
+      return;
+    }
+    if (typeof node !== 'object') return;
+    for (const [k, v] of Object.entries(node)) {
+      const key = String(k || '').toLowerCase();
+      if (idKeys.has(key) && (typeof v === 'string' || typeof v === 'number')) {
+        add(v);
+      }
+      if (v && (typeof v === 'object' || Array.isArray(v))) {
+        walk(v, depth + 1);
+      }
+    }
+  };
+
+  walk(data, 0);
+  return Array.from(ids).sort((a, b) => String(a).localeCompare(String(b)));
+}
+
 
 async function refreshSummaryModels() {
   const s = ensureSettings();
@@ -11969,15 +12017,7 @@ async function refreshSummaryModels() {
 
     const data = await res.json().catch(() => ({}));
 
-    let modelsList = [];
-    if (Array.isArray(data?.models)) modelsList = data.models;
-    else if (Array.isArray(data?.data)) modelsList = data.data;
-    else if (Array.isArray(data)) modelsList = data;
-
-    let ids = [];
-    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
-
-    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
+    const ids = extractModelIdsFromResponse(data);
 
     if (!ids.length) {
       setStatus('刷新成功，但未解析到模型列表（返回格式不兼容）', 'warn');
@@ -12014,15 +12054,7 @@ async function refreshSummaryModels() {
     }
     const data = await res.json().catch(() => ({}));
 
-    let modelsList = [];
-    if (Array.isArray(data?.models)) modelsList = data.models;
-    else if (Array.isArray(data?.data)) modelsList = data.data;
-    else if (Array.isArray(data)) modelsList = data;
-
-    let ids = [];
-    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
-
-    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
+    const ids = extractModelIdsFromResponse(data);
 
     if (!ids.length) { setStatus('直连刷新失败：未解析到模型列表', 'warn'); return; }
 
@@ -12085,15 +12117,7 @@ async function refreshSexGuideModels() {
 
     const data = await res.json().catch(() => ({}));
 
-    let modelsList = [];
-    if (Array.isArray(data?.models)) modelsList = data.models;
-    else if (Array.isArray(data?.data)) modelsList = data.data;
-    else if (Array.isArray(data)) modelsList = data;
-
-    let ids = [];
-    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
-
-    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
+    const ids = extractModelIdsFromResponse(data);
 
     if (!ids.length) {
       setSexGuideStatus('刷新成功，但未解析到模型列表（返回格式不兼容）', 'warn');
@@ -12129,15 +12153,7 @@ async function refreshSexGuideModels() {
     }
     const data = await res.json().catch(() => ({}));
 
-    let modelsList = [];
-    if (Array.isArray(data?.models)) modelsList = data.models;
-    else if (Array.isArray(data?.data)) modelsList = data.data;
-    else if (Array.isArray(data)) modelsList = data;
-
-    let ids = [];
-    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
-
-    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
+    const ids = extractModelIdsFromResponse(data);
 
     if (!ids.length) { setSexGuideStatus('直连刷新失败：未解析到模型列表', 'warn'); return; }
 
@@ -12182,15 +12198,7 @@ async function refreshIndexModels() {
 
     const data = await res.json().catch(() => ({}));
 
-    let modelsList = [];
-    if (Array.isArray(data?.models)) modelsList = data.models;
-    else if (Array.isArray(data?.data)) modelsList = data.data;
-    else if (Array.isArray(data)) modelsList = data;
-
-    let ids = [];
-    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
-
-    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
+    const ids = extractModelIdsFromResponse(data);
 
     if (!ids.length) {
       setStatus('刷新成功，但未解析到模型列表（返回格式不兼容）', 'warn');
@@ -12226,15 +12234,7 @@ async function refreshIndexModels() {
     }
     const data = await res.json().catch(() => ({}));
 
-    let modelsList = [];
-    if (Array.isArray(data?.models)) modelsList = data.models;
-    else if (Array.isArray(data?.data)) modelsList = data.data;
-    else if (Array.isArray(data)) modelsList = data;
-
-    let ids = [];
-    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
-
-    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
+    const ids = extractModelIdsFromResponse(data);
 
     if (!ids.length) { setStatus('直连刷新失败：未解析到模型列表', 'warn'); return; }
 
@@ -12280,15 +12280,7 @@ async function refreshRollModels() {
 
     const data = await res.json().catch(() => ({}));
 
-    let modelsList = [];
-    if (Array.isArray(data?.models)) modelsList = data.models;
-    else if (Array.isArray(data?.data)) modelsList = data.data;
-    else if (Array.isArray(data)) modelsList = data;
-
-    let ids = [];
-    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
-
-    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
+    const ids = extractModelIdsFromResponse(data);
 
     if (!ids.length) {
       setStatus('刷新成功，但未解析到模型列表（返回格式不兼容）', 'warn');
@@ -12324,15 +12316,7 @@ async function refreshRollModels() {
     }
     const data = await res.json().catch(() => ({}));
 
-    let modelsList = [];
-    if (Array.isArray(data?.models)) modelsList = data.models;
-    else if (Array.isArray(data?.data)) modelsList = data.data;
-    else if (Array.isArray(data)) modelsList = data;
-
-    let ids = [];
-    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
-
-    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
+    const ids = extractModelIdsFromResponse(data);
 
     if (!ids.length) { setStatus('直连刷新失败：未解析到模型列表', 'warn'); return; }
 
@@ -12435,10 +12419,7 @@ async function refreshImageGenModels() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
     const data = await response.json();
-    const models = (data.data || data.models || data || [])
-      .map(m => typeof m === 'string' ? m : (m.id || m.name || ''))
-      .filter(Boolean)
-      .sort();
+    const models = extractModelIdsFromResponse(data);
 
     if (!models.length) { setImageGenStatus('未找到可用模型', 'warn'); return; }
 
@@ -13326,15 +13307,7 @@ async function refreshModels() {
 
     const data = await res.json().catch(() => ({}));
 
-    let modelsList = [];
-    if (Array.isArray(data?.models)) modelsList = data.models;
-    else if (Array.isArray(data?.data)) modelsList = data.data;
-    else if (Array.isArray(data)) modelsList = data;
-
-    let ids = [];
-    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
-
-    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
+    const ids = extractModelIdsFromResponse(data);
 
     if (!ids.length) {
       setStatus('刷新成功，但未解析到模型列表（返回格式不兼容）', 'warn');
@@ -13379,15 +13352,7 @@ async function refreshModels() {
     }
     const data = await res.json().catch(() => ({}));
 
-    let modelsList = [];
-    if (Array.isArray(data?.models)) modelsList = data.models;
-    else if (Array.isArray(data?.data)) modelsList = data.data;
-    else if (Array.isArray(data)) modelsList = data;
-
-    let ids = [];
-    if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
-
-    ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
+    const ids = extractModelIdsFromResponse(data);
 
     if (!ids.length) { setStatus('直连刷新失败：未解析到模型列表', 'warn'); return; }
 
@@ -13423,14 +13388,7 @@ async function refreshModels() {
       }
 
       const data = await res.json().catch(() => ({}));
-      let modelsList = [];
-      if (Array.isArray(data?.models)) modelsList = data.models;
-      else if (Array.isArray(data?.data)) modelsList = data.data;
-      else if (Array.isArray(data)) modelsList = data;
-
-      let ids = [];
-      if (modelsList.length) ids = modelsList.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean);
-      ids = Array.from(new Set(ids)).sort((a, b) => String(a).localeCompare(String(b)));
+      const ids = extractModelIdsFromResponse(data);
 
       if (!ids.length) {
         setStatus('刷新成功，但未解析到模型列表', 'warn');
@@ -17132,13 +17090,13 @@ function setupParallelWorldPage() {
     const name = String($('#sg_pwManualNpcName').val() || '').trim();
     if (!name) return;
     const s = ensureSettings();
-    let list = s.parallelWorldTrackedNpcs || [];
-    if (list.some(t => t.name === name)) {
+    let list = normalizeParallelWorldTrackedList(s.parallelWorldTrackedNpcs);
+    if (list.some(t => String(t.name || '').trim().toLowerCase() === name.toLowerCase())) {
       setParallelWorldStatus(`${name} 已在列表中`, 'warn');
       return;
     }
     list.push({ name, enabled: true });
-    s.parallelWorldTrackedNpcs = list;
+    s.parallelWorldTrackedNpcs = normalizeParallelWorldTrackedList(list);
     saveSettings();
     $('#sg_pwManualNpcName').val('');
     refreshParallelWorldTrackedLists();
@@ -18375,6 +18333,7 @@ function setupEventListeners() {
 
     eventSource.on(event_types.CHAT_CHANGED, async () => {
       inlineCache.clear();
+      postGenerationPending = false;
       scheduleReapplyAll('chat_changed');
       ensureChatActionButtons();
       ensureBlueIndexLive(true).catch(() => void 0);
@@ -18396,8 +18355,19 @@ function setupEventListeners() {
             console.log('[StoryGuide] Initialized lastStructuredFloor to', floorNow, 'for existing chat');
           }
         }
+        if (s.parallelWorldEnabled && s.parallelWorldAutoTrigger) {
+          const ctxNow = SillyTavern.getContext();
+          const chatNow = Array.isArray(ctxNow.chat) ? ctxNow.chat : [];
+          const floorNow = computeFloorCount(chatNow, 'assistant');
+          const pwData = getParallelWorldData();
+          if (floorNow > 0 && !Number(pwData.lastRunFloor || 0)) {
+            pwData.lastRunFloor = floorNow;
+            await setParallelWorldData(pwData);
+            console.log('[StoryGuide] Initialized parallel world lastRunFloor to', floorNow, 'for existing chat');
+          }
+        }
       } catch (e) {
-        console.warn('[StoryGuide] Failed to init structured progress on chat change:', e);
+        console.warn('[StoryGuide] Failed to init auto-run progress on chat change:', e);
       }
 
       if (document.getElementById('sg_modal_backdrop') && $('#sg_modal_backdrop').is(':visible')) {
@@ -18409,20 +18379,23 @@ function setupEventListeners() {
     eventSource.on(event_types.MESSAGE_RECEIVED, () => {
       // 禁止自动生成：不在收到消息时自动分析/追加
       scheduleReapplyAll('msg_received');
+      if (!postGenerationPending) return;
+      postGenerationPending = false;
       // 回复生成结束后再触发总结/结构化
       schedulePostGenerationAuto('msg_received');
       // 平行世界自动推演
-      maybeAutoRunParallelWorld().catch(e => console.warn('[StoryGuide] 平行世界自动推演异常:', e));
+      // handled by schedulePostGenerationAuto after generation becomes idle
     });
 
     eventSource.on(event_types.MESSAGE_SENT, () => {
+      postGenerationPending = true;
       // 禁止自动生成：不在发送消息时自动刷新面板
       // ROLL 判定（尽量在生成前完成）
       maybeInjectRollResult('msg_sent').catch(() => void 0);
       // 蓝灯索引 → 绿灯触发（尽量在生成前完成）
       maybeInjectWorldInfoTriggers('msg_sent').catch(() => void 0);
       // 记录生成活动，最终在回复完成后触发
-      schedulePostGenerationAuto('msg_sent');
+      // auto actions are scheduled on MESSAGE_RECEIVED after content lands
     });
 
     eventSource.on(event_types.MESSAGE_DELETED, async (data) => {
