@@ -86,6 +86,43 @@ const DEFAULT_SEX_GUIDE_SYSTEM_PROMPT = `你是一个“性爱指导”助手，
 
 const DEFAULT_SEX_GUIDE_USER_TEMPLATE = `【上下文】\n{{snapshot}}\n\n【性爱指导世界书】\n{{worldbook}}\n\n【用户需求】\n{{userNeed}}\n\n【用户输入】\n{{lastUser}}`;
 
+const DEFAULT_CHARACTER_ARCHIVE_SYSTEM_PROMPT = `你是一个“人物档案生成”助手。
+
+任务：
+1) 阅读最近剧情上下文与指定世界书中的人物条目，整理为一份可直接贴入聊天的角色档案。
+2) 档案应尽量客观、统一、可检索，优先保留世界书中的明确设定；上下文只用于补充最新状态、关系变化、装备与能力变化。
+3) 若信息缺失，不要乱编，用“待确认”标注。
+
+要求：
+- 输出纯文本，不要 JSON，不要代码块。
+- 默认使用中文。
+- 档案中应包含：姓名、身份/阵营、性格、背景、与主角关系、当前状态、六维属性、技能/天赋、装备、关键经历。
+- 六维属性请统一写为：体质 / 智力 / 魅力 / 力量 / 敏捷 / 幸运。若世界书没有明确数值，可结合上下文给出“低/中/高/极高”这类保守估计，并标注“估计”。`;
+
+const DEFAULT_CHARACTER_ARCHIVE_USER_TEMPLATE = `【目标人物】
+{{characterName}}
+
+【最近上下文】
+{{recentText}}
+
+【完整快照】
+{{snapshot}}
+
+【命中的世界书人物条目】
+{{worldbook}}
+
+请基于以上内容生成一份人物档案。`;
+
+const DEFAULT_CHARACTER_ARCHIVE_OUTPUT_TEMPLATE = `【人物档案】
+姓名：{{name}}
+阵营/身份：{{faction}}
+六维属性：{{stats}}
+技能/天赋：{{skills}}
+装备：{{equipment}}
+与主角关系：{{relationship}}
+近期变化：{{recentChanges}}
+备注：{{notes}}`;
+
 // 无论用户怎么自定义提示词，仍会强制追加 JSON 输出结构要求，避免写入世界书失败
 const SUMMARY_JSON_REQUIREMENT = `输出要求：\n- 只输出严格 JSON，不要 Markdown、不要代码块、不要任何多余文字。\n- JSON 结构必须为：{"title": string, "summary": string, "keywords": string[]}。\n- keywords 为 6~14 个词/短语，尽量去重、避免泛词。`;
 
@@ -556,6 +593,26 @@ const DEFAULT_SETTINGS = Object.freeze({
   sexGuidePresetList: '[]',
   sexGuidePresetActive: '',
 
+  // ===== 人物档案模块 =====
+  characterArchiveEnabled: false,
+  characterArchiveProvider: 'st',
+  characterArchiveTemperature: 0.5,
+  characterArchiveCustomEndpoint: '',
+  characterArchiveCustomApiKey: '',
+  characterArchiveCustomModel: 'gpt-4o-mini',
+  characterArchiveCustomModelsCache: [],
+  characterArchiveCustomMaxTokens: 3072,
+  characterArchiveCustomStream: false,
+  characterArchiveWorldbookFile: '',
+  characterArchiveEntryPrefix: '人物',
+  characterArchiveTargetName: '',
+  characterArchiveTargetOptions: [],
+  characterArchiveRecentMessages: 8,
+  characterArchiveIncludeUserInput: true,
+  characterArchiveSystemPrompt: DEFAULT_CHARACTER_ARCHIVE_SYSTEM_PROMPT,
+  characterArchiveUserTemplate: DEFAULT_CHARACTER_ARCHIVE_USER_TEMPLATE,
+  characterArchiveOutputTemplate: DEFAULT_CHARACTER_ARCHIVE_OUTPUT_TEMPLATE,
+
   // ===== 总结功能（独立于剧情提示的 API 设置） =====
   summaryEnabled: false,
   // 多少“楼层”总结一次（楼层统计方式见 summaryCountMode）
@@ -961,6 +1018,7 @@ let lastJsonText = '';
 let lastSummary = null; // { title, summary, keywords, ... }
 let lastSummaryText = '';
 let lastSexGuideText = '';
+let lastCharacterArchiveText = '';
 let refreshTimer = null;
 let appendTimer = null;
 let summaryTimer = null;
@@ -999,6 +1057,7 @@ const panelCache = new Map(); // <mesKey, { htmlInner, collapsed, createdAt }>
 let chatDomObserver = null;
 let generationIdleTimer = null;
 let postGenerationPending = false;
+let postGenerationAssistantFloor = 0;
 let bodyDomObserver = null;
 let reapplyTimer = null;
 
@@ -2611,8 +2670,13 @@ async function maybeAutoRunParallelWorld() {
   const pwData = getParallelWorldData();
   const lastFloor = pwData.lastRunFloor || 0;
   const every = Math.max(1, s.parallelWorldAutoEvery || 5);
+  const autoParallelHint = () => {
+    setParallelWorldStatus('正在生成平行事件...', 'warn');
+    showToast('正在生成平行事件...', { kind: 'info', spinner: true, sticky: true });
+  };
 
   if (currentFloor - lastFloor >= every) {
+    autoParallelHint();
     console.log(`[StoryGuide] 平行世界: 自动推演触发 (楼层 ${lastFloor} → ${currentFloor}, 间隔 ${every})`);
     await runParallelWorldSimulation();
   }
@@ -3516,6 +3580,13 @@ function setStatus(text, kind = '') {
 
 function setCharacterStatus(text, kind = '') {
   const $s = $('#sg_char_status');
+  if (!$s.length) return;
+  $s.removeClass('ok err warn').addClass(kind || '');
+  $s.text(text || '');
+}
+
+function setCharacterArchiveStatus(text, kind = '') {
+  const $s = $('#sg_char_archive_status');
   if (!$s.length) return;
   $s.removeClass('ok err warn').addClass(kind || '');
   $s.text(text || '');
@@ -5458,6 +5529,68 @@ function buildRecentChatTextSexGuide(chat, maxMessages = 6, maxCharsPerMessage =
   return picked.reverse().join('\n');
 }
 
+function extractCharacterArchiveCandidateName(entry, prefix = '') {
+  const content = String(entry?.content || '').trim();
+  const lines = content.split(/\r?\n/).map(x => String(x || '').trim()).filter(Boolean);
+  for (const line of lines.slice(0, 4)) {
+    const patterns = [
+      /^[【\[]?人物[】\]]?\s*[:：]?\s*(.+)$/,
+      /^姓名\s*[:：]\s*(.+)$/,
+      /^名字\s*[:：]\s*(.+)$/,
+      /^名称\s*[:：]\s*(.+)$/,
+    ];
+    for (const re of patterns) {
+      const m = line.match(re);
+      if (m && m[1]) return String(m[1]).trim();
+    }
+  }
+
+  let label = String(getWorldInfoEntryLabel(entry) || '').trim();
+  label = label.replace(/\[[^\]]*\]\s*/g, '').trim();
+  const cleanPrefix = String(prefix || '').trim();
+  if (cleanPrefix) {
+    const idx = label.indexOf(cleanPrefix);
+    if (idx >= 0) label = label.slice(idx + cleanPrefix.length).trim();
+  }
+  label = label.replace(/^[｜|:：\-—\s]+/, '').trim();
+  const parts = label.split(/[｜|:：]/).map(x => String(x || '').trim()).filter(Boolean);
+  if (parts.length >= 2) {
+    const nonCodeParts = parts.filter(part => !/^[A-Z]{2,5}[-_]\d+$/i.test(part) && !/^\d+$/.test(part));
+    if (nonCodeParts.length >= 2) return nonCodeParts[1];
+    if (nonCodeParts.length >= 1) return nonCodeParts[0];
+  }
+  if (parts.length === 1) return parts[0];
+  return label || String(entry?.keys?.[0] || '').trim();
+}
+
+function fillCharacterArchiveTargetSelect(options, selected) {
+  const $sel = $('#sg_char_archive_entrySelect');
+  if (!$sel.length) return;
+  $sel.empty();
+  $sel.append('<option value="">(选择人物)</option>');
+  (options || []).forEach((name) => {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    if (selected && name === selected) opt.selected = true;
+    $sel.append(opt);
+  });
+}
+
+function fillCharacterArchiveModelSelect(options, selected) {
+  const $sel = $('#sg_char_archive_modelSelect');
+  if (!$sel.length) return;
+  $sel.empty();
+  $sel.append('<option value="">(选择模型)</option>');
+  (options || []).forEach((name) => {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    if (selected && name === selected) opt.selected = true;
+    $sel.append(opt);
+  });
+}
+
 function buildSexGuidePromptMessages(snapshotText, worldbookText, settings, options = {}) {
   const s = settings || ensureSettings();
   const ctx = SillyTavern.getContext();
@@ -5491,6 +5624,209 @@ function buildSexGuidePromptMessages(snapshotText, worldbookText, settings, opti
     { role: 'system', content: system },
     { role: 'user', content: user }
   ];
+}
+
+function scoreCharacterArchiveEntry(entry, targetName) {
+  const target = String(targetName || '').trim().toLowerCase();
+  if (!target) return 0;
+  const label = String(getWorldInfoEntryLabel(entry) || '').toLowerCase();
+  const keys = Array.isArray(entry?.keys) ? entry.keys.map(k => String(k || '').toLowerCase()) : [];
+  const content = String(entry?.content || '').toLowerCase();
+  let score = 0;
+  if (label.includes(target)) score += 8;
+  if (keys.some(k => k.includes(target))) score += 5;
+  if (content.includes(target)) score += 2;
+  return score;
+}
+
+function pickCharacterArchiveEntries(entries, prefix, targetName) {
+  const filtered = filterWorldInfoEntriesByPrefix(entries, prefix).filter(e => e && !e.disabled);
+  const target = String(targetName || '').trim();
+  if (!target) return filtered.slice(0, 3);
+  const ranked = filtered
+    .map(entry => ({ entry, score: scoreCharacterArchiveEntry(entry, target) }))
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score || String(getWorldInfoEntryLabel(a.entry)).localeCompare(String(getWorldInfoEntryLabel(b.entry))));
+  return ranked.slice(0, 3).map(item => item.entry);
+}
+
+async function buildCharacterArchiveWorldbookText(fileName, prefix, targetName) {
+  const file = normalizeWorldInfoFileName(fileName);
+  if (!file) throw new Error('请先填写世界书文件名');
+  const json = await fetchWorldInfoFileJsonCompat(file);
+  const entries = parseWorldbookJson(JSON.stringify(json || {}));
+  const picked = pickCharacterArchiveEntries(entries, prefix, targetName);
+  if (!picked.length) {
+    const suffix = targetName ? `：${targetName}` : '';
+    throw new Error(`指定世界书中未找到匹配的人物条目${suffix}`);
+  }
+  return picked.map((entry, idx) => {
+    const label = String(getWorldInfoEntryLabel(entry) || `人物条目${idx + 1}`).trim();
+    const keys = Array.isArray(entry?.keys) && entry.keys.length ? `\n触发词：${entry.keys.join(' / ')}` : '';
+    return `【条目${idx + 1}】${label}${keys}\n${String(entry?.content || '').trim()}`;
+  }).join('\n\n');
+}
+
+async function loadCharacterArchiveTargetOptions(fileName, prefix) {
+  const file = normalizeWorldInfoFileName(fileName);
+  if (!file) return [];
+  const json = await fetchWorldInfoFileJsonCompat(file);
+  const entries = parseWorldbookJson(JSON.stringify(json || {}));
+  const filtered = filterWorldInfoEntriesByPrefix(entries, prefix).filter(e => e && !e.disabled);
+  const names = Array.from(new Set(
+    filtered
+      .map(entry => extractCharacterArchiveCandidateName(entry, prefix))
+      .map(name => String(name || '').trim())
+      .filter(Boolean)
+  )).sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+  return names;
+}
+
+function buildCharacterArchivePromptMessages(settings, worldbookText, targetName) {
+  const s = settings || ensureSettings();
+  const ctx = SillyTavern.getContext();
+  const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+  const recentCount = clampInt(s.characterArchiveRecentMessages, 1, 30, 8);
+  const { snapshotText } = buildSnapshot();
+  const recentText = buildRecentChatTextSexGuide(chat, recentCount, 1000) || '(无可用上下文)';
+  const lastUser = s.characterArchiveIncludeUserInput ? (getLastUserMessageText(chat) || '') : '';
+  const tpl = String(s.characterArchiveUserTemplate || DEFAULT_CHARACTER_ARCHIVE_USER_TEMPLATE).trim() || DEFAULT_CHARACTER_ARCHIVE_USER_TEMPLATE;
+  const outputTemplate = String(s.characterArchiveOutputTemplate || DEFAULT_CHARACTER_ARCHIVE_OUTPUT_TEMPLATE).trim() || DEFAULT_CHARACTER_ARCHIVE_OUTPUT_TEMPLATE;
+  const user = renderTemplate(tpl, {
+    characterName: String(targetName || '').trim() || '待指定',
+    recentText,
+    snapshot: snapshotText,
+    worldbook: String(worldbookText || '').trim(),
+    lastUser,
+  }) + `\n\n【固定输出模板】\n请严格按照以下模板输出，不得增删字段标题，可在字段值内填写“待确认”。\n${outputTemplate}`;
+  const system = String(s.characterArchiveSystemPrompt || DEFAULT_CHARACTER_ARCHIVE_SYSTEM_PROMPT).trim() || DEFAULT_CHARACTER_ARCHIVE_SYSTEM_PROMPT;
+  return [
+    { role: 'system', content: system },
+    { role: 'user', content: user },
+  ];
+}
+
+async function generateCharacterArchive() {
+  const s = ensureSettings();
+  if (!s.characterArchiveEnabled) {
+    setCharacterArchiveStatus('· 请先启用人物档案模块 ·', 'warn');
+    return;
+  }
+
+  const targetName = String(s.characterArchiveTargetName || '').trim();
+  if (!targetName) {
+    setCharacterArchiveStatus('· 请先填写目标人物名 ·', 'warn');
+    return;
+  }
+
+  setCharacterArchiveStatus('· 正在读取世界书与上下文… ·', 'warn');
+
+  try {
+    const worldbookText = await buildCharacterArchiveWorldbookText(
+      s.characterArchiveWorldbookFile,
+      s.characterArchiveEntryPrefix,
+      targetName
+    );
+    const messages = buildCharacterArchivePromptMessages(s, worldbookText, targetName);
+
+    setCharacterArchiveStatus('· 正在生成人物档案… ·', 'warn');
+
+    let text = '';
+    if (String(s.characterArchiveProvider || 'st') === 'custom') {
+      text = await callViaCustom(
+        s.characterArchiveCustomEndpoint,
+        s.characterArchiveCustomApiKey,
+        s.characterArchiveCustomModel,
+        messages,
+        clampFloat(s.characterArchiveTemperature, 0, 2, 0.5),
+        clampInt(s.characterArchiveCustomMaxTokens, 256, 200000, 3072),
+        0.95,
+        !!s.characterArchiveCustomStream
+      );
+    } else {
+      text = await callViaSillyTavern(messages, null, clampFloat(s.characterArchiveTemperature, 0, 2, 0.5));
+    }
+
+    lastCharacterArchiveText = String(text || '').trim();
+    $('#sg_char_archive_output').val(lastCharacterArchiveText);
+    $('#sg_char_archive_copy, #sg_char_archive_insert').prop('disabled', !lastCharacterArchiveText);
+    setCharacterArchiveStatus('· 已生成：可复制或填入聊天输入框（不会自动发送） ·', 'ok');
+  } catch (e) {
+    console.error('[StoryGuide] character archive generation failed:', e);
+    setCharacterArchiveStatus(`· 生成人物档案失败：${e?.message ?? e} ·`, 'err');
+  }
+}
+
+async function refreshCharacterArchiveModels() {
+  const s = ensureSettings();
+  const raw = String($('#sg_char_archive_customEndpoint').val() || s.characterArchiveCustomEndpoint || '').trim();
+  const apiBase = normalizeBaseUrl(raw);
+  if (!apiBase) { setCharacterArchiveStatus('· 请先填写独立 API 基础 URL ·', 'warn'); return; }
+
+  setCharacterArchiveStatus('· 正在刷新人物档案模型列表… ·', 'warn');
+
+  const apiKey = String($('#sg_char_archive_customApiKey').val() || s.characterArchiveCustomApiKey || '');
+  const statusUrl = '/api/backends/chat-completions/status';
+  const body = {
+    reverse_proxy: apiBase,
+    chat_completion_source: 'custom',
+    custom_url: apiBase,
+    custom_include_headers: apiKey ? `Authorization: Bearer ${apiKey}` : ''
+  };
+
+  try {
+    const headers = { ...getStRequestHeadersCompat(), 'Content-Type': 'application/json' };
+    const res = await fetch(statusUrl, { method: 'POST', headers, body: JSON.stringify(body) });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      const err = new Error(`HTTP ${res.status} ${res.statusText}\n${txt}`);
+      err.status = res.status;
+      throw err;
+    }
+    const data = await res.json().catch(() => ({}));
+    const ids = extractModelIdsFromResponse(data);
+    if (!ids.length) {
+      setCharacterArchiveStatus('· 已连接，但未解析到模型列表 ·', 'warn');
+      return;
+    }
+    s.characterArchiveCustomModelsCache = ids;
+    saveSettings();
+    fillCharacterArchiveModelSelect(ids, s.characterArchiveCustomModel);
+    setCharacterArchiveStatus(`· 已刷新模型：${ids.length} 个 ·`, 'ok');
+    return;
+  } catch (e) {
+    const status = e?.status;
+    if (!(status === 404 || status === 405)) console.warn('[StoryGuide] character archive status check failed; fallback to direct /models', e);
+  }
+
+  try {
+    const modelsUrl = (function (base) {
+      const u = normalizeBaseUrl(base);
+      if (!u) return '';
+      if (/\/v1$/.test(u)) return u + '/models';
+      if (/\/v1\b/i.test(u)) return u.replace(/\/+$/, '') + '/models';
+      return u + '/v1/models';
+    })(apiBase);
+    const headers = { 'Content-Type': 'application/json' };
+    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+    const res = await fetch(modelsUrl, { method: 'GET', headers });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status} ${res.statusText}\n${txt}`);
+    }
+    const data = await res.json().catch(() => ({}));
+    const ids = extractModelIdsFromResponse(data);
+    if (!ids.length) {
+      setCharacterArchiveStatus('· 直连成功，但未解析到模型列表 ·', 'warn');
+      return;
+    }
+    s.characterArchiveCustomModelsCache = ids;
+    saveSettings();
+    fillCharacterArchiveModelSelect(ids, s.characterArchiveCustomModel);
+    setCharacterArchiveStatus(`· 已刷新模型：${ids.length} 个 ·`, 'ok');
+  } catch (e) {
+    setCharacterArchiveStatus(`· 刷新模型失败：${e?.message ?? e} ·`, 'err');
+  }
 }
 
 // -------------------- provider=st --------------------
@@ -11536,6 +11872,21 @@ function attachToggleHandler(boxEl, mesKey) {
         const mesEl = boxEl.closest('.mes');
         (mesEl || boxEl).scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
+
+      try {
+        if (postGenerationPending) {
+          const ctxNow = SillyTavern.getContext();
+          const chatNow = Array.isArray(ctxNow.chat) ? ctxNow.chat : [];
+          const assistantFloorNow = computeFloorCount(chatNow, 'assistant');
+          if (assistantFloorNow > Number(postGenerationAssistantFloor || 0)) {
+            postGenerationPending = false;
+            postGenerationAssistantFloor = assistantFloorNow;
+            schedulePostGenerationAuto('chat_changed_after_generation');
+          }
+        }
+      } catch (e) {
+        console.warn('[StoryGuide] CHAT_CHANGED post-generation auto scheduling failed:', e);
+      }
     });
   };
 
@@ -13730,6 +14081,7 @@ function buildModalHtml() {
             <button class="sg-pgtab" id="sg_pgtab_image">图像生成</button>
             <button class="sg-pgtab" id="sg_pgtab_sex">性爱指导</button>
             <button class="sg-pgtab" id="sg_pgtab_character">自定义角色</button>
+            <button class="sg-pgtab" id="sg_pgtab_char_archive">人物档案</button>
             <button class="sg-pgtab" id="sg_pgtab_parallel">平行世界</button>
           </div>
 
@@ -15354,6 +15706,139 @@ function buildModalHtml() {
             </div>
           </div> <!-- sg_page_character -->
 
+          <div class="sg-page" id="sg_page_char_archive">
+            <div class="sg-card">
+              <div class="sg-card-title">人物档案</div>
+
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>启用</label>
+                  <label class="sg-switch">
+                    <input type="checkbox" id="sg_char_archive_enabled">
+                    <span class="sg-slider"></span>
+                  </label>
+                </div>
+                <div class="sg-field">
+                  <label>Provider</label>
+                  <select id="sg_char_archive_provider">
+                    <option value="st">使用当前 SillyTavern API</option>
+                    <option value="custom">独立 API</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>temperature</label>
+                  <input id="sg_char_archive_temperature" type="number" step="0.05" min="0" max="2">
+                </div>
+                <div class="sg-field">
+                  <label>读取最近消息数</label>
+                  <input id="sg_char_archive_recent" type="number" min="1" max="30">
+                </div>
+              </div>
+
+              <div id="sg_char_archive_custom_block" class="sg-card sg-subcard" style="display:none;">
+                <div class="sg-card-title">独立 API 设置</div>
+                <div class="sg-field">
+                  <label>API 基础 URL</label>
+                  <input id="sg_char_archive_customEndpoint" type="text" placeholder="https://xxx.com/v1">
+                </div>
+                <div class="sg-grid2">
+                  <div class="sg-field">
+                    <label>API Key</label>
+                    <input id="sg_char_archive_customApiKey" type="password" placeholder="可留空">
+                  </div>
+                  <div class="sg-field">
+                    <label>模型</label>
+                    <div class="sg-row sg-inline" style="gap:4px;">
+                      <input id="sg_char_archive_customModel" type="text" placeholder="gpt-4o-mini" style="flex:1;">
+                      <select id="sg_char_archive_modelSelect" class="sg-model-select" style="min-width:140px;">
+                        <option value="">(选择模型)</option>
+                      </select>
+                      <button class="menu_button sg-btn sg-character-mini" id="sg_char_archive_refreshModels">刷新模型</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="sg-row">
+                  <div class="sg-field sg-field-full">
+                    <label>最大回复 Token 数</label>
+                    <input id="sg_char_archive_customMaxTokens" type="number" min="256" max="200000" step="1" placeholder="例如 3072">
+                    <label class="sg-check" style="margin-top:8px;">
+                      <input type="checkbox" id="sg_char_archive_customStream"> 使用流式返回
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="sg-card">
+              <div class="sg-card-title">世界书与目标</div>
+
+              <div class="sg-row sg-inline">
+                <input id="sg_char_archive_worldbookFile" type="text" placeholder="世界书文件名" style="flex:1; min-width: 240px;">
+                <select id="sg_char_archive_worldbookSelect" class="sg-model-select" style="min-width:160px;">
+                  <option value="">(选择世界书)</option>
+                </select>
+                <button class="menu_button sg-btn" id="sg_char_archive_refreshWorldbooks">刷新列表</button>
+              </div>
+
+              <div class="sg-grid2" style="margin-top:8px;">
+                <div class="sg-field">
+                  <label>人物条目前缀</label>
+                  <input id="sg_char_archive_prefix" type="text" placeholder="人物">
+                </div>
+                <div class="sg-field">
+                  <label>目标人物名</label>
+                  <input id="sg_char_archive_target" type="text" placeholder="例如：苏晓">
+                </div>
+              </div>
+
+              <div class="sg-row sg-inline" style="margin-top:6px;">
+                <select id="sg_char_archive_entrySelect" class="sg-model-select" style="flex:1; min-width:180px;">
+                  <option value="">(选择人物)</option>
+                </select>
+                <button class="menu_button sg-btn" id="sg_char_archive_refreshEntries">刷新人物列表</button>
+              </div>
+
+              <div class="sg-row sg-inline" style="margin-top:6px;">
+                <label class="sg-check"><input type="checkbox" id="sg_char_archive_includeUserInput">包含最近用户输入</label>
+              </div>
+            </div>
+
+            <div class="sg-card">
+              <div class="sg-card-title">提示词</div>
+              <div class="sg-field">
+                <label>System</label>
+                <textarea id="sg_char_archive_systemPrompt" rows="6" placeholder="用于约束人物档案风格与字段"></textarea>
+              </div>
+              <div class="sg-field">
+                <label>User Template</label>
+                <textarea id="sg_char_archive_userTemplate" rows="6" placeholder="支持：{{characterName}} {{recentText}} {{snapshot}} {{worldbook}} {{lastUser}}"></textarea>
+                <div class="sg-hint">占位符：{{characterName}} {{recentText}} {{snapshot}} {{worldbook}} {{lastUser}}</div>
+              </div>
+              <div class="sg-field">
+                <label>固定输出模板</label>
+                <textarea id="sg_char_archive_outputTemplate" rows="8" placeholder="可编辑固定模板，模型会强制按此结构输出"></textarea>
+                <div class="sg-hint">占位符建议：{{name}} {{faction}} {{stats}} {{skills}} {{equipment}} {{relationship}} {{recentChanges}} {{notes}}</div>
+              </div>
+            </div>
+
+            <div class="sg-card">
+              <div class="sg-card-title">生成</div>
+              <div class="sg-actions-row">
+                <button class="menu_button sg-btn-primary" id="sg_char_archive_generate">生成人物档案</button>
+                <button class="menu_button sg-btn" id="sg_char_archive_copy" disabled>复制</button>
+                <button class="menu_button sg-btn" id="sg_char_archive_insert" disabled>填入聊天框</button>
+              </div>
+              <div class="sg-field" style="margin-top:10px;">
+                <label>输出</label>
+                <textarea id="sg_char_archive_output" rows="12" spellcheck="false"></textarea>
+                <div class="sg-hint" id="sg_char_archive_status">· 生成后可复制或填入聊天输入框 ·</div>
+              </div>
+            </div>
+          </div> <!-- sg_page_char_archive -->
+
           <div class="sg-page" id="sg_page_parallel">
             <div class="sg-card">
               <div class="sg-card-title">🌍 平行世界（NPC离屏模拟）</div>
@@ -16605,8 +17090,8 @@ function ensureModal() {
 
 function showSettingsPage(page) {
   const p = String(page || 'guide');
-  $('#sg_pgtab_guide, #sg_pgtab_summary, #sg_pgtab_index, #sg_pgtab_roll, #sg_pgtab_image, #sg_pgtab_sex, #sg_pgtab_character, #sg_pgtab_parallel').removeClass('active');
-  $('#sg_page_guide, #sg_page_summary, #sg_page_index, #sg_page_roll, #sg_page_image, #sg_page_sex, #sg_page_character, #sg_page_parallel').removeClass('active');
+  $('#sg_pgtab_guide, #sg_pgtab_summary, #sg_pgtab_index, #sg_pgtab_roll, #sg_pgtab_image, #sg_pgtab_sex, #sg_pgtab_character, #sg_pgtab_char_archive, #sg_pgtab_parallel').removeClass('active');
+  $('#sg_page_guide, #sg_page_summary, #sg_page_index, #sg_page_roll, #sg_page_image, #sg_page_sex, #sg_page_character, #sg_page_char_archive, #sg_page_parallel').removeClass('active');
 
   if (p === 'summary') {
     $('#sg_pgtab_summary').addClass('active');
@@ -16626,6 +17111,9 @@ function showSettingsPage(page) {
   } else if (p === 'character') {
     $('#sg_pgtab_character').addClass('active');
     $('#sg_page_character').addClass('active');
+  } else if (p === 'char_archive') {
+    $('#sg_pgtab_char_archive').addClass('active');
+    $('#sg_page_char_archive').addClass('active');
   } else if (p === 'parallel') {
     $('#sg_pgtab_parallel').addClass('active');
     $('#sg_page_parallel').addClass('active');
@@ -16661,10 +17149,12 @@ function setupSettingsPages() {
   $('#sg_pgtab_image').on('click', () => showSettingsPage('image'));
   $('#sg_pgtab_sex').on('click', () => showSettingsPage('sex'));
   $('#sg_pgtab_character').on('click', () => showSettingsPage('character'));
+  $('#sg_pgtab_char_archive').on('click', () => showSettingsPage('char_archive'));
   $('#sg_pgtab_parallel').on('click', () => showSettingsPage('parallel'));
 
   try { setupSexGuidePage(); } catch (e) { console.error('[StoryGuide] setupSexGuidePage failed:', e); }
   setupCharacterPage();
+  try { setupCharacterArchivePage(); } catch (e) { console.error('[StoryGuide] setupCharacterArchivePage failed:', e); }
   try { setupParallelWorldPage(); } catch (e) { console.error('[StoryGuide] setupParallelWorldPage failed:', e); }
 
   // quick jump
@@ -16825,6 +17315,106 @@ function setupCharacterPage() {
     }
     const ok = injectToUserInput(text);
     setCharacterStatus(ok ? '· 已填入聊天输入框（未发送） ·' : '· 未找到聊天输入框 ·', ok ? 'ok' : 'err');
+  });
+}
+
+function setupCharacterArchivePage() {
+  const autoSave = () => {
+    pullUiToSettings();
+    saveSettings();
+  };
+
+  const refreshEntries = async () => {
+    pullUiToSettings();
+    saveSettings();
+    const s = ensureSettings();
+    setCharacterArchiveStatus('· 正在读取人物条目列表… ·', 'warn');
+    try {
+      const names = await loadCharacterArchiveTargetOptions(s.characterArchiveWorldbookFile, s.characterArchiveEntryPrefix);
+      s.characterArchiveTargetOptions = names;
+      saveSettings();
+      fillCharacterArchiveTargetSelect(names, s.characterArchiveTargetName);
+      setCharacterArchiveStatus(`· 已读取人物条目：${names.length} 个 ·`, names.length ? 'ok' : 'warn');
+    } catch (e) {
+      setCharacterArchiveStatus(`· 读取人物条目失败：${e?.message ?? e} ·`, 'err');
+    }
+  };
+
+  $('#sg_char_archive_provider').on('change', () => {
+    const provider = String($('#sg_char_archive_provider').val() || 'st');
+    $('#sg_char_archive_custom_block').toggle(provider === 'custom');
+    autoSave();
+  });
+
+  $('#sg_char_archive_enabled, #sg_char_archive_temperature, #sg_char_archive_customEndpoint, #sg_char_archive_customApiKey, #sg_char_archive_customModel, #sg_char_archive_customMaxTokens, #sg_char_archive_customStream, #sg_char_archive_worldbookFile, #sg_char_archive_prefix, #sg_char_archive_target, #sg_char_archive_recent, #sg_char_archive_includeUserInput, #sg_char_archive_systemPrompt, #sg_char_archive_userTemplate, #sg_char_archive_outputTemplate')
+    .on('input change', autoSave);
+
+  $('#sg_char_archive_modelSelect').on('change', () => {
+    const val = String($('#sg_char_archive_modelSelect').val() || '').trim();
+    if (val) $('#sg_char_archive_customModel').val(val);
+    autoSave();
+  });
+
+  $('#sg_char_archive_refreshModels').on('click', async () => {
+    autoSave();
+    await refreshCharacterArchiveModels();
+  });
+
+  $('#sg_char_archive_worldbookSelect').on('change', () => {
+    const val = String($('#sg_char_archive_worldbookSelect').val() || '').trim();
+    if (val) $('#sg_char_archive_worldbookFile').val(val);
+    autoSave();
+  });
+
+  $('#sg_char_archive_refreshWorldbooks').on('click', async () => {
+    setCharacterArchiveStatus('· 正在读取酒馆世界书列表… ·', 'warn');
+    try {
+      const names = await fetchWorldInfoListCompat();
+      const s = ensureSettings();
+      s.summaryWorldInfoFilesCache = names;
+      saveSettings();
+      fillWorldbookSelect($('#sg_char_archive_worldbookSelect'), names, normalizeWorldInfoFileName($('#sg_char_archive_worldbookFile').val()));
+      setCharacterArchiveStatus(`· 已刷新世界书列表：${names.length} 本 ·`, names.length ? 'ok' : 'warn');
+    } catch (e) {
+      setCharacterArchiveStatus(`· 刷新世界书列表失败：${e?.message ?? e} ·`, 'err');
+    }
+  });
+
+  $('#sg_char_archive_refreshEntries').on('click', refreshEntries);
+
+  $('#sg_char_archive_entrySelect').on('change', () => {
+    const val = String($('#sg_char_archive_entrySelect').val() || '').trim();
+    if (val) $('#sg_char_archive_target').val(val);
+    autoSave();
+  });
+
+  $('#sg_char_archive_generate').on('click', async () => {
+    autoSave();
+    await generateCharacterArchive();
+  });
+
+  $('#sg_char_archive_copy').on('click', async () => {
+    const text = String($('#sg_char_archive_output').val() || '').trim();
+    if (!text) {
+      setCharacterArchiveStatus('· 暂无可复制内容 ·', 'warn');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setCharacterArchiveStatus('· 已复制到剪贴板 ·', 'ok');
+    } catch (e) {
+      setCharacterArchiveStatus(`· 复制失败：${e?.message ?? e} ·`, 'err');
+    }
+  });
+
+  $('#sg_char_archive_insert').on('click', () => {
+    const text = String($('#sg_char_archive_output').val() || '').trim();
+    if (!text) {
+      setCharacterArchiveStatus('· 暂无可填入内容 ·', 'warn');
+      return;
+    }
+    const ok = injectToUserInput(text);
+    setCharacterArchiveStatus(ok ? '· 已填入聊天输入框（未发送） ·' : '· 未找到聊天输入框 ·', ok ? 'ok' : 'err');
   });
 }
 
@@ -17144,6 +17734,23 @@ function setupParallelWorldPage() {
   $('#sg_parallelWorldCustomEndpoint, #sg_parallelWorldCustomApiKey').on('change', autoSave);
   $('#sg_parallelWorldCustomModel').on('change', autoSave);
   $('#sg_parallelWorldSystemPrompt, #sg_parallelWorldUserTemplate').on('change', autoSave);
+}
+
+async function runParallelWorldSimulationFromFloating($btn) {
+  const s = ensureSettings();
+  if (!s.parallelWorldEnabled) {
+    setParallelWorldStatus('平行世界未启用', 'warn');
+    showToast('请先启用平行世界功能', { kind: 'warn', spinner: false, sticky: false, duration: 2200 });
+    return;
+  }
+
+  const $target = $btn && $btn.length ? $btn : $('#sg_floating_parallel_update');
+  $target.prop('disabled', true);
+  try {
+    await runParallelWorldSimulation();
+  } finally {
+    $target.prop('disabled', false);
+  }
 }
 
 function pullSettingsToUi() {
@@ -17488,6 +18095,37 @@ function pullSettingsToUi() {
   $('#sg_char_attr_agi').val(s.characterAttributes?.agi ?? 0);
   $('#sg_char_attr_luk').val(s.characterAttributes?.luk ?? 0);
   updateCharacterForm();
+
+  // 人物档案设置
+  $('#sg_char_archive_enabled').prop('checked', !!s.characterArchiveEnabled);
+  $('#sg_char_archive_provider').val(String(s.characterArchiveProvider || 'st'));
+  $('#sg_char_archive_temperature').val(s.characterArchiveTemperature ?? 0.5);
+  $('#sg_char_archive_customEndpoint').val(String(s.characterArchiveCustomEndpoint || ''));
+  $('#sg_char_archive_customApiKey').val(String(s.characterArchiveCustomApiKey || ''));
+  $('#sg_char_archive_customModel').val(String(s.characterArchiveCustomModel || 'gpt-4o-mini'));
+  $('#sg_char_archive_customMaxTokens').val(s.characterArchiveCustomMaxTokens || 3072);
+  $('#sg_char_archive_customStream').prop('checked', !!s.characterArchiveCustomStream);
+  $('#sg_char_archive_custom_block').toggle(String(s.characterArchiveProvider || 'st') === 'custom');
+  fillCharacterArchiveModelSelect(
+    Array.isArray(s.characterArchiveCustomModelsCache) ? s.characterArchiveCustomModelsCache : [],
+    String(s.characterArchiveCustomModel || 'gpt-4o-mini')
+  );
+  $('#sg_char_archive_worldbookFile').val(String(s.characterArchiveWorldbookFile || ''));
+  fillWorldbookSelect(
+    $('#sg_char_archive_worldbookSelect'),
+    Array.isArray(s.summaryWorldInfoFilesCache) ? s.summaryWorldInfoFilesCache : [],
+    normalizeWorldInfoFileName(s.characterArchiveWorldbookFile)
+  );
+  $('#sg_char_archive_prefix').val(String(s.characterArchiveEntryPrefix || '人物'));
+  $('#sg_char_archive_target').val(String(s.characterArchiveTargetName || ''));
+  fillCharacterArchiveTargetSelect(Array.isArray(s.characterArchiveTargetOptions) ? s.characterArchiveTargetOptions : [], String(s.characterArchiveTargetName || ''));
+  $('#sg_char_archive_recent').val(s.characterArchiveRecentMessages || 8);
+  $('#sg_char_archive_includeUserInput').prop('checked', s.characterArchiveIncludeUserInput !== false);
+  $('#sg_char_archive_systemPrompt').val(String(s.characterArchiveSystemPrompt || DEFAULT_CHARACTER_ARCHIVE_SYSTEM_PROMPT));
+  $('#sg_char_archive_userTemplate').val(String(s.characterArchiveUserTemplate || DEFAULT_CHARACTER_ARCHIVE_USER_TEMPLATE));
+  $('#sg_char_archive_outputTemplate').val(String(s.characterArchiveOutputTemplate || DEFAULT_CHARACTER_ARCHIVE_OUTPUT_TEMPLATE));
+  $('#sg_char_archive_output').val(String(lastCharacterArchiveText || ''));
+  $('#sg_char_archive_copy, #sg_char_archive_insert').prop('disabled', !String(lastCharacterArchiveText || '').trim());
 
   // 角色标签世界书设置
   $('#sg_imageGenProfilesEnabled').prop('checked', !!s.imageGenCharacterProfilesEnabled);
@@ -18173,6 +18811,23 @@ function pullUiToSettings() {
   s.characterRandomLLM = $('#sg_char_random_llm').is(':checked');
   s.characterAttributes = getCharacterAttributes();
 
+  s.characterArchiveEnabled = $('#sg_char_archive_enabled').is(':checked');
+  s.characterArchiveProvider = String($('#sg_char_archive_provider').val() || 'st');
+  s.characterArchiveTemperature = clampFloat($('#sg_char_archive_temperature').val(), 0, 2, s.characterArchiveTemperature ?? 0.5);
+  s.characterArchiveCustomEndpoint = String($('#sg_char_archive_customEndpoint').val() || '').trim();
+  s.characterArchiveCustomApiKey = String($('#sg_char_archive_customApiKey').val() || '');
+  s.characterArchiveCustomModel = String($('#sg_char_archive_customModel').val() || '').trim() || 'gpt-4o-mini';
+  s.characterArchiveCustomMaxTokens = clampInt($('#sg_char_archive_customMaxTokens').val(), 256, 200000, s.characterArchiveCustomMaxTokens || 3072);
+  s.characterArchiveCustomStream = $('#sg_char_archive_customStream').is(':checked');
+  s.characterArchiveWorldbookFile = normalizeWorldInfoFileName($('#sg_char_archive_worldbookFile').val());
+  s.characterArchiveEntryPrefix = String($('#sg_char_archive_prefix').val() || '人物').trim() || '人物';
+  s.characterArchiveTargetName = String($('#sg_char_archive_target').val() || '').trim();
+  s.characterArchiveRecentMessages = clampInt($('#sg_char_archive_recent').val(), 1, 30, s.characterArchiveRecentMessages || 8);
+  s.characterArchiveIncludeUserInput = $('#sg_char_archive_includeUserInput').is(':checked');
+  s.characterArchiveSystemPrompt = String($('#sg_char_archive_systemPrompt').val() || '').trim() || DEFAULT_CHARACTER_ARCHIVE_SYSTEM_PROMPT;
+  s.characterArchiveUserTemplate = String($('#sg_char_archive_userTemplate').val() || '').trim() || DEFAULT_CHARACTER_ARCHIVE_USER_TEMPLATE;
+  s.characterArchiveOutputTemplate = String($('#sg_char_archive_outputTemplate').val() || '').trim() || DEFAULT_CHARACTER_ARCHIVE_OUTPUT_TEMPLATE;
+
   // 角色标签世界书设置
   s.imageGenCharacterProfilesEnabled = $('#sg_imageGenProfilesEnabled').is(':checked');
   s.imageGenCharacterProfiles = collectCharacterProfilesFromUi();
@@ -18333,7 +18988,6 @@ function setupEventListeners() {
 
     eventSource.on(event_types.CHAT_CHANGED, async () => {
       inlineCache.clear();
-      postGenerationPending = false;
       scheduleReapplyAll('chat_changed');
       ensureChatActionButtons();
       ensureBlueIndexLive(true).catch(() => void 0);
@@ -18389,6 +19043,13 @@ function setupEventListeners() {
 
     eventSource.on(event_types.MESSAGE_SENT, () => {
       postGenerationPending = true;
+      try {
+        const ctxNow = SillyTavern.getContext();
+        const chatNow = Array.isArray(ctxNow.chat) ? ctxNow.chat : [];
+        postGenerationAssistantFloor = computeFloorCount(chatNow, 'assistant');
+      } catch {
+        postGenerationAssistantFloor = 0;
+      }
       // 禁止自动生成：不在发送消息时自动刷新面板
       // ROLL 判定（尽量在生成前完成）
       maybeInjectRollResult('msg_sent').catch(() => void 0);
@@ -18588,6 +19249,7 @@ function createFloatingPanel() {
           <button class="sg-floating-action-btn" id="sg_floating_show_report" title="查看分析">📖</button>
           <button class="sg-floating-action-btn" id="sg_floating_show_map" title="查看地图">🗺️</button>
           <button class="sg-floating-action-btn" id="sg_floating_show_image" title="图像生成">🖼️</button>
+          <button class="sg-floating-action-btn" id="sg_floating_show_char_archive" title="人物修正">🧾</button>
           <button class="sg-floating-action-btn" id="sg_floating_show_sex" title="性爱指导">❤️</button>
           <button class="sg-floating-action-btn" id="sg_floating_structured" title="手动结构化条目总结">🧩</button>
           <button class="sg-floating-action-btn" id="sg_floating_roll_logs" title="ROLL日志">🎲</button>
@@ -18604,6 +19266,16 @@ function createFloatingPanel() {
   `;
 
   document.body.appendChild(panel);
+  const floatingActions = panel.querySelector('.sg-floating-actions');
+  const floatingSettingsBtn = panel.querySelector('#sg_floating_settings');
+  if (floatingActions && floatingSettingsBtn && !panel.querySelector('#sg_floating_parallel_update')) {
+    const parallelBtn = document.createElement('button');
+    parallelBtn.className = 'sg-floating-action-btn';
+    parallelBtn.id = 'sg_floating_parallel_update';
+    parallelBtn.title = '手动更新平行事件';
+    parallelBtn.textContent = '平';
+    floatingActions.insertBefore(parallelBtn, floatingSettingsBtn);
+  }
 
   // Restore position (Only on Desktop/Large screens, NOT in mobile portrait)
   // On mobile portrait, we rely on CSS defaults (bottom sheet style) to ensure visibility
@@ -18638,8 +19310,16 @@ function createFloatingPanel() {
     showFloatingImageGen();
   });
 
+  $('#sg_floating_show_char_archive').on('click', () => {
+    showFloatingCharacterArchive();
+  });
+
   $('#sg_floating_show_sex').on('click', () => {
     showFloatingSexGuide();
+  });
+
+  $('#sg_floating_parallel_update').on('click', async () => {
+    await runParallelWorldSimulationFromFloating($('#sg_floating_parallel_update'));
   });
 
   $('#sg_floating_structured').on('click', async () => {
@@ -18669,6 +19349,11 @@ function createFloatingPanel() {
     // Only handle if inside our panel
     if (!$(e.target).closest('#sg_floating_panel').length) return;
     await refreshFloatingPanelContent();
+  });
+
+  $(document).on('click', '.sg-inner-parallel-update-btn', async (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    await runParallelWorldSimulationFromFloating($(e.currentTarget));
   });
 
   $(document).on('click', '.sg-inner-structured-btn', async (e) => {
@@ -18798,6 +19483,95 @@ ${extraText}` : extraText;
     }
     const ok = injectToUserInput(text);
     $('#sg_floating_sex_status').text(ok ? '已填入输入框（未发送）' : '未找到聊天输入框');
+  });
+
+  $(document).on('click', '#sg_floating_char_archive_refresh_entries', async (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    const file = normalizeWorldInfoFileName($('#sg_floating_char_archive_worldbook').val());
+    const prefix = String($('#sg_floating_char_archive_prefix').val() || '人物').trim() || '人物';
+    $('#sg_floating_char_archive_status').text('正在读取人物列表...');
+    try {
+      const names = await loadCharacterArchiveTargetOptions(file, prefix);
+      const s = ensureSettings();
+      s.characterArchiveTargetOptions = names;
+      saveSettings();
+      fillCharacterArchiveTargetSelect(names, String($('#sg_floating_char_archive_target').val() || '').trim());
+      const $sel = $('#sg_floating_char_archive_entrySelect');
+      $sel.empty().append('<option value="">(选择人物)</option>');
+      for (const name of names) {
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        $sel.append(opt);
+      }
+      $('#sg_floating_char_archive_status').text(`已读取人物列表：${names.length} 个`);
+    } catch (err) {
+      $('#sg_floating_char_archive_status').text(`读取人物列表失败: ${err?.message ?? err}`);
+    }
+  });
+
+  $(document).on('change', '#sg_floating_char_archive_entrySelect', (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    const val = String($('#sg_floating_char_archive_entrySelect').val() || '').trim();
+    if (val) $('#sg_floating_char_archive_target').val(val);
+  });
+
+  $(document).on('change', '#sg_floating_char_archive_worldbook_select', (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    const val = String($('#sg_floating_char_archive_worldbook_select').val() || '').trim();
+    if (val) $('#sg_floating_char_archive_worldbook').val(val);
+  });
+
+  $(document).on('click', '#sg_floating_char_archive_generate', async (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    const s = ensureSettings();
+    s.characterArchiveEnabled = true;
+    s.characterArchiveProvider = String($('#sg_floating_char_archive_provider').val() || 'st');
+    s.characterArchiveTemperature = clampFloat($('#sg_floating_char_archive_temperature').val(), 0, 2, s.characterArchiveTemperature ?? 0.5);
+    s.characterArchiveWorldbookFile = normalizeWorldInfoFileName($('#sg_floating_char_archive_worldbook').val());
+    s.characterArchiveEntryPrefix = String($('#sg_floating_char_archive_prefix').val() || '人物').trim() || '人物';
+    s.characterArchiveTargetName = String($('#sg_floating_char_archive_target').val() || '').trim();
+    s.characterArchiveRecentMessages = clampInt($('#sg_floating_char_archive_recent').val(), 1, 30, s.characterArchiveRecentMessages || 8);
+    s.characterArchiveIncludeUserInput = $('#sg_floating_char_archive_includeUser').is(':checked');
+    saveSettings();
+    $('#sg_floating_char_archive_generate').prop('disabled', true);
+    $('#sg_floating_char_archive_status').text('正在生成人物修正...');
+    try {
+      await generateCharacterArchive();
+      $('#sg_floating_char_archive_output').val(lastCharacterArchiveText || '');
+      $('#sg_floating_char_archive_copy, #sg_floating_char_archive_send').prop('disabled', !lastCharacterArchiveText);
+      $('#sg_floating_char_archive_status').text('生成人物修正完成');
+    } catch (err) {
+      $('#sg_floating_char_archive_status').text(`生成失败: ${err?.message ?? err}`);
+    } finally {
+      $('#sg_floating_char_archive_generate').prop('disabled', false);
+    }
+  });
+
+  $(document).on('click', '#sg_floating_char_archive_copy', async (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    const text = String($('#sg_floating_char_archive_output').val() || '').trim();
+    if (!text) {
+      $('#sg_floating_char_archive_status').text('暂无可复制内容');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      $('#sg_floating_char_archive_status').text('已复制到剪贴板');
+    } catch (err) {
+      $('#sg_floating_char_archive_status').text(`复制失败: ${err?.message ?? err}`);
+    }
+  });
+
+  $(document).on('click', '#sg_floating_char_archive_send', (e) => {
+    if (!$(e.target).closest('#sg_floating_panel').length) return;
+    const text = String($('#sg_floating_char_archive_output').val() || '').trim();
+    if (!text) {
+      $('#sg_floating_char_archive_status').text('暂无可填入内容');
+      return;
+    }
+    const ok = injectToUserInput(text);
+    $('#sg_floating_char_archive_status').text(ok ? '已填入聊天输入框（未发送）' : '未找到聊天输入框');
   });
 
   $(document).on('click', '#sg_imagegen_clear', (e) => {
@@ -19221,6 +19995,11 @@ function updateFloatingPanelBody(html) {
   const $body = $('#sg_floating_body');
   if ($body.length) {
     $body.html(html);
+    const toolbar = $body.find('.sg-inner-refresh-btn').first().parent();
+    if (toolbar.length && !$body.find('.sg-inner-parallel-update-btn').length) {
+      $('<button class="sg-inner-parallel-update-btn" title="手动更新平行事件" style="background:none; border:none; cursor:pointer; font-size:0.95em; opacity:0.85;">平行事件</button>')
+        .insertAfter(toolbar.find('.sg-inner-refresh-btn').first());
+    }
   }
 }
 
@@ -19389,6 +20168,119 @@ function showFloatingSexGuide() {
     </div>
   `
   $body.html(html);
+}
+
+function showFloatingCharacterArchive() {
+  const $body = $('#sg_floating_body');
+  if (!$body.length) return;
+  const s = ensureSettings();
+  const targetOptions = Array.isArray(s.characterArchiveTargetOptions) ? s.characterArchiveTargetOptions : [];
+  const optionHtml = targetOptions.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
+  const compactHtml = `
+    <div style="padding:10px; overflow:auto; max-height:100%; box-sizing:border-box;">
+      <div style="font-weight:700; margin-bottom:8px;">人物修正</div>
+      <div class="sg-field">
+        <label>目标人物</label>
+        <div class="sg-row sg-inline" style="gap:6px; flex-wrap:nowrap; align-items:center;">
+          <input id="sg_floating_char_archive_target" type="text" value="${escapeHtml(String(s.characterArchiveTargetName || ''))}" placeholder="例如：苏晓" style="flex:1; min-width:0;">
+          <select id="sg_floating_char_archive_entrySelect" style="width:140px; min-width:140px; flex:0 0 140px;">
+            <option value="">(选择人物)</option>
+            ${optionHtml}
+          </select>
+          <button class="menu_button sg-btn" id="sg_floating_char_archive_refresh_entries" style="flex:0 0 auto; white-space:nowrap;">刷新人物</button>
+        </div>
+      </div>
+      <div class="sg-actions-row" style="justify-content:flex-end;">
+        <button class="menu_button sg-btn" id="sg_floating_char_archive_generate">生成</button>
+        <button class="menu_button sg-btn" id="sg_floating_char_archive_send" ${lastCharacterArchiveText ? '' : 'disabled'}>填入聊天</button>
+      </div>
+      <div class="sg-field" style="margin-top:8px;">
+        <label>输出</label>
+        <textarea id="sg_floating_char_archive_output" rows="12" spellcheck="false">${escapeHtml(lastCharacterArchiveText || '')}</textarea>
+        <div class="sg-hint" id="sg_floating_char_archive_status">· 生成后可填入聊天输入框 ·</div>
+      </div>
+      <input id="sg_floating_char_archive_provider" type="hidden" value="${escapeHtml(String(s.characterArchiveProvider || 'st'))}">
+      <input id="sg_floating_char_archive_temperature" type="hidden" value="${escapeHtml(String(s.characterArchiveTemperature ?? 0.5))}">
+      <input id="sg_floating_char_archive_worldbook" type="hidden" value="${escapeHtml(String(s.characterArchiveWorldbookFile || ''))}">
+      <input id="sg_floating_char_archive_prefix" type="hidden" value="${escapeHtml(String(s.characterArchiveEntryPrefix || '人物'))}">
+      <input id="sg_floating_char_archive_recent" type="hidden" value="${escapeHtml(String(s.characterArchiveRecentMessages || 8))}">
+      <input id="sg_floating_char_archive_includeUser" type="checkbox" ${s.characterArchiveIncludeUserInput !== false ? 'checked' : ''} style="display:none;">
+    </div>
+  `;
+  $body.html(compactHtml);
+  const selectedTarget = String(s.characterArchiveTargetName || '').trim();
+  if (selectedTarget) $('#sg_floating_char_archive_entrySelect').val(selectedTarget);
+  return;
+  const worldbookOptions = Array.isArray(s.summaryWorldInfoFilesCache) ? s.summaryWorldInfoFilesCache : [];
+  const worldbookOptionHtml = worldbookOptions.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
+  const html = `
+    <div style="padding:10px; overflow:auto; max-height:100%; box-sizing:border-box;">
+      <div style="font-weight:700; margin-bottom:8px;">人物修正</div>
+      <div class="sg-grid2">
+        <div class="sg-field">
+          <label>Provider</label>
+          <select id="sg_floating_char_archive_provider">
+            <option value="st" ${String(s.characterArchiveProvider || 'st') === 'st' ? 'selected' : ''}>使用当前 SillyTavern API</option>
+            <option value="custom" ${String(s.characterArchiveProvider || 'st') === 'custom' ? 'selected' : ''}>独立 API</option>
+          </select>
+        </div>
+        <div class="sg-field">
+          <label>temperature</label>
+          <input id="sg_floating_char_archive_temperature" type="number" step="0.05" min="0" max="2" value="${escapeHtml(String(s.characterArchiveTemperature ?? 0.5))}">
+        </div>
+      </div>
+      <div class="sg-field">
+        <label>世界书</label>
+        <div class="sg-row sg-inline" style="gap:6px;">
+          <input id="sg_floating_char_archive_worldbook" type="text" value="${escapeHtml(String(s.characterArchiveWorldbookFile || ''))}" placeholder="世界书文件名" style="flex:1;">
+          <select id="sg_floating_char_archive_worldbook_select" style="min-width:140px;">
+            <option value="">(选择世界书)</option>
+            ${worldbookOptionHtml}
+          </select>
+        </div>
+      </div>
+      <div class="sg-grid2">
+        <div class="sg-field">
+          <label>条目前缀</label>
+          <input id="sg_floating_char_archive_prefix" type="text" value="${escapeHtml(String(s.characterArchiveEntryPrefix || '人物'))}">
+        </div>
+        <div class="sg-field">
+          <label>读取最近消息数</label>
+          <input id="sg_floating_char_archive_recent" type="number" min="1" max="30" value="${escapeHtml(String(s.characterArchiveRecentMessages || 8))}">
+        </div>
+      </div>
+      <div class="sg-field">
+        <label>目标人物</label>
+        <div class="sg-row sg-inline" style="gap:6px;">
+          <input id="sg_floating_char_archive_target" type="text" value="${escapeHtml(String(s.characterArchiveTargetName || ''))}" placeholder="例如：苏晓" style="flex:1;">
+          <select id="sg_floating_char_archive_entrySelect" style="min-width:160px;">
+            <option value="">(选择人物)</option>
+            ${optionHtml}
+          </select>
+          <button class="menu_button sg-btn" id="sg_floating_char_archive_refresh_entries">刷新人物</button>
+        </div>
+      </div>
+      <div class="sg-row sg-inline" style="margin-top:6px;">
+        <label class="sg-check"><input type="checkbox" id="sg_floating_char_archive_includeUser" ${s.characterArchiveIncludeUserInput !== false ? 'checked' : ''}>包含最近用户输入</label>
+      </div>
+      <div class="sg-actions-row" style="justify-content:flex-end;">
+        <button class="menu_button sg-btn" id="sg_floating_char_archive_generate">生成</button>
+        <button class="menu_button sg-btn" id="sg_floating_char_archive_copy" ${lastCharacterArchiveText ? '' : 'disabled'}>复制</button>
+        <button class="menu_button sg-btn" id="sg_floating_char_archive_send" ${lastCharacterArchiveText ? '' : 'disabled'}>填入聊天</button>
+      </div>
+      <div class="sg-field" style="margin-top:8px;">
+        <label>输出</label>
+        <textarea id="sg_floating_char_archive_output" rows="12" spellcheck="false">${escapeHtml(lastCharacterArchiveText || '')}</textarea>
+        <div class="sg-hint" id="sg_floating_char_archive_status">· 生成后可复制或填入聊天输入框 ·</div>
+      </div>
+    </div>
+  `;
+  $body.html(html);
+
+  const wb = String(s.characterArchiveWorldbookFile || '').trim();
+  if (wb) $('#sg_floating_char_archive_worldbook_select').val(wb);
+  const target = String(s.characterArchiveTargetName || '').trim();
+  if (target) $('#sg_floating_char_archive_entrySelect').val(target);
 }
 
 // -------------------- init --------------------
