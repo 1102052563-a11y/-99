@@ -408,6 +408,116 @@ const PARALLEL_WORLD_JSON_REQUIREMENT = `输出要求：
 - factionUpdates 数组中每个势力对应一个对象，events 为 1~2 件势力事件。
 - 如果没有被追踪的势力，factionUpdates 可为空数组。`;
 
+const DEFAULT_PUBLIC_CHANNEL_SYSTEM_PROMPT = `你要模拟“无限流/契约者世界”的公共频道。
+
+【核心目标】
+1. 基于最近剧情、世界时间、已知势力与频道历史，生成一小段“其他契约者在公共频道里的发言”
+2. 频道里大多数人并不围着主角转，他们只会讨论自己的情报、交易、损失、组队、谣言、试炼进度
+3. 允许出现误判、吹嘘、试探、隐瞒、钓鱼、交易黑话，但不要过度夸张成搞笑群聊
+4. 如果主角相关信息尚未公开，不要让所有人都认识主角
+5. 语言应简洁，像公共频道刷屏，不要写成长段旁白
+
+【频道氛围】
+- 这是高风险生存环境下的公共频道，信息密度高，戒备心强，废话不多
+- 可以明显加入一些吹水、阴阳怪气、互喷、乐子人发言，让频道更鲜活
+- 吐槽和乐子人消息的占比可以提高到约 30%~45%，但不要压过主频道的生存、情报、交易功能
+- 同一轮里既可以有“重要情报”，也可以混入 1 条不那么重要的噪声消息，增加真实感
+
+【优先消息类型】
+- 情报交换
+- 交易/收购
+- 组队招募
+- 战损播报
+- 副本机制猜测
+- 势力公告
+- 谣言/误导
+- 吐槽/警告
+- 乐子人拱火/围观/看戏
+- 黑话式求购/甩卖
+- 对某片区域、某Boss、某机制的临时讨论
+
+【生成偏好】
+- 尽量让每一轮消息类型有变化，不要连续几轮都只会“情报播报”
+- 2~5 条消息里，优先混出 2~3 种不同类型
+- 如果这一轮只有 3 条以上消息，尽量至少有 1 条偏吐槽、乐子人或围观式发言
+- 可以偶尔出现互相矛盾的信息，这会让频道更像真实公共场
+- 不要把所有消息都写得特别有用，允许存在 1 条价值一般但有氛围感的消息
+
+【输出原则】
+- 消息数量以系统额外要求为准
+- 每条消息都要像真实频道发言，短、碎、直接
+- 同一轮消息之间可以互相回应，但不要全部串成完整对话
+- 尽量让频道呈现“世界在运转”的感觉`;
+
+const DEFAULT_PUBLIC_CHANNEL_USER_TEMPLATE = `【世界时间】{{worldTime}}
+
+【最近剧情上下文】
+{{recentContext}}
+
+【已知角色 / 势力档案】
+{{worldState}}
+
+【公共频道最近记录】
+{{channelHistory}}
+
+请模拟这一时刻公共频道里最可能出现的几条发言。`;
+
+const PUBLIC_CHANNEL_JSON_REQUIREMENT = `输出要求：
+- 只输出严格 JSON，不要 Markdown、不要代码块、不要任何多余文字。
+- JSON 结构必须为：
+{
+  "worldTime": "更新后的世界时间",
+  "channelSummary": "1~2句概括当前公共频道的整体风向",
+  "rosterUpdates": [
+    {
+      "name": "说话者名称",
+      "contractId": "契约者编号，可为空字符串",
+      "faction": "所属势力，可为空字符串",
+      "persona": "该人在频道里的简短风格标签"
+    }
+  ],
+  "messages": [
+    {
+      "speaker": "说话者名称",
+      "contractId": "契约者编号，可为空字符串",
+      "faction": "所属势力，可为空字符串",
+      "tone": "消息语气，如警告/交易/招募/吐槽/情报",
+      "type": "消息类型，如 trade/recruit/rumor/info/notice/loss/noise",
+      "text": "频道发言正文",
+      "importance": 1
+    }
+  ]
+}
+- messages 数量必须严格符合系统额外要求。
+- importance 为 1~5，数值越高代表越值得让主角注意。
+- type 尽量覆盖不同类别，不要整轮全是同一种。
+- text 必须像频道发言，不要写成叙述句或旁白。
+- 如果 rosterUpdates 没有新增信息，可返回空数组。`;
+
+const PUBLIC_CHANNEL_STYLE_PROMPTS = Object.freeze({
+  serious: `【公共频道风格】
+- 整体偏严肃、务实、紧绷
+- 吐槽和乐子人比例较低，控制在约 10%~20%
+- 优先保证情报、交易、生存讨论的可信度`,
+  balanced: `【公共频道风格】
+- 整体为均衡模式
+- 频道既有正经情报，也有吐槽、阴阳怪气、围观
+- 吐槽和乐子人比例控制在约 25%~35%`,
+  funny: `【公共频道风格】
+- 整体偏乐子人和围观群众较多
+- 吐槽、拱火、阴阳怪气、看戏发言明显增加
+- 吐槽和乐子人比例可提高到约 35%~50%
+- 但仍要保留情报、交易、招募等核心频道功能，不能变成纯水群`,
+  tieba: `【公共频道风格】
+- 风格接近高压生存版“贴吧/论坛灌水区”
+- 允许更多短促、碎片化、阴阳怪气、接梗、看乐子、嘲讽和半黑话发言
+- 吐槽和乐子人比例可提高到约 45%~60%
+- 仍然要夹杂真实可用的信息、交易和警告，否则频道会失真`,
+});
+
+const DEFAULT_PUBLIC_CHANNEL_BATCH_SIZE = 20;
+const DEFAULT_PUBLIC_CHANNEL_HISTORY_LIMIT = 100;
+
 const STRUCTURED_ENTRIES_JSON_REQUIREMENT = `输出要求：只输出严格 JSON。
 对于【已知条目】（已出现在已知列表中）：你只需要输出有变化或新增的字段，未变内容无需输出。对于【新条目】：必须输出完整字段。
 statInfo 只填关键数值的精简总结（1-2行）。人物条目请使用 sixStats/skillsTalents 等字段，不输出 statInfo。
@@ -634,6 +744,9 @@ const DEFAULT_SETTINGS = Object.freeze({
   // 结构化条目读取楼层（最多读取最近 N 层）
   structuredEntriesReadFloors: 1,
   structuredEntriesCountMode: 'assistant',
+  // 是否读取 stat_data 变量作为结构化总结上下文
+  structuredReadStatData: false,
+  structuredStatVarName: 'stat_data',
   // 结构化条目读取蓝灯世界书（与索引设置一致）
   structuredWorldbookEnabled: false,
   structuredWorldbookMode: 'active', // active | all
@@ -998,6 +1111,30 @@ const DEFAULT_SETTINGS = Object.freeze({
   parallelWorldReadFloors: 5,
   parallelWorldPresetList: '[]',
   parallelWorldPresetActive: '',
+  publicChannelEnabled: false,
+  publicChannelAutoTrigger: false,
+  publicChannelAutoEvery: 3,
+  publicChannelInjectContext: false,
+  publicChannelReadFloors: 5,
+  publicChannelMaxMessages: 40,
+  publicChannelBatchSize: DEFAULT_PUBLIC_CHANNEL_BATCH_SIZE,
+  publicChannelHistoryLimit: DEFAULT_PUBLIC_CHANNEL_HISTORY_LIMIT,
+  publicChannelStyle: 'funny',
+  publicChannelProvider: 'st',
+  publicChannelTemperature: 0.9,
+  publicChannelCustomEndpoint: '',
+  publicChannelCustomApiKey: '',
+  publicChannelCustomModel: 'gpt-4o-mini',
+  publicChannelCustomModelsCache: [],
+  publicChannelCustomMaxTokens: 2048,
+  publicChannelCustomTopP: 0.95,
+  publicChannelCustomStream: false,
+  publicChannelWriteToWorldbook: true,
+  publicChannelWorldInfoFile: '',
+  publicChannelBlueWorldInfoFile: '',
+  publicChannelWorldInfoComment: '[mvu_plot]公共频道',
+  publicChannelSystemPrompt: DEFAULT_PUBLIC_CHANNEL_SYSTEM_PROMPT,
+  publicChannelUserTemplate: DEFAULT_PUBLIC_CHANNEL_USER_TEMPLATE,
 
 });
 
@@ -1008,6 +1145,7 @@ const META_KEYS = Object.freeze({
   staticModulesCache: 'storyguide_static_modules_cache',
   mapData: 'storyguide_map_data',
   parallelWorldData: 'storyguide_parallel_world_data',
+  publicChannelData: 'storyguide_public_channel_data',
 });
 
 const SG_SUMMARY_WI_FILE_KEY = 'storyguide_summary_worldinfo_file_v1';
@@ -2007,6 +2145,46 @@ function setParallelWorldStatus(text, kind = '') {
   $el.attr('class', 'sg-status' + (kind ? ` sg-status-${kind}` : ''));
 }
 
+function getDefaultPublicChannelData() {
+  return {
+    worldClock: '第1天',
+    summary: '',
+    roster: [],     // [{ name, contractId, faction, persona }]
+    messages: [],   // [{ id, ts, time, speaker, contractId, faction, tone, type, text, importance, simRunId }]
+    lastBatchRunId: 0,
+    lastRunFloor: 0,
+    runCount: 0,
+  };
+}
+
+function getPublicChannelData() {
+  const raw = String(getChatMetaValue(META_KEYS.publicChannelData) || '').trim();
+  if (!raw) return getDefaultPublicChannelData();
+  try {
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== 'object') return getDefaultPublicChannelData();
+    return {
+      ...getDefaultPublicChannelData(),
+      ...data,
+      roster: Array.isArray(data.roster) ? data.roster : [],
+      messages: Array.isArray(data.messages) ? data.messages : [],
+    };
+  } catch {
+    return getDefaultPublicChannelData();
+  }
+}
+
+async function setPublicChannelData(data) {
+  await setChatMetaValue(META_KEYS.publicChannelData, JSON.stringify(data ?? getDefaultPublicChannelData()));
+}
+
+function setPublicChannelStatus(text, kind = '') {
+  const $el = $('#sg_publicChannelStatus');
+  if (!$el.length) return;
+  $el.text(text || '');
+  $el.attr('class', 'sg-status' + (kind ? ` sg-status-${kind}` : ''));
+}
+
 /**
  * 收集被追踪NPC的档案信息（从结构化条目缓存中获取）
  */
@@ -2278,6 +2456,260 @@ function buildParallelWorldPromptMessages(snapshotText, npcProfilesText, worldCl
   ];
 }
 
+function buildPublicChannelWorldStateText() {
+  const s = ensureSettings();
+  const lines = [];
+
+  const trackedNpcs = normalizeParallelWorldTrackedList(s.parallelWorldTrackedNpcs).filter(t => t.enabled);
+  if (trackedNpcs.length) lines.push(`已追踪契约者/NPC：${trackedNpcs.map(t => t.name).join('、')}`);
+
+  const trackedFactions = normalizeParallelWorldTrackedList(s.parallelWorldTrackedFactions).filter(t => t.enabled);
+  if (trackedFactions.length) lines.push(`已追踪势力：${trackedFactions.map(t => t.name).join('、')}`);
+
+  try {
+    const pwData = getParallelWorldData();
+    const recent = Array.isArray(pwData.eventLog) ? pwData.eventLog.slice(-6) : [];
+    if (recent.length) {
+      lines.push('平行世界近期动态：');
+      for (const ev of recent) {
+        const who = String(ev.npcName || ev.factionName || '').trim();
+        const when = String(ev.time || '').trim();
+        const text = String(ev.event || '').trim();
+        if (!text) continue;
+        lines.push(`- ${who}${when ? ` @ ${when}` : ''}: ${text}`);
+      }
+    }
+  } catch { /* ignore */ }
+
+  return lines.length ? lines.join('\n') : '(暂无额外世界状态)';
+}
+
+function buildPublicChannelPromptMessages(snapshotText, worldClock, channelHistoryText) {
+  const s = ensureSettings();
+  const sysTpl = String(s.publicChannelSystemPrompt || DEFAULT_PUBLIC_CHANNEL_SYSTEM_PROMPT);
+  const usrTpl = String(s.publicChannelUserTemplate || DEFAULT_PUBLIC_CHANNEL_USER_TEMPLATE);
+  const styleKey = String(s.publicChannelStyle || 'balanced').trim();
+  const stylePrompt = String(PUBLIC_CHANNEL_STYLE_PROMPTS[styleKey] || PUBLIC_CHANNEL_STYLE_PROMPTS.balanced);
+
+  const userContent = renderTemplate(usrTpl, {
+    worldTime: worldClock || '第1天',
+    recentContext: snapshotText || '(无可用上下文)',
+    worldState: buildPublicChannelWorldStateText(),
+    channelHistory: channelHistoryText || '(暂无历史记录)',
+  });
+
+  return [
+    { role: 'system', content: sysTpl + '\n\n' + stylePrompt + '\n\n' + buildPublicChannelBatchInstruction() + '\n\n' + PUBLIC_CHANNEL_JSON_REQUIREMENT },
+    { role: 'user', content: userContent },
+  ];
+}
+
+function buildPublicChannelBatchInstruction() {
+  const s = ensureSettings();
+  const batchSize = clampInt(s.publicChannelBatchSize, 1, 50, DEFAULT_PUBLIC_CHANNEL_BATCH_SIZE);
+  return [
+    `【硬性生成要求】`,
+    `- 本轮必须生成恰好 ${batchSize} 条 messages，不多不少。`,
+    `- 本轮消息应体现公共频道的连续性。若历史里出现某条情报、争议、谣言或骂战，本轮允许出现证实、反驳、补充、隔空互喷、围观起哄。`,
+    `- 不要把 20 条都写成独立无关短句，至少保留 4~8 条与历史消息或同轮其他消息形成承接关系。`,
+    `- 允许出现同一说话者在本轮里多次发言，但不要过密刷屏。`,
+  ].join('\n');
+}
+
+function buildPublicChannelWorldbookContent(pcData, runId) {
+  const arr = (Array.isArray(pcData?.messages) ? pcData.messages : []).filter(m => Number(m.simRunId || 0) === Number(runId || 0));
+  const lines = ['[公共频道]', `世界时间: ${String(pcData?.worldClock || '').trim() || '未知时间'}`];
+  if (pcData?.summary) lines.push(`频道风向: ${String(pcData.summary).trim()}`);
+  lines.push('');
+  for (const msg of arr) {
+    const speaker = String(msg.speaker || '匿名').trim();
+    const contractId = String(msg.contractId || '').trim();
+    const faction = String(msg.faction || '').trim();
+    const tone = String(msg.tone || '').trim();
+    const type = String(msg.type || '').trim();
+    const tags = [contractId, faction, tone, type].filter(Boolean).join(' / ');
+    const head = `[${String(msg.time || '').trim() || '未知时间'}] ${speaker}${tags ? ` (${tags})` : ''}`;
+    lines.push(`${head}`);
+    lines.push(`- ${String(msg.text || '').trim()}`);
+  }
+  return lines.join('\n');
+}
+
+async function writePublicChannelWorldbookEntry(pcData, settings) {
+  const s = settings || ensureSettings();
+  if (!s.publicChannelWriteToWorldbook) return;
+
+  const runId = Number(pcData?.lastBatchRunId || 0);
+  if (!runId) return;
+  const content = buildPublicChannelWorldbookContent(pcData, runId);
+  if (!content.trim()) return;
+
+  const comment = ensureMvuPlotPrefix(String(s.publicChannelWorldInfoComment || '公共频道').trim() || '公共频道');
+  const keys = ['公共频道', '__SG_PUBLIC_CHANNEL__'];
+
+  try {
+    const greenFile = normalizeWorldInfoFileName(String(s.summaryWorldInfoFile || '').trim());
+    if (greenFile) {
+      await writeWorldInfoEntryDirect({
+        file: greenFile,
+        comment,
+        content,
+        keys,
+        constant: 1,
+        searchKey: '__SG_PUBLIC_CHANNEL__',
+      });
+    }
+  } catch (e) {
+    console.warn('[StoryGuide] 写入公共频道绿灯世界书失败:', e);
+  }
+
+  try {
+    const blueFile = normalizeWorldInfoFileName(String(s.summaryBlueWorldInfoFile || '').trim());
+    if (blueFile) {
+      await writeWorldInfoEntryDirect({
+        file: blueFile,
+        comment,
+        content,
+        keys,
+        constant: 1,
+        searchKey: '__SG_PUBLIC_CHANNEL__',
+      });
+    }
+  } catch (e) {
+    console.warn('[StoryGuide] 写入公共频道蓝灯世界书失败:', e);
+  }
+}
+
+function buildPublicChannelHistoryText(pcData, limit = 8) {
+  const arr = Array.isArray(pcData?.messages) ? pcData.messages : [];
+  const picked = arr.slice(-Math.max(1, limit));
+  if (!picked.length) return '(暂无历史记录)';
+  return picked.map((m) => {
+    const speaker = String(m.speaker || '匿名').trim();
+    const contractId = String(m.contractId || '').trim();
+    const prefix = contractId ? `${speaker}(${contractId})` : speaker;
+    return `[${String(m.time || '').trim() || '未知时间'}] ${prefix}: ${String(m.text || '').trim()}`;
+  }).join('\n');
+}
+
+async function runPublicChannelSimulation() {
+  const s = ensureSettings();
+  if (!s.publicChannelEnabled) {
+    setPublicChannelStatus('公共频道未启用', 'warn');
+    return false;
+  }
+
+  setPublicChannelStatus('正在模拟公共频道...', 'warn');
+  showToast('正在模拟公共频道...', { kind: 'info', spinner: true, sticky: true });
+
+  try {
+    const pcData = getPublicChannelData();
+    const readFloors = clampInt(s.publicChannelReadFloors, 1, 50, 5);
+    const chatContext = readRecentChatForParallelWorld(readFloors);
+    const extractedTime = extractTimeFromChat(chatContext);
+    if (extractedTime) pcData.worldClock = extractedTime;
+    const worldClock = pcData.worldClock || getParallelWorldData().worldClock || s.parallelWorldClock || '第1天';
+    const historyText = buildPublicChannelHistoryText(pcData, 20);
+    const messages = buildPublicChannelPromptMessages(chatContext, worldClock, historyText);
+
+    let responseText = '';
+    if (s.publicChannelProvider === 'custom') {
+      responseText = await callViaCustom(
+        s.publicChannelCustomEndpoint,
+        s.publicChannelCustomApiKey,
+        s.publicChannelCustomModel,
+        messages,
+        s.publicChannelTemperature,
+        s.publicChannelCustomMaxTokens,
+        s.publicChannelCustomTopP,
+        s.publicChannelCustomStream
+      );
+    } else {
+      responseText = await callViaSillyTavern(messages, null, s.publicChannelTemperature);
+    }
+
+    const parsed = safeJsonParse(responseText);
+    if (!parsed || !Array.isArray(parsed.messages)) {
+      setPublicChannelStatus('公共频道结果解析失败', 'err');
+      hideToast();
+      return false;
+    }
+
+    if (parsed.worldTime) pcData.worldClock = String(parsed.worldTime).trim();
+    pcData.summary = String(parsed.channelSummary || '').trim();
+
+    const rosterMap = new Map((Array.isArray(pcData.roster) ? pcData.roster : []).map(x => [String(x.name || '').trim().toLowerCase(), x]));
+    for (const item of (Array.isArray(parsed.rosterUpdates) ? parsed.rosterUpdates : [])) {
+      const name = String(item?.name || '').trim();
+      if (!name) continue;
+      rosterMap.set(name.toLowerCase(), {
+        name,
+        contractId: String(item.contractId || '').trim(),
+        faction: String(item.faction || '').trim(),
+        persona: String(item.persona || '').trim(),
+      });
+    }
+    pcData.roster = Array.from(rosterMap.values()).filter(x => x && x.name);
+
+    const batchSize = clampInt(s.publicChannelBatchSize, 1, 50, DEFAULT_PUBLIC_CHANNEL_BATCH_SIZE);
+    if (parsed.messages.length < batchSize) {
+      setPublicChannelStatus(`公共频道结果不足 ${batchSize} 条，已拒绝写入`, 'err');
+      hideToast();
+      return false;
+    }
+
+    const simRunId = Date.now();
+    const nowTs = Date.now();
+    for (let i = 0; i < parsed.messages.length && i < batchSize; i++) {
+      const item = parsed.messages[i];
+      const text = String(item?.text || '').trim();
+      const speaker = String(item?.speaker || '').trim();
+      if (!text || !speaker) continue;
+      pcData.messages.push({
+        id: `pc_${simRunId}_${i}`,
+        ts: nowTs + i,
+        time: String(pcData.worldClock || worldClock || ''),
+        speaker,
+        contractId: String(item.contractId || '').trim(),
+        faction: String(item.faction || '').trim(),
+        tone: String(item.tone || '').trim(),
+        type: String(item.type || '').trim(),
+        text,
+        importance: clampInt(item.importance, 1, 5, 2),
+        simRunId,
+      });
+    }
+
+    pcData.lastBatchRunId = simRunId;
+
+    const historyLimit = clampInt(s.publicChannelHistoryLimit, 20, 500, DEFAULT_PUBLIC_CHANNEL_HISTORY_LIMIT);
+    if (pcData.messages.length > historyLimit) {
+      pcData.messages = pcData.messages.slice(-historyLimit);
+    }
+
+    pcData.lastRunFloor = computeFloorCount(
+      (typeof SillyTavern !== 'undefined' && SillyTavern?.getContext?.()?.chat) || [],
+      String(s.structuredEntriesCountMode || s.summaryCountMode || 'assistant'),
+      true,
+      true
+    );
+    pcData.runCount = Number(pcData.runCount || 0) + 1;
+
+    await setPublicChannelData(pcData);
+    await writePublicChannelWorldbookEntry(pcData, s);
+    renderPublicChannelLog(pcData);
+    const writtenCount = pcData.messages.filter(m => Number(m.simRunId || 0) === simRunId).length;
+    setPublicChannelStatus(`已生成 ${writtenCount} 条公共频道消息`, 'ok');
+    hideToast();
+    return true;
+  } catch (e) {
+    console.error('[StoryGuide] 公共频道模拟失败:', e);
+    setPublicChannelStatus(`公共频道模拟失败: ${e?.message || e}`, 'err');
+    hideToast();
+    return false;
+  }
+}
+
 /**
  * 核心推演函数：调用 LLM 推演所有被追踪 NPC 的离屏事件
  */
@@ -2444,7 +2876,9 @@ async function runParallelWorldSimulation() {
 
     pwData.lastRunFloor = computeFloorCount(
       (typeof SillyTavern !== 'undefined' && SillyTavern?.getContext?.()?.chat) || [],
-      'assistant'
+      String(s.structuredEntriesCountMode || s.summaryCountMode || 'assistant'),
+      true,
+      true
     );
     pwData.runCount = (pwData.runCount || 0) + 1;
 
@@ -2666,20 +3100,46 @@ async function maybeAutoRunParallelWorld() {
   if (!s.parallelWorldEnabled || !s.parallelWorldAutoTrigger) return;
 
   const chat = (typeof SillyTavern !== 'undefined' && SillyTavern?.getContext?.()?.chat) || [];
-  const currentFloor = computeFloorCount(chat, 'assistant');
+  const mode = String(s.structuredEntriesCountMode || s.summaryCountMode || 'assistant');
+  const currentFloor = computeFloorCount(chat, mode, true, true);
   const pwData = getParallelWorldData();
-  const lastFloor = pwData.lastRunFloor || 0;
-  const every = Math.max(1, s.parallelWorldAutoEvery || 5);
+  const lastFloor = Number(pwData.lastRunFloor || 0);
+  const every = clampInt(s.parallelWorldAutoEvery, 1, 50, 5);
   const autoParallelHint = () => {
     setParallelWorldStatus('正在生成平行事件...', 'warn');
     showToast('正在生成平行事件...', { kind: 'info', spinner: true, sticky: true });
   };
 
-  if (currentFloor - lastFloor >= every) {
+  if (currentFloor <= 0) return;
+  if (currentFloor % every !== 0) return;
+  if (currentFloor <= lastFloor) return;
+
+  if (currentFloor > lastFloor) {
     autoParallelHint();
-    console.log(`[StoryGuide] 平行世界: 自动推演触发 (楼层 ${lastFloor} → ${currentFloor}, 间隔 ${every})`);
+    console.log(`[StoryGuide] 平行世界: 自动推演触发 (楼层 ${lastFloor} -> ${currentFloor}, 间隔 ${every})`);
     await runParallelWorldSimulation();
   }
+}
+
+async function maybeAutoRunPublicChannel() {
+  const s = ensureSettings();
+  if (!s.publicChannelEnabled || !s.publicChannelAutoTrigger) return;
+
+  const chat = (typeof SillyTavern !== 'undefined' && SillyTavern?.getContext?.()?.chat) || [];
+  const mode = String(s.structuredEntriesCountMode || s.summaryCountMode || 'assistant');
+  const currentFloor = computeFloorCount(chat, mode, true, true);
+  const pcData = getPublicChannelData();
+  const lastFloor = Number(pcData.lastRunFloor || 0);
+  const every = clampInt(s.publicChannelAutoEvery, 1, 50, 3);
+
+  if (currentFloor <= 0) return;
+  if (currentFloor % every !== 0) return;
+  if (currentFloor <= lastFloor) return;
+
+  setPublicChannelStatus('正在生成公共频道...', 'warn');
+  showToast('正在生成公共频道...', { kind: 'info', spinner: true, sticky: true });
+  console.log(`[StoryGuide] 公共频道: 自动触发 (楼层 ${lastFloor} -> ${currentFloor}, 间隔 ${every})`);
+  await runPublicChannelSimulation();
 }
 
 /**
@@ -2713,6 +3173,132 @@ function buildParallelWorldContextInjection() {
 
   if (parts.length === 0) return '';
   return `<!-- SG_PARALLEL_WORLD -->${parts.join(' ')}<!-- /SG_PARALLEL_WORLD -->`;
+}
+
+function buildPublicChannelContextInjection() {
+  const s = ensureSettings();
+  if (!s.publicChannelEnabled || !s.publicChannelInjectContext) return '';
+
+  const pcData = getPublicChannelData();
+  const recent = (Array.isArray(pcData.messages) ? pcData.messages : [])
+    .slice()
+    .sort((a, b) => (Number(b.importance || 0) - Number(a.importance || 0)) || (Number(b.ts || 0) - Number(a.ts || 0)))
+    .slice(0, 3);
+
+  if (!recent.length) return '';
+  const lines = ['[公共频道]'];
+  for (const msg of recent) {
+    const speaker = String(msg.speaker || '匿名').trim();
+    const tone = String(msg.tone || '').trim();
+    const text = String(msg.text || '').trim();
+    if (!speaker || !text) continue;
+    lines.push(`- ${speaker}${tone ? `(${tone})` : ''}: ${text}`);
+  }
+  if (pcData.summary) lines.push(`- 风向: ${String(pcData.summary).trim()}`);
+  return lines.length > 1 ? `<!-- SG_PUBLIC_CHANNEL\n${lines.join('\n')}\n-->` : '';
+}
+
+function renderPublicChannelLog(pcDataOverride) {
+  const $container = $('#sg_publicChannelLog');
+  if (!$container.length) return;
+
+  const pcData = pcDataOverride || getPublicChannelData();
+  const s = ensureSettings();
+  const lastBatchRunId = Number(pcData.lastBatchRunId || 0);
+  const batchSize = clampInt(s.publicChannelBatchSize, 1, 50, DEFAULT_PUBLIC_CHANNEL_BATCH_SIZE);
+  const messages = (Array.isArray(pcData.messages) ? pcData.messages : [])
+    .filter(m => !lastBatchRunId || Number(m.simRunId || 0) === lastBatchRunId)
+    .slice(-batchSize)
+    .reverse();
+  if (!messages.length) {
+    $container.html('<div class="sg-hint">暂无公共频道记录。点击“立即模拟”开始生成。</div>');
+    return;
+  }
+
+  let html = '';
+  if (pcData.summary) {
+    html += `<div class="sg-hint" style="margin-bottom:8px;">频道风向：${escapeHtml(String(pcData.summary).trim())}</div>`;
+  }
+  for (const msg of messages) {
+    const speaker = String(msg.speaker || '匿名').trim();
+    const contractId = String(msg.contractId || '').trim();
+    const faction = String(msg.faction || '').trim();
+    const type = String(msg.type || '').trim();
+    const meta = [contractId, faction, type, `重要度${clampInt(msg.importance, 1, 5, 2)}`].filter(Boolean).join(' · ');
+    html += `<div class="sg-pw-event-item">`;
+    html += `<div><span class="sg-pw-event-time">${escapeHtml(String(msg.time || '').trim())}</span> <span class="sg-pw-event-text">${escapeHtml(speaker)}</span></div>`;
+    html += `<div style="margin-top:4px;">${escapeHtml(String(msg.text || '').trim())}</div>`;
+    if (meta) html += `<div class="sg-hint" style="margin-top:4px;">${escapeHtml(meta)}</div>`;
+    html += `</div>`;
+  }
+  $container.html(html);
+}
+
+async function refreshPublicChannelModels() {
+  const s = ensureSettings();
+  const $btn = $('#sg_refreshPublicChannelModels');
+  const base = normalizeBaseUrl(s.publicChannelCustomEndpoint);
+  if (!base) {
+    setPublicChannelStatus('请先填写 API 基础URL', 'warn');
+    return;
+  }
+  $btn.prop('disabled', true);
+  setPublicChannelStatus('正在刷新公共频道模型列表...', 'warn');
+  try {
+    const modelsUrl = base.replace(/\/$/, '') + '/models';
+    const headers = {};
+    if (s.publicChannelCustomApiKey) headers['Authorization'] = `Bearer ${s.publicChannelCustomApiKey}`;
+
+    let modelIds = [];
+    try {
+      const res = await fetchJsonCompat(modelsUrl, { method: 'GET', headers });
+      if (res && Array.isArray(res.data)) {
+        modelIds = res.data.map(m => m.id || m.name).filter(Boolean);
+      }
+    } catch {
+      const proxyRes = await fetchJsonCompat('/api/oai/models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getStRequestHeadersCompat() },
+        body: JSON.stringify({ api_url: base, api_key_openai: s.publicChannelCustomApiKey }),
+      });
+      if (proxyRes && Array.isArray(proxyRes.data)) {
+        modelIds = proxyRes.data.map(m => m.id || m.name).filter(Boolean);
+      }
+    }
+
+    if (!modelIds.length) {
+      setPublicChannelStatus('未获取到模型', 'warn');
+    } else {
+      s.publicChannelCustomModelsCache = modelIds;
+      saveSettings();
+      fillPublicChannelModelSelect(modelIds, s.publicChannelCustomModel);
+      setPublicChannelStatus(`已获取到 ${modelIds.length} 个公共频道模型`, 'ok');
+    }
+  } catch (e) {
+    setPublicChannelStatus(`刷新失败: ${e?.message || e}`, 'err');
+  } finally {
+    $btn.prop('disabled', false);
+  }
+}
+
+function fillPublicChannelModelSelect(modelIds, selected) {
+  const $sel = $('#sg_publicChannelCustomModel');
+  if (!$sel.length) return;
+  $sel.empty();
+  for (const id of modelIds) {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = id;
+    if (id === selected) opt.selected = true;
+    $sel.append(opt);
+  }
+  if (modelIds.length && selected && !modelIds.includes(selected)) {
+    const opt = document.createElement('option');
+    opt.value = selected;
+    opt.textContent = selected + ' (当前)';
+    opt.selected = true;
+    $sel.prepend(opt);
+  }
 }
 
 /**
@@ -9942,13 +10528,14 @@ function scheduleAutoSummary(reason = '') {
 
 function schedulePostGenerationAuto(reason = '') {
   const s = ensureSettings();
-  if (!s.summaryEnabled && !s.structuredEntriesEnabled && !(s.parallelWorldEnabled && s.parallelWorldAutoTrigger)) return;
+  if (!s.summaryEnabled && !s.structuredEntriesEnabled && !(s.parallelWorldEnabled && s.parallelWorldAutoTrigger) && !(s.publicChannelEnabled && s.publicChannelAutoTrigger)) return;
   const delay = clampInt(s.debounceMs, 300, 10000, DEFAULT_SETTINGS.debounceMs);
   if (generationIdleTimer) clearTimeout(generationIdleTimer);
   generationIdleTimer = setTimeout(() => {
     generationIdleTimer = null;
     maybeAutoSummary(reason).catch(() => void 0);
     maybeAutoStructuredEntries(reason).catch(() => void 0);
+    maybeAutoRunPublicChannel().catch(() => void 0);
     maybeAutoRunParallelWorld().catch(e => console.warn('[StoryGuide] 平行世界自动推演异常:', e));
   }, delay);
 }
@@ -10041,11 +10628,11 @@ async function runStructuredEntries({ reason = 'auto' } = {}) {
     if (!segments.length) return 0;
 
     let summaryStatData = null;
-    if (s.summaryReadStatData) {
+    if (s.structuredReadStatData) {
       try {
         const statSettings = {
           ...s,
-          wiRollStatVarName: s.summaryStatVarName || 'stat_data'
+          wiRollStatVarName: s.structuredStatVarName || 'stat_data'
         };
         const { statData } = await resolveStatDataComprehensive(chat, statSettings);
         if (statData) summaryStatData = statData;
@@ -11029,11 +11616,15 @@ function installRollPreSendHook() {
 
     const rollText = s.wiRollEnabled ? await buildRollInjectionForText(text, chat, s, logStatus) : null;
     const triggerText = s.wiTriggerEnabled ? await buildTriggerInjectionForText(text, chat, s, logStatus) : null;
-    if (!rollText && !triggerText) return null;
+    const parallelText = buildParallelWorldContextInjection();
+    const publicChannelText = buildPublicChannelContextInjection();
+    if (!rollText && !triggerText && !parallelText && !publicChannelText) return null;
 
     let cleaned = stripTriggerInjection(text, String(s.wiRollTag || 'SG_ROLL').trim() || 'SG_ROLL');
     cleaned = stripTriggerInjection(cleaned, String(s.wiTriggerTag || 'SG_WI_TRIGGERS').trim() || 'SG_WI_TRIGGERS');
-    return cleaned + (rollText || '') + (triggerText || '');
+    cleaned = stripTriggerInjection(cleaned, 'SG_PARALLEL_WORLD');
+    cleaned = stripTriggerInjection(cleaned, 'SG_PUBLIC_CHANNEL');
+    return cleaned + (parallelText || '') + (publicChannelText || '') + (rollText || '') + (triggerText || '');
   }
 
   function findMessageArg(args) {
@@ -14083,6 +14674,7 @@ function buildModalHtml() {
             <button class="sg-pgtab" id="sg_pgtab_character">自定义角色</button>
             <button class="sg-pgtab" id="sg_pgtab_char_archive">人物档案</button>
             <button class="sg-pgtab" id="sg_pgtab_parallel">平行世界</button>
+            <button class="sg-pgtab" id="sg_pgtab_public_channel">公共频道</button>
           </div>
 
           <div class="sg-page active" id="sg_page_guide">
@@ -14421,6 +15013,13 @@ function buildModalHtml() {
                 <span>层</span>
               </div>
               <div class="sg-row sg-inline" style="margin-top:6px">
+                <label class="sg-check"><input type="checkbox" id="sg_structuredReadStatData">结构化总结读取角色状态变量</label>
+                <div class="sg-field" style="flex:1;margin-left:8px">
+                  <input id="sg_structuredStatVarName" type="text" placeholder="stat_data" style="width:120px">
+                </div>
+                <div class="sg-hint" style="margin-left:8px">仅结构化总结读取该变量，普通总结不受影响</div>
+              </div>
+              <div class="sg-row sg-inline" style="margin-top:6px">
                 <span>条目内容格式</span>
                 <select id="sg_structuredEntryContentFormat">
                   <option value="text">简洁文本</option>
@@ -14508,7 +15107,7 @@ function buildModalHtml() {
               </div>
               <div class="sg-field">
                 <label>结构化提取模板（User，可选）</label>
-                <textarea id="sg_structuredEntriesUserTemplate" rows="4" placeholder="支持占位符：{{fromFloor}} {{toFloor}} {{chunk}} {{knownCharacters}} {{knownEquipments}} {{knownInventories}} {{knownFactions}} {{knownAchievements}} {{knownSubProfessions}} {{knownQuests}} {{knownConquests}} {{structuredWorldbook}}"></textarea>
+                <textarea id="sg_structuredEntriesUserTemplate" rows="4" placeholder="支持占位符：{{fromFloor}} {{toFloor}} {{chunk}} {{knownCharacters}} {{knownEquipments}} {{knownInventories}} {{knownFactions}} {{knownAchievements}} {{knownSubProfessions}} {{knownQuests}} {{knownConquests}} {{structuredWorldbook}} {{statData}}"></textarea>
               </div>
               <div class="sg-card sg-subcard">
                 <div class="sg-card-title">条目提示词与模板管理</div>
@@ -16019,6 +16618,157 @@ function buildModalHtml() {
             </div>
           </div> <!-- sg_page_parallel -->
 
+          <div class="sg-page" id="sg_page_public_channel">
+            <div class="sg-card">
+              <div class="sg-card-title">公共频道</div>
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>启用</label>
+                  <label class="sg-switch">
+                    <input type="checkbox" id="sg_publicChannelEnabled">
+                    <span class="sg-slider"></span>
+                  </label>
+                </div>
+                <div class="sg-field">
+                  <label>注入正文/主角可见</label>
+                  <label class="sg-switch">
+                    <input type="checkbox" id="sg_publicChannelInjectContext">
+                    <span class="sg-slider"></span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>自动模拟</label>
+                  <label class="sg-switch">
+                    <input type="checkbox" id="sg_publicChannelAutoTrigger">
+                    <span class="sg-slider"></span>
+                  </label>
+                </div>
+                <div class="sg-field">
+                  <label>每隔N条AI回复</label>
+                  <input id="sg_publicChannelAutoEvery" type="number" min="1" max="50">
+                </div>
+              </div>
+
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>读取正文楼层数</label>
+                  <input id="sg_publicChannelReadFloors" type="number" min="1" max="50">
+                </div>
+                <div class="sg-field">
+                  <label>每轮生成条数</label>
+                  <input id="sg_publicChannelBatchSize" type="number" min="1" max="50">
+                </div>
+              </div>
+
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>后台保留历史条数</label>
+                  <input id="sg_publicChannelHistoryLimit" type="number" min="20" max="500">
+                </div>
+                <div class="sg-field">
+                  <label>面板只显示</label>
+                  <input type="text" value="本轮生成消息" disabled>
+                </div>
+              </div>
+
+              <div class="sg-field">
+                <label>频道风格</label>
+                <select id="sg_publicChannelStyle">
+                  <option value="serious">严肃</option>
+                  <option value="balanced">均衡</option>
+                  <option value="funny">乐子人偏多</option>
+                  <option value="tieba">贴吧模式</option>
+                </select>
+              </div>
+
+              <div class="sg-actions-row" style="margin-top:10px;">
+                <button class="menu_button sg-btn-primary" id="sg_publicChannelRun">立即模拟</button>
+                <button class="menu_button sg-btn" id="sg_publicChannelClear">清空频道记录</button>
+              </div>
+              <div class="sg-status" id="sg_publicChannelStatus"></div>
+            </div>
+
+            <div class="sg-card sg-subcard">
+              <div class="sg-card-title">世界书写回</div>
+              <div class="sg-row sg-inline">
+                <label class="sg-check"><input type="checkbox" id="sg_publicChannelWriteToWorldbook">写入蓝绿世界书</label>
+              </div>
+              <div class="sg-field">
+                <label>频道消息书条目名</label>
+                <input id="sg_publicChannelWorldInfoComment" type="text" placeholder="[mvu_plot]公共频道">
+              </div>
+              <div class="sg-hint">蓝绿世界书文件跟随“总结设置”中的绑定；公共频道只覆写本轮生成消息到相同目标文件。</div>
+            </div>
+
+            <div class="sg-card sg-subcard">
+              <div class="sg-card-title">API 设置</div>
+              <div class="sg-grid2">
+                <div class="sg-field">
+                  <label>Provider</label>
+                  <select id="sg_publicChannelProvider">
+                    <option value="st">使用当前 SillyTavern API</option>
+                    <option value="custom">独立API</option>
+                  </select>
+                </div>
+                <div class="sg-field">
+                  <label>temperature</label>
+                  <input id="sg_publicChannelTemperature" type="number" step="0.05" min="0" max="2">
+                </div>
+              </div>
+
+              <div class="sg-card sg-subcard" id="sg_publicChannelCustomBlock" style="display:none;">
+                <div class="sg-field">
+                  <label>API 基础URL</label>
+                  <input id="sg_publicChannelCustomEndpoint" type="text" placeholder="https://api.example.com/v1">
+                </div>
+                <div class="sg-field">
+                  <label>API Key</label>
+                  <input id="sg_publicChannelCustomApiKey" type="password" placeholder="sk-...">
+                </div>
+                <div class="sg-field">
+                  <label>模型</label>
+                  <div style="display:flex;gap:4px;">
+                    <select id="sg_publicChannelCustomModel" style="flex:1;"></select>
+                    <button class="menu_button sg-btn" id="sg_refreshPublicChannelModels">刷新</button>
+                  </div>
+                </div>
+                <div class="sg-grid2">
+                  <div class="sg-field">
+                    <label>Max Tokens</label>
+                    <input id="sg_publicChannelCustomMaxTokens" type="number" min="128" max="200000">
+                  </div>
+                  <div class="sg-field">
+                    <label>top_p</label>
+                    <input id="sg_publicChannelCustomTopP" type="number" step="0.01" min="0" max="1">
+                  </div>
+                </div>
+                <label class="sg-check"><input type="checkbox" id="sg_publicChannelCustomStream"> 流式返回</label>
+              </div>
+            </div>
+
+            <div class="sg-card">
+              <div class="sg-card-title">提示词</div>
+              <div class="sg-field">
+                <label>System Prompt</label>
+                <textarea id="sg_publicChannelSystemPrompt" rows="6" spellcheck="false"></textarea>
+              </div>
+              <div class="sg-field">
+                <label>User Template（支持 {{worldTime}} {{recentContext}} {{worldState}} {{channelHistory}}）</label>
+                <textarea id="sg_publicChannelUserTemplate" rows="4" spellcheck="false"></textarea>
+              </div>
+            </div>
+
+            <div class="sg-card">
+              <div class="sg-card-title">频道记录</div>
+              <div id="sg_publicChannelLog" class="sg-pw-event-log">
+                <div class="sg-hint">暂无公共频道记录。点击“立即模拟”开始生成。</div>
+              </div>
+            </div>
+          </div> <!-- sg_page_public_channel -->
+
           <div class="sg-status" id="sg_status"></div>
         </div>
 
@@ -16507,7 +17257,7 @@ function ensureModal() {
     updateBlueIndexInfoLabel();
     updateSummaryManualRangeHint(false);
   });
-  $('#sg_summaryEnabled, #sg_summaryEvery, #sg_summaryCountMode, #sg_summaryTemperature, #sg_summarySystemPrompt, #sg_summaryUserTemplate, #sg_summaryReadStatData, #sg_summaryStatVarName, #sg_summaryAutoRollback, #sg_structuredAutoRollback, #sg_structuredEntriesEnabled, #sg_structuredWorldbookEnabled, #sg_structuredWorldbookMode, #sg_characterEntriesEnabled, #sg_equipmentEntriesEnabled, #sg_characterEntryPrefix, #sg_equipmentEntryPrefix, #sg_structuredEntriesSystemPrompt, #sg_structuredEntriesUserTemplate, #sg_structuredCharacterPrompt, #sg_structuredCharacterEntryTemplate, #sg_structuredEquipmentPrompt, #sg_structuredEquipmentEntryTemplate, #sg_summaryCustomEndpoint, #sg_summaryCustomApiKey, #sg_summaryCustomModel, #sg_summaryCustomMaxTokens, #sg_summaryCustomStream, #sg_summaryToWorldInfo, #sg_summaryWorldInfoFile, #sg_summaryWorldInfoCommentPrefix, #sg_summaryWorldInfoKeyMode, #sg_summaryIndexPrefix, #sg_summaryIndexPad, #sg_summaryIndexStart, #sg_summaryIndexInComment, #sg_summaryToBlueWorldInfo, #sg_summaryBlueWorldInfoFile, #sg_wiTriggerEnabled, #sg_wiTriggerLookbackMessages, #sg_wiTriggerIncludeUserMessage, #sg_wiTriggerUserMessageWeight, #sg_wiTriggerStartAfterAssistantMessages, #sg_wiTriggerMaxEntries, #sg_wiTriggerMaxCharacters, #sg_wiTriggerMaxEquipments, #sg_wiTriggerMaxPlot, #sg_wiTriggerMinScore, #sg_wiTriggerMaxKeywords, #sg_wiTriggerInjectStyle, #sg_wiTriggerDebugLog, #sg_wiBlueIndexMode, #sg_wiBlueIndexFile, #sg_summaryMaxChars, #sg_summaryMaxTotalChars, #sg_wiTriggerMatchMode, #sg_wiIndexPrefilterTopK, #sg_wiIndexProvider, #sg_wiIndexTemperature, #sg_wiIndexSystemPrompt, #sg_wiIndexUserTemplate, #sg_wiIndexCustomEndpoint, #sg_wiIndexCustomApiKey, #sg_wiIndexCustomModel, #sg_wiIndexCustomMaxTokens, #sg_wiIndexTopP, #sg_wiIndexCustomStream, #sg_wiRollEnabled, #sg_wiRollStatSource, #sg_wiRollStatVarName, #sg_wiRollRandomWeight, #sg_wiRollDifficulty, #sg_wiRollInjectStyle, #sg_wiRollDebugLog, #sg_wiRollStatParseMode, #sg_wiRollProvider, #sg_wiRollCustomEndpoint, #sg_wiRollCustomApiKey, #sg_wiRollCustomModel, #sg_wiRollCustomMaxTokens, #sg_wiRollCustomTopP, #sg_wiRollCustomTemperature, #sg_wiRollCustomStream, #sg_wiRollSystemPrompt, #sg_imageGenEnabled, #sg_novelaiApiKey, #sg_novelaiModel, #sg_novelaiResolution, #sg_novelaiSteps, #sg_novelaiScale, #sg_novelaiNegativePrompt, #sg_imageGenAutoSave, #sg_imageGenSavePath, #sg_imageGenLookbackMessages, #sg_imageGenReadStatData, #sg_imageGenStatVarName, #sg_imageGenCustomEndpoint, #sg_imageGenCustomApiKey, #sg_imageGenCustomModel, #sg_imageGenSystemPrompt, #sg_imageGalleryEnabled, #sg_imageGalleryUrl, #sg_imageGenWorldBookEnabled, #sg_imageGenWorldBookFile').on('change input', () => {
+  $('#sg_summaryEnabled, #sg_summaryEvery, #sg_summaryCountMode, #sg_summaryTemperature, #sg_summarySystemPrompt, #sg_summaryUserTemplate, #sg_summaryReadStatData, #sg_summaryStatVarName, #sg_summaryAutoRollback, #sg_structuredAutoRollback, #sg_structuredEntriesEnabled, #sg_structuredReadStatData, #sg_structuredStatVarName, #sg_structuredWorldbookEnabled, #sg_structuredWorldbookMode, #sg_characterEntriesEnabled, #sg_equipmentEntriesEnabled, #sg_characterEntryPrefix, #sg_equipmentEntryPrefix, #sg_structuredEntriesSystemPrompt, #sg_structuredEntriesUserTemplate, #sg_structuredCharacterPrompt, #sg_structuredCharacterEntryTemplate, #sg_structuredEquipmentPrompt, #sg_structuredEquipmentEntryTemplate, #sg_summaryCustomEndpoint, #sg_summaryCustomApiKey, #sg_summaryCustomModel, #sg_summaryCustomMaxTokens, #sg_summaryCustomStream, #sg_summaryToWorldInfo, #sg_summaryWorldInfoFile, #sg_summaryWorldInfoCommentPrefix, #sg_summaryWorldInfoKeyMode, #sg_summaryIndexPrefix, #sg_summaryIndexPad, #sg_summaryIndexStart, #sg_summaryIndexInComment, #sg_summaryToBlueWorldInfo, #sg_summaryBlueWorldInfoFile, #sg_wiTriggerEnabled, #sg_wiTriggerLookbackMessages, #sg_wiTriggerIncludeUserMessage, #sg_wiTriggerUserMessageWeight, #sg_wiTriggerStartAfterAssistantMessages, #sg_wiTriggerMaxEntries, #sg_wiTriggerMaxCharacters, #sg_wiTriggerMaxEquipments, #sg_wiTriggerMaxPlot, #sg_wiTriggerMinScore, #sg_wiTriggerMaxKeywords, #sg_wiTriggerInjectStyle, #sg_wiTriggerDebugLog, #sg_wiBlueIndexMode, #sg_wiBlueIndexFile, #sg_summaryMaxChars, #sg_summaryMaxTotalChars, #sg_wiTriggerMatchMode, #sg_wiIndexPrefilterTopK, #sg_wiIndexProvider, #sg_wiIndexTemperature, #sg_wiIndexSystemPrompt, #sg_wiIndexUserTemplate, #sg_wiIndexCustomEndpoint, #sg_wiIndexCustomApiKey, #sg_wiIndexCustomModel, #sg_wiIndexCustomMaxTokens, #sg_wiIndexTopP, #sg_wiIndexCustomStream, #sg_wiRollEnabled, #sg_wiRollStatSource, #sg_wiRollStatVarName, #sg_wiRollRandomWeight, #sg_wiRollDifficulty, #sg_wiRollInjectStyle, #sg_wiRollDebugLog, #sg_wiRollStatParseMode, #sg_wiRollProvider, #sg_wiRollCustomEndpoint, #sg_wiRollCustomApiKey, #sg_wiRollCustomModel, #sg_wiRollCustomMaxTokens, #sg_wiRollCustomTopP, #sg_wiRollCustomTemperature, #sg_wiRollCustomStream, #sg_wiRollSystemPrompt, #sg_imageGenEnabled, #sg_novelaiApiKey, #sg_novelaiModel, #sg_novelaiResolution, #sg_novelaiSteps, #sg_novelaiScale, #sg_novelaiNegativePrompt, #sg_imageGenAutoSave, #sg_imageGenSavePath, #sg_imageGenLookbackMessages, #sg_imageGenReadStatData, #sg_imageGenStatVarName, #sg_imageGenCustomEndpoint, #sg_imageGenCustomApiKey, #sg_imageGenCustomModel, #sg_imageGenSystemPrompt, #sg_imageGalleryEnabled, #sg_imageGalleryUrl, #sg_imageGenWorldBookEnabled, #sg_imageGenWorldBookFile').on('change input', () => {
     pullUiToSettings();
     saveSettings();
     updateSummaryInfoLabel();
@@ -17090,8 +17840,8 @@ function ensureModal() {
 
 function showSettingsPage(page) {
   const p = String(page || 'guide');
-  $('#sg_pgtab_guide, #sg_pgtab_summary, #sg_pgtab_index, #sg_pgtab_roll, #sg_pgtab_image, #sg_pgtab_sex, #sg_pgtab_character, #sg_pgtab_char_archive, #sg_pgtab_parallel').removeClass('active');
-  $('#sg_page_guide, #sg_page_summary, #sg_page_index, #sg_page_roll, #sg_page_image, #sg_page_sex, #sg_page_character, #sg_page_char_archive, #sg_page_parallel').removeClass('active');
+  $('#sg_pgtab_guide, #sg_pgtab_summary, #sg_pgtab_index, #sg_pgtab_roll, #sg_pgtab_image, #sg_pgtab_sex, #sg_pgtab_character, #sg_pgtab_char_archive, #sg_pgtab_parallel, #sg_pgtab_public_channel').removeClass('active');
+  $('#sg_page_guide, #sg_page_summary, #sg_page_index, #sg_page_roll, #sg_page_image, #sg_page_sex, #sg_page_character, #sg_page_char_archive, #sg_page_parallel, #sg_page_public_channel').removeClass('active');
 
   if (p === 'summary') {
     $('#sg_pgtab_summary').addClass('active');
@@ -17119,6 +17869,10 @@ function showSettingsPage(page) {
     $('#sg_page_parallel').addClass('active');
     // 切到平行世界页时刷新数据
     try { refreshParallelWorldTrackedLists(); renderParallelWorldEventLog(); } catch { }
+  } else if (p === 'public_channel') {
+    $('#sg_pgtab_public_channel').addClass('active');
+    $('#sg_page_public_channel').addClass('active');
+    try { renderPublicChannelLog(); } catch { }
   } else {
     $('#sg_pgtab_guide').addClass('active');
     $('#sg_page_guide').addClass('active');
@@ -17151,6 +17905,7 @@ function setupSettingsPages() {
   $('#sg_pgtab_character').on('click', () => showSettingsPage('character'));
   $('#sg_pgtab_char_archive').on('click', () => showSettingsPage('char_archive'));
   $('#sg_pgtab_parallel').on('click', () => showSettingsPage('parallel'));
+  $('#sg_pgtab_public_channel').on('click', () => showSettingsPage('public_channel'));
 
   try { setupSexGuidePage(); } catch (e) { console.error('[StoryGuide] setupSexGuidePage failed:', e); }
   setupCharacterPage();
@@ -17654,6 +18409,12 @@ function setupParallelWorldPage() {
     saveSettings();
   };
 
+  const $refreshBtn = $('#sg_pwRefreshNpcList');
+  if ($refreshBtn.length && !$('#sg_pwClearTrackedLists').length) {
+    $('<button id="sg_pwClearTrackedLists" class="menu_button sg-btn" style="margin-left:8px;">清空追踪列表</button>')
+      .insertAfter($refreshBtn);
+  }
+
   // 推演按钮
   $('#sg_pwRunSimulation').on('click', async () => {
     pullUiToSettings(); saveSettings();
@@ -17673,6 +18434,15 @@ function setupParallelWorldPage() {
   // 刷新追踪列表
   $('#sg_pwRefreshNpcList').on('click', () => {
     refreshParallelWorldTrackedLists();
+  });
+  $('#sg_pwClearTrackedLists').on('click', async () => {
+    const s = ensureSettings();
+    s.parallelWorldTrackedNpcs = [];
+    s.parallelWorldTrackedFactions = [];
+    saveSettings();
+    $('#sg_pwManualNpcName').val('');
+    await refreshParallelWorldTrackedLists();
+    setParallelWorldStatus('已清空之前的 NPC 和势力追踪列表', 'ok');
   });
 
   // 手动添加NPC
@@ -17728,12 +18498,47 @@ function setupParallelWorldPage() {
     await refreshParallelWorldModels();
   });
 
+  $('#sg_publicChannelRun').on('click', async () => {
+    pullUiToSettings(); saveSettings();
+    await runPublicChannelSimulation();
+  });
+
+  $('#sg_publicChannelClear').on('click', async () => {
+    const pcData = getPublicChannelData();
+    pcData.messages = [];
+    pcData.summary = '';
+    pcData.lastBatchRunId = 0;
+    await setPublicChannelData(pcData);
+    renderPublicChannelLog(pcData);
+    setPublicChannelStatus('公共频道记录已清空', 'ok');
+  });
+
+  $('#sg_publicChannelProvider').on('change', function () {
+    const isCustom = $(this).val() === 'custom';
+    $('#sg_publicChannelCustomBlock').toggle(isCustom);
+    autoSave();
+  });
+
+  $('#sg_refreshPublicChannelModels').on('click', async () => {
+    pullUiToSettings(); saveSettings();
+    await refreshPublicChannelModels();
+  });
+
   // auto-save for inputs
   $('#sg_parallelWorldEnabled, #sg_parallelWorldAutoTrigger, #sg_parallelWorldWriteToWorldbook, #sg_parallelWorldInjectContext, #sg_parallelWorldCustomStream').on('change', autoSave);
   $('#sg_parallelWorldAutoEvery, #sg_parallelWorldTemperature, #sg_parallelWorldMaxEventsPerNpc, #sg_parallelWorldCustomMaxTokens, #sg_parallelWorldCustomTopP').on('change', autoSave);
   $('#sg_parallelWorldCustomEndpoint, #sg_parallelWorldCustomApiKey').on('change', autoSave);
   $('#sg_parallelWorldCustomModel').on('change', autoSave);
   $('#sg_parallelWorldSystemPrompt, #sg_parallelWorldUserTemplate').on('change', autoSave);
+  $('#sg_publicChannelEnabled, #sg_publicChannelAutoTrigger, #sg_publicChannelInjectContext').on('change', autoSave);
+  $('#sg_publicChannelAutoEvery, #sg_publicChannelReadFloors, #sg_publicChannelBatchSize, #sg_publicChannelHistoryLimit').on('change', autoSave);
+  $('#sg_publicChannelStyle').on('change', autoSave);
+  $('#sg_publicChannelProvider, #sg_publicChannelCustomStream').on('change', autoSave);
+  $('#sg_publicChannelTemperature, #sg_publicChannelCustomMaxTokens, #sg_publicChannelCustomTopP').on('change', autoSave);
+  $('#sg_publicChannelCustomEndpoint, #sg_publicChannelCustomApiKey').on('change', autoSave);
+  $('#sg_publicChannelCustomModel').on('change', autoSave);
+  $('#sg_publicChannelWriteToWorldbook, #sg_publicChannelWorldInfoComment').on('change input', autoSave);
+  $('#sg_publicChannelSystemPrompt, #sg_publicChannelUserTemplate').on('change', autoSave);
 }
 
 async function runParallelWorldSimulationFromFloating($btn) {
@@ -17891,6 +18696,8 @@ function pullSettingsToUi() {
   $('#sg_structuredEntriesEvery').val(s.structuredEntriesEvery ?? 1);
   $('#sg_structuredEntriesReadFloors').val(s.structuredEntriesReadFloors ?? s.structuredEntriesEvery ?? 1);
   $('#sg_structuredEntriesCountMode').val(String(s.structuredEntriesCountMode || 'assistant'));
+  $('#sg_structuredReadStatData').prop('checked', !!s.structuredReadStatData);
+  $('#sg_structuredStatVarName').val(String(s.structuredStatVarName || 'stat_data'));
   $('#sg_structuredEntryContentFormat').val(String(s.structuredEntryContentFormat || 'text'));
   $('#sg_megaSummaryEnabled').prop('checked', !!s.megaSummaryEnabled);
   $('#sg_megaSummaryEvery').val(s.megaSummaryEvery || 40);
@@ -18193,6 +19000,29 @@ function pullSettingsToUi() {
   $('#sg_parallelWorldUserTemplate').val(s.parallelWorldUserTemplate || DEFAULT_PARALLEL_WORLD_USER_TEMPLATE);
   $('#sg_parallelWorldClock').val(s.parallelWorldClock || '');
   $('#sg_parallelWorldReadFloors').val(s.parallelWorldReadFloors || 5);
+  $('#sg_publicChannelEnabled').prop('checked', !!s.publicChannelEnabled);
+  $('#sg_publicChannelAutoTrigger').prop('checked', !!s.publicChannelAutoTrigger);
+  $('#sg_publicChannelInjectContext').prop('checked', s.publicChannelInjectContext !== false);
+  $('#sg_publicChannelAutoEvery').val(s.publicChannelAutoEvery || 3);
+  $('#sg_publicChannelReadFloors').val(s.publicChannelReadFloors || 5);
+  $('#sg_publicChannelBatchSize').val(s.publicChannelBatchSize || DEFAULT_PUBLIC_CHANNEL_BATCH_SIZE);
+  $('#sg_publicChannelHistoryLimit').val(s.publicChannelHistoryLimit || DEFAULT_PUBLIC_CHANNEL_HISTORY_LIMIT);
+  $('#sg_publicChannelStyle').val(String(s.publicChannelStyle || 'funny'));
+  $('#sg_publicChannelProvider').val(String(s.publicChannelProvider || 'st'));
+  $('#sg_publicChannelTemperature').val(s.publicChannelTemperature ?? 0.9);
+  $('#sg_publicChannelCustomEndpoint').val(String(s.publicChannelCustomEndpoint || ''));
+  $('#sg_publicChannelCustomApiKey').val(String(s.publicChannelCustomApiKey || ''));
+  $('#sg_publicChannelCustomMaxTokens').val(s.publicChannelCustomMaxTokens || 2048);
+  $('#sg_publicChannelCustomTopP').val(s.publicChannelCustomTopP ?? 0.95);
+  $('#sg_publicChannelCustomStream').prop('checked', !!s.publicChannelCustomStream);
+  $('#sg_publicChannelWriteToWorldbook').prop('checked', s.publicChannelWriteToWorldbook !== false);
+  $('#sg_publicChannelWorldInfoComment').val(String(s.publicChannelWorldInfoComment || '[mvu_plot]公共频道'));
+  $('#sg_publicChannelSystemPrompt').val(String(s.publicChannelSystemPrompt || DEFAULT_PUBLIC_CHANNEL_SYSTEM_PROMPT));
+  $('#sg_publicChannelUserTemplate').val(String(s.publicChannelUserTemplate || DEFAULT_PUBLIC_CHANNEL_USER_TEMPLATE));
+  $('#sg_publicChannelCustomBlock').toggle(String(s.publicChannelProvider || 'st') === 'custom');
+  if (Array.isArray(s.publicChannelCustomModelsCache) && s.publicChannelCustomModelsCache.length) {
+    fillPublicChannelModelSelect(s.publicChannelCustomModelsCache, s.publicChannelCustomModel);
+  }
   $('#sg_parallelCustomBlock').toggle(s.parallelWorldProvider === 'custom');
   if (Array.isArray(s.parallelWorldCustomModelsCache) && s.parallelWorldCustomModelsCache.length) {
     fillParallelWorldModelSelect(s.parallelWorldCustomModelsCache, s.parallelWorldCustomModel);
@@ -18639,6 +19469,8 @@ function pullUiToSettings() {
   s.structuredEntriesEvery = clampInt($('#sg_structuredEntriesEvery').val(), 1, 200, s.structuredEntriesEvery || 1);
   s.structuredEntriesReadFloors = clampInt($('#sg_structuredEntriesReadFloors').val(), 1, 200, s.structuredEntriesEvery || 1);
   s.structuredEntriesCountMode = String($('#sg_structuredEntriesCountMode').val() || 'assistant');
+  s.structuredReadStatData = $('#sg_structuredReadStatData').is(':checked');
+  s.structuredStatVarName = String($('#sg_structuredStatVarName').val() || 'stat_data').trim() || 'stat_data';
   s.structuredEntryContentFormat = String($('#sg_structuredEntryContentFormat').val() || 'text');
   s.structuredWorldbookEnabled = $('#sg_structuredWorldbookEnabled').is(':checked');
   s.structuredWorldbookMode = String($('#sg_structuredWorldbookMode').val() || 'active');
@@ -18873,6 +19705,26 @@ function pullUiToSettings() {
   s.parallelWorldUserTemplate = String($('#sg_parallelWorldUserTemplate').val() || DEFAULT_PARALLEL_WORLD_USER_TEMPLATE);
   s.parallelWorldClock = String($('#sg_parallelWorldClock').val() || '').trim();
   s.parallelWorldReadFloors = clampInt($('#sg_parallelWorldReadFloors').val(), 1, 50, s.parallelWorldReadFloors || 5);
+  s.publicChannelEnabled = $('#sg_publicChannelEnabled').is(':checked');
+  s.publicChannelAutoTrigger = $('#sg_publicChannelAutoTrigger').is(':checked');
+  s.publicChannelInjectContext = $('#sg_publicChannelInjectContext').is(':checked');
+  s.publicChannelAutoEvery = clampInt($('#sg_publicChannelAutoEvery').val(), 1, 50, s.publicChannelAutoEvery || 3);
+  s.publicChannelReadFloors = clampInt($('#sg_publicChannelReadFloors').val(), 1, 50, s.publicChannelReadFloors || 5);
+  s.publicChannelBatchSize = clampInt($('#sg_publicChannelBatchSize').val(), 1, 50, s.publicChannelBatchSize || DEFAULT_PUBLIC_CHANNEL_BATCH_SIZE);
+  s.publicChannelHistoryLimit = clampInt($('#sg_publicChannelHistoryLimit').val(), 20, 500, s.publicChannelHistoryLimit || DEFAULT_PUBLIC_CHANNEL_HISTORY_LIMIT);
+  s.publicChannelStyle = String($('#sg_publicChannelStyle').val() || s.publicChannelStyle || 'funny');
+  s.publicChannelProvider = String($('#sg_publicChannelProvider').val() || s.publicChannelProvider || 'st');
+  s.publicChannelTemperature = clampFloat($('#sg_publicChannelTemperature').val(), 0, 2, s.publicChannelTemperature ?? 0.9);
+  s.publicChannelCustomEndpoint = String($('#sg_publicChannelCustomEndpoint').val() || '').trim();
+  s.publicChannelCustomApiKey = String($('#sg_publicChannelCustomApiKey').val() || '').trim();
+  s.publicChannelCustomModel = String($('#sg_publicChannelCustomModel').val() || s.publicChannelCustomModel || 'gpt-4o-mini');
+  s.publicChannelCustomMaxTokens = clampInt($('#sg_publicChannelCustomMaxTokens').val(), 128, 200000, s.publicChannelCustomMaxTokens || 2048);
+  s.publicChannelCustomTopP = clampFloat($('#sg_publicChannelCustomTopP').val(), 0, 1, s.publicChannelCustomTopP ?? 0.95);
+  s.publicChannelCustomStream = $('#sg_publicChannelCustomStream').is(':checked');
+  s.publicChannelWriteToWorldbook = $('#sg_publicChannelWriteToWorldbook').is(':checked');
+  s.publicChannelWorldInfoComment = String($('#sg_publicChannelWorldInfoComment').val() || '[mvu_plot]公共频道').trim() || '[mvu_plot]公共频道';
+  s.publicChannelSystemPrompt = String($('#sg_publicChannelSystemPrompt').val() || DEFAULT_PUBLIC_CHANNEL_SYSTEM_PROMPT);
+  s.publicChannelUserTemplate = String($('#sg_publicChannelUserTemplate').val() || DEFAULT_PUBLIC_CHANNEL_USER_TEMPLATE);
 }
 
 function openModal() {
@@ -19012,12 +19864,25 @@ function setupEventListeners() {
         if (s.parallelWorldEnabled && s.parallelWorldAutoTrigger) {
           const ctxNow = SillyTavern.getContext();
           const chatNow = Array.isArray(ctxNow.chat) ? ctxNow.chat : [];
-          const floorNow = computeFloorCount(chatNow, 'assistant');
+          const mode = String(s.structuredEntriesCountMode || s.summaryCountMode || 'assistant');
+          const floorNow = computeFloorCount(chatNow, mode, true, true);
           const pwData = getParallelWorldData();
           if (floorNow > 0 && !Number(pwData.lastRunFloor || 0)) {
             pwData.lastRunFloor = floorNow;
             await setParallelWorldData(pwData);
             console.log('[StoryGuide] Initialized parallel world lastRunFloor to', floorNow, 'for existing chat');
+          }
+        }
+        if (s.publicChannelEnabled && s.publicChannelAutoTrigger) {
+          const ctxNow = SillyTavern.getContext();
+          const chatNow = Array.isArray(ctxNow.chat) ? ctxNow.chat : [];
+          const mode = String(s.structuredEntriesCountMode || s.summaryCountMode || 'assistant');
+          const floorNow = computeFloorCount(chatNow, mode, true, true);
+          const pcData = getPublicChannelData();
+          if (floorNow > 0 && !Number(pcData.lastRunFloor || 0)) {
+            pcData.lastRunFloor = floorNow;
+            await setPublicChannelData(pcData);
+            console.log('[StoryGuide] Initialized public channel lastRunFloor to', floorNow, 'for existing chat');
           }
         }
       } catch (e) {
